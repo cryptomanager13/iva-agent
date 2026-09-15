@@ -1052,6 +1052,27 @@ def main():
                   'target': 'attachments/../../attachment-escape.custombin'}
              ], str(escaped_attachment_graph['broken_link_list']))
 
+        intermediate_symlink_vault = tmp / 'intermediate-symlink-attachment-vault'
+        (intermediate_symlink_vault / 'attachments').mkdir(parents=True)
+        (intermediate_symlink_vault / 'cards/notes').mkdir(parents=True)
+        (intermediate_symlink_vault / 'stored').mkdir()
+        (intermediate_symlink_vault / 'stored/brief.custombin').write_bytes(b'fixture')
+        (intermediate_symlink_vault / 'attachments/2026-09-15').symlink_to(
+            '../stored', target_is_directory=True
+        )
+        (intermediate_symlink_vault / 'cards/notes/intermediate-symlink.md').write_text(
+            "---\ntype: note\ndescription: Intermediate symlink attachment\n---\n# Symlink\n"
+            "![[attachments/2026-09-15/brief.custombin]]\n"
+        )
+        intermediate_symlink_graph = build_graph(
+            intermediate_symlink_vault, health_schema, today=date(2026, 8, 5)
+        )
+        test("attachments through an intermediate symlink remain broken",
+             intermediate_symlink_graph['broken_link_list'] == [
+                 {'source': 'cards/notes/intermediate-symlink',
+                  'target': 'attachments/2026-09-15/brief.custombin'}
+             ], str(intermediate_symlink_graph['broken_link_list']))
+
         # graph orphans
         code, out, _ = run([py, str(SCRIPTS_DIR / 'graph.py'), 'orphans',
                             str(vault_dir), str(schema_path)])

@@ -121,9 +121,14 @@ def expected_future_link(source: str, target: str, today: date | None = None) ->
 def _is_existing_attachment(vault_dir: Path, target: str) -> bool:
     """Return whether an attachment is a regular file contained by the vault."""
     vault_root = vault_dir.resolve()
-    candidate = vault_dir / target
-    if candidate.is_symlink():
+    target_path = Path(target)
+    if target_path.is_absolute() or any(part in {".", ".."} for part in target_path.parts):
         return False
+    candidate = vault_root
+    for part in target_path.parts:
+        candidate /= part
+        if candidate.is_symlink():
+            return False
     try:
         candidate.resolve().relative_to(vault_root)
     except ValueError:
