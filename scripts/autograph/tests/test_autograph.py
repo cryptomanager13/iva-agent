@@ -306,6 +306,7 @@ def create_daily_dir(base_dir: Path) -> Path:
 
 # ─── MAIN ─────────────────────────────────────────────────
 def main():
+    """Exercise Autograph graph and command-line behavior with temporary fixtures."""
     tmp = Path(tempfile.mkdtemp(prefix="autograph_test_"))
     try:
         vault_dir = create_vault(tmp)
@@ -1028,6 +1029,28 @@ def main():
                  {'source': 'cards/notes/attachment',
                   'target': 'attachments/2026-09-15/missing.custombin'}
              ], str(attachment_graph['broken_link_list']))
+
+        attachment_escape = tmp / 'attachment-escape.custombin'
+        attachment_escape.write_bytes(b'outside vault')
+        escaped_attachment = attachment_vault / 'attachments/2026-09-15/escaped.custombin'
+        escaped_attachment.symlink_to(attachment_escape)
+        (attachment_vault / 'cards/notes/escaped-attachment.md').write_text(
+            "---\ntype: note\ndescription: Escaped attachment reference\n---\n# Escaped\n"
+            "![[attachments/2026-09-15/escaped.custombin]] "
+            "![[attachments/../../attachment-escape.custombin]]\n"
+        )
+        escaped_attachment_graph = build_graph(
+            attachment_vault, health_schema, today=date(2026, 8, 5)
+        )
+        test("symlinked and out-of-vault attachments remain broken",
+             escaped_attachment_graph['broken_link_list'] == [
+                 {'source': 'cards/notes/attachment',
+                  'target': 'attachments/2026-09-15/missing.custombin'},
+                 {'source': 'cards/notes/escaped-attachment',
+                  'target': 'attachments/2026-09-15/escaped.custombin'},
+                 {'source': 'cards/notes/escaped-attachment',
+                  'target': 'attachments/../../attachment-escape.custombin'}
+             ], str(escaped_attachment_graph['broken_link_list']))
 
         # graph orphans
         code, out, _ = run([py, str(SCRIPTS_DIR / 'graph.py'), 'orphans',
