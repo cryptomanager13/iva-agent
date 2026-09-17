@@ -103,6 +103,7 @@ void test("add stores a one-time reminder and answers with the owner-zone time",
   if (schedule.kind !== "at") assert.fail("expected an at schedule");
   assert.equal(schedule.atMs, NOW + 1_800_000);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
+    "chat",
     "createdAt",
     "delivered",
     "error",
