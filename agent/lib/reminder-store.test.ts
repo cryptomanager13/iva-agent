@@ -31,7 +31,6 @@ const {
   fireDue,
   list,
   recordDelivery,
-  recordWakeError,
   reminderFile,
   remove,
   sweepFired,
@@ -215,7 +214,7 @@ test("строка помнит чат и тему, а строка без по�
   );
 });
 
-test("факт доставки и сбой пробуждения живут в одной строке и не стирают друг друга", async () => {
+test("факт доставки живёт в строке своего срабатывания", async () => {
   const now = 9_000_000;
   await add({
     id: "one",
@@ -226,26 +225,14 @@ test("факт доставки и сбой пробуждения живут в
 
   const [fired] = await list();
   assert.ok(fired);
-  await recordWakeError("one", {
-    firedAt: fired.firedAt,
-    error: "agent wake failed: no bearer",
-  });
-  let [stored] = await list();
-  assert.equal(stored.error, "agent wake failed: no bearer");
-  assert.equal(stored.delivered, null, "пробуждение не трогает факт доставки");
-
   await recordDelivery("one", {
     firedAt: fired.firedAt,
     delivered: true,
     error: null,
   });
-  [stored] = await list();
+  let [stored] = await list();
   assert.equal(stored.delivered, true);
-  assert.equal(
-    stored.error,
-    "agent wake failed: no bearer",
-    "успешная отправка не стирает чужую причину",
-  );
+  assert.equal(stored.error, null);
 
   await recordDelivery("one", {
     firedAt: fired.firedAt,
@@ -258,24 +245,8 @@ test("факт доставки и сбой пробуждения живут в
   assert.equal(stored.status, "fired");
   assert.equal(stored.firedAt, now);
 
-  // Провал доставки — главная причина: сбой пробуждения её не перекрывает.
-  await recordWakeError("one", {
-    firedAt: fired.firedAt,
-    error: "agent wake failed: no bearer",
-  });
-  [stored] = await list();
-  assert.equal(
-    stored.error,
-    "400 chat not found",
-    "в строке остаётся причина, по которой не дошёл текст",
-  );
-
   await assert.rejects(
     recordDelivery("nope", { firedAt: null, delivered: true, error: null }),
-    /nope/,
-  );
-  await assert.rejects(
-    recordWakeError("nope", { firedAt: null, error: "boom" }),
     /nope/,
   );
 });
@@ -299,12 +270,6 @@ test("результат старого срока не переписывает
     { firedAt: first.firedAt, delivered: false, error: "late failure" },
     { log },
   );
-  await recordWakeError(
-    "cron",
-    { firedAt: first.firedAt, error: "late wake failure" },
-    { log },
-  );
-
   const [row] = await list();
   assert.equal(row?.firedAt, second.firedAt);
   assert.equal(
@@ -313,13 +278,8 @@ test("результат старого срока не переписывает
     "старый провал не тронул факт нового срока",
   );
   assert.equal(row?.error, null, "старая причина не тронула факт нового срока");
-  assert.equal(
-    lines.length,
-    2,
-    "оба отброшенных результата объяснены в журнале",
-  );
+  assert.equal(lines.length, 1, "отброшенный результат объяснён в журнале");
   assert.match(lines[0], /ignored/u);
-  assert.match(lines[1], /ignored/u);
 });
 
 test("сработавшая разовая строка живёт сутки и убирается тиком", async () => {
@@ -425,7 +385,11 @@ test("файл версии 1 переводится: срок и текст ж�
   assert.equal(cron.error, "400 chat not found");
   assert.equal(cron.createdAt > 0, true);
   // После первой мутации файл уже версии 2.
-  await recordWakeError("old-cron", { firedAt: cron.firedAt, error: "wake" });
+  await recordDelivery("old-cron", {
+    firedAt: cron.firedAt,
+    delivered: false,
+    error: "wake",
+  });
   assert.equal(table().schemaVersion, REMINDER_SCHEMA_VERSION);
 });
 

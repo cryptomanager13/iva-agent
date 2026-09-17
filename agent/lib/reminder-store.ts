@@ -2,8 +2,8 @@
 //
 // Взятие строки — один атомарный переход pending → fired: повторное срабатывание
 // невозможно по построению, аренды и счётчиков попыток нет. Всё, что происходит после
-// перехода, — две независимые ветки ребёнка scripts/reminders/fire.ts (отправка текста и
-// пробуждение агента); они только дописывают факт в ту же строку. Повторяющаяся строка тем
+// перехода, — один ход ребёнка scripts/reminders/fire.ts (агент выполняет текст напоминания,
+// код отправляет его ответ); он только дописывает факт в ту же строку. Повторяющаяся строка тем
 // же переходом получает следующий срок от croner и остаётся pending — факт последнего
 // срабатывания при ней.
 //
@@ -51,7 +51,7 @@ export interface Reminder {
   firedAt: number | null;
   /** Дошёл ли текст до чата владельца; null — ребёнок ещё не сказал. */
   delivered: boolean | null;
-  /** Причина последнего сбоя — доставки или пробуждения агента. */
+  /** Причина последнего сбоя — отправки или хода агента. */
   error: string | null;
 }
 export type ReminderInput = {
@@ -544,8 +544,8 @@ export async function fireDue(
 }
 
 /**
- * Факт отправки текста. Успех не стирает чужую причину (провал пробуждения агента,
- * записанный второй веткой), а провал отправки называет свою. Результат принимается
+ * Факт отправки. Успех не стирает уже записанную причину, провал отправки называет
+ * свою (она и есть главная для владельца). Результат принимается
  * только за своё срабатывание: firedAt результата обязан совпасть с firedAt строки,
  * иначе запоздалый ответ старого срока переписал бы факт нового — такой результат
  * уходит в журнал и отбрасывается. `delivered: null` — факта нет (текст мог уйти, а
@@ -574,34 +574,6 @@ export async function recordDelivery(
     }
     row.delivered = outcome.delivered;
     if (outcome.error !== null) row.error = outcome.error;
-    await saveTable(file, rows);
-    return structuredClone(row);
-  });
-}
-
-/**
- * Причина сбоя пробуждения агента: факт доставки не трогает, его пишет своя ветка. Провал
- * доставки она не перекрывает: он и есть главная причина для владельца, а сбой хода остаётся
- * в журнале. Как и факт отправки, принимается только за своё срабатывание.
- */
-export async function recordWakeError(
-  id: string,
-  outcome: { readonly firedAt: number | null; readonly error: string },
-  options: ReminderRecordOptions = {},
-): Promise<Reminder> {
-  const file = reminderFile();
-  return mutate(file, async () => {
-    const rows = await loadTable(file);
-    const row = rows.find((candidate) => candidate.id === id);
-    if (row === undefined)
-      fail(file, `reminder ${JSON.stringify(id)} not found`);
-    if (row.firedAt !== outcome.firedAt) {
-      recordLog(options)(
-        `reminders: ${id} wake error for firedAt=${outcome.firedAt} ignored: current firedAt=${row.firedAt}`,
-      );
-      return structuredClone(row);
-    }
-    if (row.delivered !== false) row.error = outcome.error;
     await saveTable(file, rows);
     return structuredClone(row);
   });

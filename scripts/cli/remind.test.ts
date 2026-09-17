@@ -143,7 +143,7 @@ void test("a failed agent turn sends the raw Reminder once", async () => {
   assert.equal(remind.prompts.length, 1);
   assert.match(
     remind.prompts[0],
-    /one-time reminder fired[\s\S]*Do not send anything yourself/u,
+    /Reminder fired[\s\S]*Do not send anything yourself/u,
   );
   assert.deepEqual(remind.sent, [
     ["bot-token", "555", "⏰ Позвонить врачу", { retryTransient: true }],

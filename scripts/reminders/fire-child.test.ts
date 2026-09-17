@@ -2,7 +2,8 @@
 // ветку как обычные тесты: настоящий отсутствующий nodeBin даёт понятную причину
 // «failed to start … ENOENT» в строке; два настоящих процесса берут одну разовую
 // строку ровно раз; убийство после внешнего эффекта строку не повторяет; настоящий
-// ребёнок запускается без .env и доставляет текст через локальную заглушку Telegram.
+// ребёнок запускается без .env и доставляет текст через локальную заглушку Telegram
+// (eve на этом порту нет, поэтому уходит страховка — текст напоминания как есть).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
@@ -197,7 +198,7 @@ void test("the real fire child runs without .env and records a stubbed Telegram 
   );
   const [row] = await list();
   assert.equal(row?.delivered, true);
-  assert.match(String(row?.error), /agent wake failed/u);
+  assert.match(String(row?.error), /agent turn failed/u);
   const calls = readFileSync(sendLog, "utf8").trim().split("\n");
   assert.equal(calls.length, 1);
   assert.match(calls[0], /чистый сквозной текст/u);

@@ -77,7 +77,7 @@ export function createRemindCommand(
     let failure: string | undefined;
     try {
       const { tr } = await import("#lib/i18n.ts");
-      const prompt = reminderPrompt(text, tr);
+      const prompt = reminderPrompt({ text }, tr);
       const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const runner =
         dependencies.runAgentTurn ??

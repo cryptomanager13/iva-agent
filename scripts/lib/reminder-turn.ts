@@ -55,52 +55,41 @@ export class ReminderTurnError extends Error {}
 export const REMINDER_TURN_INACTIVITY_MS = 180_000;
 export const REMINDER_TURN_HARD_TIMEOUT_MS = 8 * 60_000;
 
-export function reminderPrompt(
-  text: string,
-  tr: (en: string, ru: string) => string,
-  scheduledAt?: string,
-): string {
-  const opening =
-    scheduledAt === undefined
-      ? `A one-time reminder fired: ${JSON.stringify(text)}. `
-      : `A reminder set for ${scheduledAt} fired: ${JSON.stringify(text)}. `;
-  return (
-    opening +
-    "Check whether it is still relevant; the task may already be closed, so inspect tasks. " +
-    "Formulate a short reminder message for the user and return it as the final text of this turn. " +
-    `Return the text ${writtenInLanguage(tr)}. ` +
-    "Do not send anything yourself: no rich messages and no Telegram tools. " +
-    "Only the finished reminder text, no preamble."
-  );
+/** Заголовок промпта: номер строки и срок есть у срабатывания и нет у разового `iva remind`. */
+function firedLine(fire: ReminderFire): string {
+  const number = fire.id === undefined ? "" : ` #${fire.id}`;
+  const due =
+    fire.scheduledAt === undefined ? "" : `, due: ${fire.scheduledAt}`;
+  return `Reminder${number} fired (text: ${JSON.stringify(fire.text)}${due}).`;
 }
 
+export type ReminderFire = {
+  /** Номер строки напоминания; разовое `iva remind <текст>` строки не имеет. */
+  readonly id?: string;
+  readonly text: string;
+  /** Срок в зоне владельца, как его видел пользователь. */
+  readonly scheduledAt?: string;
+};
+
 /**
- * Промпт пробуждения после срабатывания: агент узнаёт, что код уже отправил текст, и
- * своим ходом закрывает единственный оставшийся случай - текст не дошёл. Решение покоится
- * на факте из строки (delivered/error), поэтому промпт велит сперва посмотреть список.
+ * Промпт срабатывания: текст напоминания — инструкция самой себе, и в срок агент выполняет
+ * её свежей сессией с инструментами. Финальный текст хода отправляет код, поэтому промпт
+ * запрещает отправлять что-либо самому и ставить новые напоминания этим же ходом.
  */
-export function firePrompt(
-  fire: {
-    readonly id: string;
-    readonly text: string;
-    readonly scheduledAt: string;
-  },
+export function reminderPrompt(
+  fire: ReminderFire,
   tr: (en: string, ru: string) => string,
 ): string {
-  return tr(
-    `Reminder #${fire.id} fired (text: ${JSON.stringify(fire.text)}, due: ${fire.scheduledAt}). ` +
-      'The code is already sending that text to the owner. Check with remind {action: "list"} whether it was delivered. ' +
-      "If delivered - do nothing and return an empty answer. " +
-      "If it was not delivered - remind the owner yourself: " +
-      "write a short message from your own context (look at tasks if that helps) and say that delivery broke and why it did (error from the row). " +
-      "Return that message as the final text of this turn; the code will send it. " +
-      "Do not send anything yourself: no rich messages and no Telegram tools.",
-    `Сработало напоминание #${fire.id} (текст: ${JSON.stringify(fire.text)}, срок: ${fire.scheduledAt}). ` +
-      'Код уже отправляет этот текст владельцу. Проверь через remind {action: "list"}, доставлен ли он. ' +
-      "Доставлен - ничего не делай и верни пустой ответ. " +
-      "Не доставлен - напомни владельцу сама: напиши короткое сообщение по контексту " +
-      "(загляни в задачи, если это уместно) и скажи, что доставка сломалась и почему (error из строки). " +
-      "Верни это сообщение финальным текстом хода; код отправит его. Сам ничего не отправляй.",
+  return (
+    `${firedLine(fire)} ` +
+    "Do what it says, with your tools, and return the result as the final text of this turn: " +
+    "the code will send that text to the chat where the reminder was asked for. " +
+    "If it is a plain reminder with nothing to do, return the short reminder text. " +
+    "The answer is never empty. " +
+    `Write it ${writtenInLanguage(tr)}. ` +
+    "Do not send anything yourself: no rich messages and no Telegram tools. " +
+    'Do not set new reminders in this turn (remind {action: "add"} is forbidden); ' +
+    "list and remove are allowed."
   );
 }
 
