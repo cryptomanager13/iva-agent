@@ -161,7 +161,16 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.4.3 · 14.09.2026 — expand the latest releases</b></summary>
+<summary><b>v0.4.4 · 17.09.2026 — expand the latest releases</b></summary>
+
+### 17.09.2026
+
+#### v0.4.4
+
+- ⏰ **A reminder is an instruction Iva gives her future self**: at the due minute the text of the reminder is the prompt of one fresh turn with tools, not a line to read back — "in 3 minutes find the news and send it" arrives as the news, not as its own wording. A turn that could not run, failed or came back empty still delivers: the code sends your text verbatim and names the cause in the row.
+- ⏰ **A reminder comes back to the chat it was asked in**: the row remembers the chat and the topic of the turn, so a reminder set in a group topic lands in that topic instead of a private chat; old rows and requests that did not come from Telegram still go to the owner's chat. `iva doctor` stopped claiming "the dispatcher has not ticked yet" — it was reading the pulse from the wrong folder.
+- 🔁 **`/update --force` works from the chat too**: the word after `/update` is read now, so the running build can be rebuilt from Telegram exactly as `iva update --force` does on the server — the way out of a broken edit in Iva's own code. The flag travels in the request file, so a restarted update rebuilds as well.
+- 🩺 **The doctor names the cure for stuck workflows**: "running count 7 exceeds 5" now says in the same line that such runs are stale rather than live, and that `iva reset` quarantines them and restarts the services; memory is left alone.
 
 ### 14.09.2026
 
@@ -193,18 +202,6 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - 🧩 **Your rules live beside the bundled persona and load every turn**: markdown files in `data/custom/agent/instructions/` reach the prompt live without a rebuild, so a behavior rule written into `rules.md` (with `write_file`, after your confirmation) works at once; the old `instructions.md` replacement is obsolete, and `iva doctor` shows the rule count and warns when it overruns the limit.
 - 🧭 **The vault directory is computed by one formula everywhere**: file tools, media, the diary, nightly memory, the CLI, the menu, the build and the installer call a single resolver. An empty value or stray spaces is now a clear error naming the variable instead of a silent directory swap, a relative path resolves against the caller's base, and a bad setting reaches the user as one line, not a stack trace.
 - 🧩 **Iva runs on eve 0.51.1** (0.4.0 shipped 0.47.3): the local patch is ported and rebuilt for the new runtime.
-
-### 01.09.2026
-
-#### v0.4.0
-
-- 🧭 **Iva now uses eve's session API**: messages address the active session by `sessionId`, so Stop, `/stop`, and `/new` no longer depend on the old continuation mechanism. The update resets conversation contexts; your vault memory stays intact.
-- 🚦 **New messages queue by default**: `/menu` can select “Queue”, which waits for the current reply, or “Interrupt”, which sends the message into the active reply. The choice survives a restart.
-- 🧠 **Nightly Rollup and plugins run on the new runtime**: manual Rollup uses the active session, code plugins build with the same eve version, and `web_fetch` reports the actual HTTP status instead of inferring it from error text.
-- 🛟 **Update rollback protects local changes more carefully**: a recovery ref is removed only after a verified result, never deletes foreign state, and stays available after an ambiguous verification failure.
-- ⚡ **Iva answers within a second of an update**: every update now quarantines the workflow store and expires open sessions in place — no more silence for up to 30 minutes, and a stuck "Working…" clears itself.
-- 🩹 **The Codex provider (ChatGPT subscription) works again**: every turn was failing with HTTP 400 because eve 0.47 injects a `safety_identifier` field for `openai/*` models; it's stripped now, so chat and nightly Rollups on Codex run.
-- 🔁 **Lost-message notices are honest now**: a message Iva couldn't accept used to surface once a week; now it repeats every 10 minutes until you see it.
 
 </details>
 
