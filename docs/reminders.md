@@ -27,10 +27,11 @@ Everything is read in your timezone — the one Iva is configured with, not the 
 
 ## What happens at the time
 
-Two things at once, and neither waits for the other:
+Your reminder text is an instruction Iva gives her future self. At the due minute she wakes in a fresh session that knows nothing about the conversation you asked in, does what the text says — with her tools, so «find the news and send it» really goes and finds them — and the code sends the final text of that turn back to the chat and topic where you asked. One turn, one message.
 
-- the code sends your text back to the chat and topic where you asked for it, exactly as you dictated it — no model involved, so it works even when the model provider is down;
-- Iva wakes up, checks the delivery with the reminder tool, and if the text did not go out she writes the message herself and says what broke.
+That is why the text is written to stand on its own: «remind me about the standup» and «collect yesterday's tasks and list what is still open» both work, but «do that thing we discussed» will not — by then the discussion is gone.
+
+If the turn cannot run at all (the model provider is down, the agent breaks, the answer comes back empty), the code sends your text back to you exactly as you dictated it, and the row says what broke. So a reminder always arrives, with or without the model.
 
 Nothing repeats. A row fires once: the moment it fires it is marked, and a repeating row moves on to its next time. There is no retry ladder, no window that removes a reminder hours later, and no warning per failure — the fact of the firing stays with the row: `fired_at`, `delivered` and the reason in `error`.
 
@@ -42,8 +43,8 @@ You can also just ask in the chat: she lists the same rows with their ids, the n
 
 ## When something breaks
 
-- **The text did not go out.** The row shows `delivered: false` and the reason in `error`, and Iva's own message says the delivery broke and why. Fix the chat settings or the token, then ask again — a one-time reminder has already fired, so put a new one.
-- **The agent turn could not run.** Your text still goes out; the reason is in `error` and in the journal (`journalctl --user -u iva.service | grep reminders`).
+- **Nothing arrived.** The row shows `delivered: false` and the reason in `error`. Fix the chat settings or the token, then ask again — a one-time reminder has already fired, so put a new one.
+- **The agent turn could not run.** Your text still arrives, verbatim; the reason is in `error` and in the journal (`journalctl --user -u iva.service | grep reminders`).
 - **The dispatcher is not ticking.** The list warns that the reminder is stored but will not fire, and `iva doctor` says the same by the pulse file. It also lists every reminder that fired in the last day and did not go out.
 
 ## What Iva no longer does
@@ -55,4 +56,4 @@ She used to be able to build her own timer: a transient system unit, a `crontab`
 - **Back to where you asked.** A reminder returns to the chat and forum topic it was created in; another person as the recipient is not supported. Reminders created before 0.4.4 go to the owner chat from the settings.
 - **No more often than every ten minutes.** A repeating schedule tighter than that is refused: that is a monitoring job, not a reminder.
 - **Your timezone, one of them.** Everything is computed in the timezone Iva is configured with.
-- **A reminder is a message, not a task.** It fires and it is done (or, if repeating, moves to the next occurrence).
+- **A reminder is one turn, not a project.** It fires, Iva does what the text says in that single turn and answers once (or, if repeating, moves to the next occurrence). She sets no new reminders in it: that turn may list and remove them, not add.
