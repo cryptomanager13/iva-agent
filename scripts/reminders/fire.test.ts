@@ -189,6 +189,92 @@ void test("отправка упала: delivered=false с ответом Telegr
   assert.equal(row?.error, "400 chat not found");
 });
 
+void test("оба шва сломаны: в строке причина хода и отказ Telegram", async () => {
+  await firedRow();
+  const { calls, send } = makeSend([
+    { ok: false, fellBack: false, error: "400 chat not found" },
+  ]);
+  const { runTurn } = turn("failed", "turn timed out");
+  const lines: string[] = [];
+
+  assert.equal(
+    await runReminderFire(
+      "r1",
+      deps({
+        send,
+        runTurn,
+        log: (...args: unknown[]) => lines.push(args.join(" ")),
+      }),
+    ),
+    0,
+  );
+
+  assert.equal(calls[0].text, "позвонить в клинику");
+  const [row] = await list();
+  assert.equal(row?.delivered, false);
+  assert.match(String(row?.error), /agent turn failed: turn timed out/u);
+  assert.match(String(row?.error), /400 chat not found/u);
+  assert.ok(
+    lines.some((line) => /r1 agent turn failed: turn timed out/u.test(line)),
+    lines.join("\n"),
+  );
+});
+
+void test("запись факта упала: отправка состоялась, сбой виден в журнале", async () => {
+  await firedRow();
+  const { calls, send } = makeSend();
+  const { runTurn } = turn("completed", "готово: новости отправлены");
+  const lines: string[] = [];
+
+  assert.equal(
+    await runReminderFire(
+      "r1",
+      deps({
+        send,
+        runTurn,
+        recordDelivery: () => Promise.reject(new Error("store is locked")),
+        log: (...args: unknown[]) => lines.push(args.join(" ")),
+      }),
+    ),
+    0,
+  );
+
+  assert.equal(calls.length, 1, "отправка состоялась");
+  assert.ok(
+    lines.some((line) =>
+      /r1 delivery fact not recorded: store is locked/u.test(line),
+    ),
+    lines.join("\n"),
+  );
+  const [row] = await list();
+  assert.equal(row?.delivered, null, "факт в строку не лёг");
+});
+
+void test("таблица не читается: ребёнок выходит с кодом 1", async () => {
+  await firedRow();
+  const { calls, send } = makeSend();
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => errors.push(args.join(" "));
+  try {
+    assert.equal(
+      await runReminderFire(
+        "r1",
+        deps({
+          send,
+          list: () => Promise.reject(new Error("table is broken")),
+        }),
+      ),
+      1,
+    );
+  } finally {
+    console.error = original;
+  }
+
+  assert.equal(calls.length, 0, "без строки отправлять нечего");
+  assert.match(errors.join("\n"), /r1: table is broken/u);
+});
+
 void test("без токена или чата ход не запускается, а причина оседает в строке", async () => {
   await firedRow();
   const { calls, send } = makeSend();

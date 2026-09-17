@@ -187,6 +187,19 @@ async function recordFact(
   }
 }
 
+/** Провал хода виден в журнале, а не только в строке: docs/reminders.md обещает его там. */
+function noteTurnFailure(row: Reminder, outcome: Outcome, deps: Wiring): void {
+  if (outcome.error !== null) deps.log(`reminders: ${row.id} ${outcome.error}`);
+}
+
+/** Сломаться могли оба шва: в строку идут обе причины, ни одна не теряется. */
+function reason(outcome: Outcome, sent: Sent): string | null {
+  const parts = [outcome.error, sent.error].filter(
+    (part): part is string => part !== null,
+  );
+  return parts.length === 0 ? null : parts.join("; ");
+}
+
 /** Ход, отправка, факт. Без адресата ход не запускается: жечь токены некуда. */
 async function fireRow(row: Reminder, deps: Wiring): Promise<void> {
   const routed = route(row, deps);
@@ -201,8 +214,9 @@ async function fireRow(row: Reminder, deps: Wiring): Promise<void> {
     return;
   }
   const outcome = await agentOutcome(row, deps);
+  noteTurnFailure(row, outcome, deps);
   const sent = await deliver(row, routed.target, outcome.text, deps);
-  await recordFact(row, sent, sent.error ?? outcome.error, deps);
+  await recordFact(row, sent, reason(outcome, sent), deps);
 }
 
 /** Строка срабатывания или код выхода: чужой id и нечитаемая таблица заканчивают ребёнка. */
