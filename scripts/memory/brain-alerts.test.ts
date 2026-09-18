@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CORE_CAP } from "#lib/core-cap.ts";
+import { createCliMain } from "../cli/main.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -562,6 +563,7 @@ function runBrainWithoutTree(
     health?: number[];
     healthBytes?: Uint8Array;
     corruptAlertLastSentAt?: number;
+    language?: "ru" | "en";
   } = {},
 ): {
   code: number | null;
@@ -592,7 +594,10 @@ function runBrainWithoutTree(
     "notice-policy.ts",
     "notice.ts",
     "notification-chat.ts",
+    "telegram-buttons.ts",
     "timezone.ts",
+    "update-channel.ts",
+    "update-check.ts",
     "vault-boundary.ts",
   ])
     copyFileSync(
@@ -671,7 +676,7 @@ function runBrainWithoutTree(
       ASSISTANT_VAULT_DIR: vault,
       ASSISTANT_DATA_DIR: dataDir,
       ASSISTANT_TIMEZONE: "UTC",
-      AGENT_LANGUAGE: "ru",
+      AGENT_LANGUAGE: options.language ?? "ru",
     },
   });
   const healthPath = join(vault, ".graph/health-history.json");
@@ -710,6 +715,30 @@ test("a broken agent/ does not erase the throttle of what it could not check", (
     "number",
     "with no health history there was no comparison, so nothing may be forgotten",
   );
+});
+
+// Совет владельцу обязан называть команду, которая есть: `iva repair` годами стоял в этом
+// алерте, а такой команды в CLI не было. Каждая `iva <имя>` в тексте — ключ таблицы CLI,
+// каждый скрипт по ссылке `…/main/<файл>` — файл в корне репо.
+test("the broken-tree alert names only commands that exist", (t) => {
+  const commands = createCliMain(ROOT).commands;
+  for (const language of ["ru", "en"] as const) {
+    const { stderr } = runBrainWithoutTree(t, { language });
+    const alert = stderr
+      .split("\n")
+      .find((line) => /Файлы самой Ивы|Iva's own files/u.test(line));
+    assert.ok(alert, `${language}: the broken-tree alert is missing`);
+
+    const cli = [...alert.matchAll(/\biva ([a-z-]+)/gu)].map((m) => m[1]);
+    const scripts = [
+      ...alert.matchAll(/iva-agent\/main\/([\w.-]+\.sh)\b/gu),
+    ].map((m) => m[1]);
+    assert.ok(cli.length + scripts.length > 0, `${language}: no remedy named`);
+    for (const name of cli)
+      assert.ok(Object.hasOwn(commands, name), `${language}: no "iva ${name}"`);
+    for (const file of scripts)
+      assert.ok(existsSync(join(ROOT, file)), `${language}: no ${file}`);
+  }
 });
 
 test("a check that did run and found nothing does clear its alert", (t) => {
