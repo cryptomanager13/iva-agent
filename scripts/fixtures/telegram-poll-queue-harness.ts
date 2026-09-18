@@ -263,13 +263,15 @@ const replyToBotUpdate = (updateId: number, text: string): Update => {
   };
   return update;
 };
+// eve's own callback data (eve: prefix) stays a callback on the webhook route; any other
+// data is a model-written button that the bridge rewrites into a message (control.ts).
 const callbackUpdate = {
   update_id: 101,
   callback_query: {
     id: "foreign-callback-101",
     from: { id: 42, is_bot: false, first_name: "Owner" },
     message: privateUpdate(100, "button owner").message,
-    data: "foreign_callback",
+    data: "eve:foreign_callback",
   },
 };
 const coreFinishCallbackUpdate = {
@@ -287,7 +289,7 @@ const inlineCallbackUpdate = {
     id: "foreign-inline-callback-101",
     from: { id: 42, is_bot: false, first_name: "Owner" },
     inline_message_id: "inline-message-101",
-    data: "foreign_inline_callback",
+    data: "eve:foreign_inline_callback",
   },
 };
 const unauthorizedCallbackUpdate = {
@@ -303,7 +305,7 @@ const unownableCallbackUpdate = {
   callback_query: {
     id: "unownable-callback-101",
     from: { id: 42, is_bot: false, first_name: "Owner" },
-    data: "foreign_callback",
+    data: "eve:foreign_callback",
   },
 };
 const groupNoiseUpdate = {
