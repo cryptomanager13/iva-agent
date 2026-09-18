@@ -15,6 +15,7 @@ process.env.ASSISTANT_TIMEZONE = "UTC";
 process.env.AGENT_LANGUAGE = "en";
 process.env.TELEGRAM_ALLOWED_USER_IDS = "42";
 process.env.TELEGRAM_BOT_TOKEN = "1:test-token";
+process.env.DEEPGRAM_API_KEY = "dg-test";
 const modulePath = fileURLToPath(
   new URL("./telegram-inbound.ts", import.meta.url),
 );

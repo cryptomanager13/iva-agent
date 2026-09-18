@@ -28,6 +28,7 @@ process.env.TELEGRAM_BOT_USERNAME = "my_bot";
 process.env.AGENT_LANGUAGE = "en";
 process.env.MODEL_PROVIDER = "openrouter";
 process.env.OPENROUTER_API_KEY = "test-provider-key";
+process.env.DEEPGRAM_API_KEY = "dg-test";
 
 const counts = { download: 0, vision: 0, transcript: 0, turns: 0 };
 let visionText = "derived once";

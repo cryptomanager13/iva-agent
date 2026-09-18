@@ -28,6 +28,7 @@ process.env.TELEGRAM_BOT_TOKEN = telegramBotToken;
 process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN = telegramWebhookSecret;
 process.env.TELEGRAM_BOT_USERNAME = "my_bot";
 process.env.AGENT_LANGUAGE = "en";
+process.env.DEEPGRAM_API_KEY = "dg-test";
 
 type ApiCall = { url: string; init: RequestInit };
 type Message = Record<string, unknown> & {
