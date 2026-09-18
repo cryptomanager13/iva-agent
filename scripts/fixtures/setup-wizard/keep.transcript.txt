@@ -1,0 +1,11 @@
+  → Iva will reply in English by default.
+
+  Iva is already configured:
+  • Provider: opencode
+  • Model:    deepseek-v4-pro
+  • Bot:       @ivabot
+  • Access:    11,22
+  • Deepgram:  multi   ·   TZ: Europe/Berlin
+
+  Reconfigure from scratch? (y/N): n⏎
+  Keeping current settings — nothing to enter.

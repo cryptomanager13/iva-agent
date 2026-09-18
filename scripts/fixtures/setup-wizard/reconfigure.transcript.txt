@@ -1,0 +1,88 @@
+  → Iva will reply in English by default.
+
+  Iva is already configured:
+  • Provider: opencode
+  • Model:    deepseek-v4-pro
+  • Bot:       @ivabot
+  • Access:    11,22
+  • Deepgram:  multi   ·   TZ: Europe/Berlin
+
+  Reconfigure from scratch? (y/N): y⏎
+
+  Going step by step. Enter at each step keeps the current value.
+
+  Step 1/5: Provider and model — Iva's brain
+  Who to reach the model through:
+    1) Ollama Cloud — https://ollama.com (~$20/mo, higher limits)
+    2) OpenCode Go — https://opencode.ai/go (~$5/mo, cheaper)
+    3) OpenAI (ChatGPT subscription) — chatgpt.com (sign in, no API key)
+    4) OpenRouter — https://openrouter.ai (one key → 300+ models, pay-as-you-go)
+    5) Custom — your own OpenAI-compatible endpoint (proxy, vLLM, LiteLLM, a vendor plan)
+  Provider (1/2/3/4/5) [2]: ⏎
+
+  OpenCode key: https://opencode.ai/auth (subscribe to Go → copy the API key).
+  Paste the OpenCode API key [oc-key…(keep)]: ⏎
+  checking… ok
+
+  OpenCode Go models: 1. I recommend deepseek-v4-pro.
+    1. deepseek-v4-pro  ★
+
+  Model number [1]: ⏎
+
+  Vision model (photos): describes incoming pictures — the text model above is usually blind. I recommend qwen3.7-plus.
+    1. deepseek-v4-pro
+
+  Model number [1]: ⏎
+  → model: deepseek-v4-pro
+  → vision: deepseek-v4-pro
+  Don't inflate the context window: compaction computes its threshold from it; an inflated window risks overflow.
+
+  Step 2/5: Deepgram — voice and video transcription (optional)
+  Where to get the key: https://console.deepgram.com
+    1) sign up (free starter credit)
+    2) API Keys → Create a New API Key
+    3) copy the key
+  Enter — skip: voice notes stay untranscribed until you add the key in /menu → 🎤 Voice or iva config.
+  Paste the Deepgram API key: ⏎
+  Voice is off for now — enable it later in /menu → 🎤 Voice.
+
+  Web search — so Iva can search the internet (Enter on the key — skip, search stays off).
+   1. tavily  https://app.tavily.com  (free ~1000/mo, no card, has answer ★)
+   2. exa  https://dashboard.exa.ai  (free ~20k/mo, no card)
+   3. parallel  https://platform.parallel.ai  (starter credits, no card)
+   4. brave  https://api-dashboard.search.brave.com  (card required (verification), ~$5/mo credit)
+  Search provider (number) [1]: ⏎
+  Key for tavily: https://app.tavily.com. Enter — skip.
+  tavily API key: ⏎
+
+  Enhanced memory (hybrid search) — optional
+  Base search (BM25 + link graph) is already on — free, no key. Hybrid adds semantic search via ONE external key (~cents/mo), better for a large vault or fuzzy/cross-language queries.
+  Enable hybrid memory? (y/N): ⏎
+
+  Step 3/5: Telegram bot — how you talk to Iva
+  Create a bot via @BotFather in Telegram:
+    1) open a chat with @BotFather
+    2) send /newbot
+    3) set the bot's name and username
+    4) copy the token like 123456789:ABCdef...
+  Paste the Bot token [123:tg…(keep)]: ⏎
+  checking… ok
+  → bot: @ivabot
+
+  Step 4/5: Access — who the bot answers at all
+  IMPORTANT: Iva answers ONLY trusted Telegram IDs.
+  Without at least one ID the bot stays silent to everyone (that's how your data is protected).
+  → access granted to ID: 11,22
+
+  Step 5/5: Timezone and memory storage
+  The timezone lets Iva use your real local time, not the server's.
+  Timezone (IANA, e.g. Asia/Almaty, Asia/Tashkent, Europe/Berlin) [Europe/Berlin]: ⏎
+  Vault directory (memory + git backup) [vault]: ⏎
+  Local eve-server port [<PORT>]: ⏎
+  validating the selected model again… ok
+
+  ────────────────────────────────────────────
+  ✓ Ready — settings validated for apply
+  Provider: opencode · Model: deepseek-v4-pro · Voice: off (/menu → Voice) · Bot: @ivabot
+  Access: 11,22 · TZ: Europe/Berlin · vault: vault · lang: en
+  ────────────────────────────────────────────
