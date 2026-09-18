@@ -121,7 +121,7 @@ test("status does not edit an expired menu after the asynchronous probe settles"
 // Пробелов вокруг значения здесь нет намеренно, но осторожно с обобщением: парсеров .env
 // в репозитории ДВА и ведут они себя по-разному. Этот экран читает через
 // scripts/lib/env-file.ts, чей LINE_RE обрамляющие пробелы срезает, — до него они не
-// доезжают. У мастера установки свой парсер (scripts/setup/main.ts), и совпадение их
+// доезжают. У мастера установки свой парсер (scripts/setup/config-file.ts), и совпадение их
 // правил здесь не проверяется и не предполагается. Значение с пробелами ловит резолвер
 // рантайма, который читает process.env напрямую и никакого парсера не проходит.
 test("status surfaces an invalid model provider instead of presenting Ollama", async () => {

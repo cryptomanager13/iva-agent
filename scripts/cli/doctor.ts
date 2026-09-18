@@ -461,7 +461,7 @@ function checkNode(ctx: DoctorContext): void {
 }
 
 /**
- * 2. .env и обязательные ключи — та же REQUIRED-логика, что в scripts/setup/main.ts.
+ * 2. .env и обязательные ключи — та же REQUIRED-логика, что в scripts/setup/wizard.ts.
  * True возвращается, когда .env есть: только тогда имеет смысл необязательный хвост
  * раздела (checkEnvOptions), как и было в монолите.
  */

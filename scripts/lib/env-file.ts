@@ -1,5 +1,5 @@
 // Surgical .env editor for the Telegram bridge (/model, /think).
-// Unlike scripts/setup/main.ts's writeEnv (full rewrite in a fixed key order, drops comments),
+// Unlike scripts/setup/config-file.ts's writeEnvFile (full rewrite in a fixed key order, drops comments),
 // this edits lines in place: comments, blank lines, unknown keys and order survive.
 import {
   chmodSync,

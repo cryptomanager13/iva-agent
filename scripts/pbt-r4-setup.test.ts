@@ -2,22 +2,17 @@
 // что в install.sh, - русские вопросы и строгий разбор английских ответов. Найдено
 // 2026-09-13 маршрутом pbt/deepseek-4-4 (раунд 4), слепая проверка подтвердила.
 //
-// Мастер нельзя импортировать (он сразу запускает диалог), поэтому поведение держит
-// общий разбор ответов, а проводка - сверка исходника: мастер обязан звать общий
-// разбор, а не сравнивать строки сам.
+// Здесь держится общий разбор ответов. Проводку (мастер зовёт общий разбор, а не
+// сравнивает строки сам) проверяет поведение: scripts/setup/wizard.test.ts отвечает
+// мастеру «2.» и «4)» и смотрит, какой язык и провайдер он выбрал.
 //
 // КРАСНЫЙ тест здесь - находка; продакшн-код не менялся, починка описана в отчёте
 // `.scratch/work/reviews/fix-pbt-deepseek-4-4.md`.
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-
-const SOURCE = readFileSync(
-  new URL("./setup/main.ts", import.meta.url),
-  "utf8",
-);
 
 type Answers = {
   readonly answerToken: (value: string) => string;
@@ -52,28 +47,4 @@ await test("НАХОДКА R4-3b: мастер setup понимает «да» �
     ["", null],
   ] as const)
     assert.equal(parsed.menuChoice(input), choice, `«${input}»`);
-
-  // Проводка: ни одного собственного сравнения ответа у мастера не остаётся.
-  assert.match(SOURCE, /isYesAnswer\(/u, "askYesNo не использует общий разбор");
-  assert.doesNotMatch(
-    SOURCE,
-    /startsWith\("y"\)/u,
-    'старый startsWith("y") на месте',
-  );
-  assert.match(
-    SOURCE,
-    /menuChoice\(langChoice\)/u,
-    "langChoice не использует общий разбор",
-  );
-  assert.match(
-    SOURCE,
-    /const provChoice = menuChoice\(/u,
-    "выбор провайдера не использует общий разбор",
-  );
-  assert.doesNotMatch(SOURCE, /=== "2" \? "ru"/u, "старое сравнение языка");
-  assert.doesNotMatch(
-    SOURCE,
-    /provChoice === "2"/u,
-    "старое сравнение провайдера",
-  );
 });

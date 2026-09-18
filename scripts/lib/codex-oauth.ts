@@ -383,7 +383,7 @@ export async function login(
 }
 
 // ── модели подписки и их reasoning levels (один запрос /models) ────────────
-// Telegram строит оба экрана из одного ответа. scripts/setup/main.ts использует тонкий
+// Telegram строит оба экрана из одного ответа. Мастер установки использует тонкий
 // listCodexModels() ниже и не платит вторым запросом за тот же каталог.
 const MODEL_LIST_KEYS = /^(models?|model_presets|presets|items|data)$/i;
 const CANONICAL_REASONING_LEVELS = new Set(CANONICAL_REASONING_EFFORTS);

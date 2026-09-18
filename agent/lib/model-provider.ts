@@ -21,7 +21,7 @@
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-// Порядок — тот же, что у кнопок мастера (scripts/setup/main.ts: 1-4) и ключей CATALOG,
+// Порядок — тот же, что у кнопок мастера (scripts/setup/wizard.ts: 1-4) и ключей CATALOG,
 // поэтому список в ошибке читается как список в интерфейсе.
 export const MODEL_PROVIDER_NAMES = [
   "ollama",
