@@ -453,10 +453,10 @@ test("deadline checks the root PID rather than a surviving process group", async
   let pid: number | null = null;
   try {
     const pidDeadline = Date.now() + 3_000;
-    while (!existsSync(pidFile) && Date.now() < pidDeadline) {
+    // `>` creates the file before printf fills it: wait for a parsable PID, not the file.
+    while ((pid = readPid(pidFile)) === null && Date.now() < pidDeadline) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
-    pid = readPid(pidFile);
     assert.ok(pid !== null, "background child did not write its PID");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
     const result = await within(
