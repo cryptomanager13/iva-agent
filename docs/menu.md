@@ -125,6 +125,7 @@ Three read-only screens.
 - **🧹 Vault cleanup** — the streaming cleaner from 0.3.1 (`cleanup.py --apply`): collapses description bloat, never touches card bodies.
 - **🌙 Brain (nightly care)** — starts the nightly `iva-brain.service` right now instead of 05:00; it runs as the same systemd unit, so it survives bridge restarts.
 - **🔄 Update** — hands off to the existing `/update` flow (check → confirm buttons → an update that survives its own restart).
+- **✨ New menu / ◀︎ Classic menu** — switches where the buttons of the menu and its screens sit: under the message, as before 0.4.2 (the default), or inside the message, which needs a Telegram client from August 2026. Stored as `menuStyle` in `data/settings.json` and read on every render, so it applies at once.
 
 Every command asks for confirmation, then shows live progress in the same message — an animated loader from the same custom-emoji pack the update flow uses (a swirl for doctor, green for cleanup, an orange spinner for the brain; plain ◇ when the bot owner has no Premium), the current step and elapsed time, with a ✖ Cancel button. One command runs at a time, and doctor/cleanup refuse to start while an update is in progress. The final summary is a single line with numbers (files cleaned and MB freed, ok/warn counts) plus the output tail when something failed.
 
