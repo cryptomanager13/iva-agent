@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node owns test registration; async doubles preserve the I/O boundary. */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1400,4 +1400,661 @@ test("a stale menu tap cannot take the pending key away from the /model wizard",
     }
     globalThis.fetch = previousFetch;
   }
+});
+
+// ── Характеристика handleControl: ветки, которые раньше не держал ни один тест ──
+
+type BotCall = { method: string; body: Record<string, unknown> };
+
+// Подменяет Bot API на время прогона: ответ решает respond(method), Error = обрыв сети.
+async function withBotApi<T>(
+  respond: (method: string) => unknown,
+  run: (calls: BotCall[]) => Promise<T>,
+): Promise<T> {
+  const previousFetch = globalThis.fetch;
+  const calls: BotCall[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    const method = url.split("/").at(-1) ?? "";
+    const raw = init?.body;
+    calls.push({
+      method,
+      body:
+        typeof raw === "string"
+          ? (JSON.parse(raw) as Record<string, unknown>)
+          : {},
+    });
+    const answer = respond(method);
+    if (answer instanceof Error) throw answer;
+    return Response.json(answer);
+  };
+  try {
+    return await run(calls);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
+const botOk = () => ({ ok: true, result: { message_id: 500 } });
+const botDown = () => new Error("network down");
+
+function textUpdate(
+  updateId: number,
+  text: string | undefined,
+  overrides: Record<string, unknown> = {},
+): ControlUpdate {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      date: 1,
+      chat,
+      from: trustedFrom,
+      ...(text === undefined ? {} : { text }),
+      ...overrides,
+    },
+  };
+}
+
+function callbackUpdate(updateId: number, data: string): ControlUpdate {
+  return {
+    update_id: updateId,
+    callback_query: {
+      id: `cq-${updateId}`,
+      from: trustedFrom,
+      message: { message_id: updateId, date: 1, chat },
+      data,
+    },
+  };
+}
+
+function dropFlow() {
+  const stale = flows.get(7, "42");
+  if (stale) {
+    stale.createdAt = 0;
+    flows.get(7, "42");
+  }
+}
+
+const sentTexts = (calls: BotCall[]) =>
+  calls.map((call) => JSON.stringify(call.body)).join("\n");
+
+test("a wizard callback that throws is retained for the inbox", async () => {
+  await withBotApi(botDown, async () => {
+    assert.equal(
+      await handleControl(callbackUpdate(1001, "iva_model:keep")),
+      false,
+    );
+  });
+});
+
+test("a menu callback that throws is still consumed", async () => {
+  await withBotApi(botDown, async () => {
+    assert.equal(
+      await handleControl(callbackUpdate(1002, "iva_menu:r:o")),
+      true,
+    );
+  });
+  dropFlow();
+});
+
+test("a command while input is awaited ends the wait and still runs", async () => {
+  await withBotApi(botOk, async (calls) => {
+    flows.start(7, "42", "menu", {
+      screen: "srch",
+      msgId: 1003,
+      awaitText: { kind: "apikey", secret: true, data: {} },
+    });
+    const { replies, deps } = recordingDeps();
+
+    assert.equal(await handleControl(textUpdate(1003, "/help"), deps), true);
+    assert.equal(flows.get(7, "42"), null, "ожидание снято");
+    assert.match(sentTexts(calls), /Отменено/u);
+    assert.equal(replies.length, 1, "/help ответил");
+  });
+  dropFlow();
+});
+
+test("a menu screen claims the awaited text and never delivers it", async () => {
+  await withBotApi(botOk, async (calls) => {
+    flows.start(7, "42", "menu", {
+      screen: "r",
+      msgId: 1004,
+      awaitText: { kind: "nothing-handles-this", secret: false },
+    });
+
+    assert.equal(await handleControl(textUpdate(1004, "hello")), true);
+    assert.equal(flows.get(7, "42"), null);
+    assert.ok(!calls.some((call) => call.method === "deleteMessage"));
+    assert.match(sentTexts(calls), /Обработчик ввода недоступен/u);
+  });
+  dropFlow();
+});
+
+test("a failing menu capture still consumes the secret", async () => {
+  await withBotApi(botDown, async () => {
+    flows.start(7, "42", "menu", {
+      screen: "srch",
+      msgId: 1005,
+      awaitText: { kind: "apikey", secret: true, data: {} },
+    });
+
+    assert.equal(
+      await handleControl(textUpdate(1005, "tvly-secret-value")),
+      true,
+    );
+  });
+  dropFlow();
+});
+
+test("a failing wizard key intake still consumes the key", async () => {
+  await withBotApi(botDown, async () => {
+    flows.start(7, "42", "model", {
+      provider: "custom",
+      step: "awaiting_key",
+      msgId: 1006,
+      awaitText: { kind: "apikey", secret: true, data: {} },
+    });
+
+    assert.equal(
+      await handleControl(textUpdate(1006, "sk-secret-value")),
+      true,
+    );
+  });
+  dropFlow();
+});
+
+test("a photo while a secret is awaited is deleted and never reaches eve", async () => {
+  await withBotApi(botOk, async (calls) => {
+    flows.start(7, "42", "menu", {
+      screen: "srch",
+      msgId: 1007,
+      awaitText: { kind: "apikey", secret: true, data: {} },
+    });
+
+    const consumed = await handleControl(
+      textUpdate(1007, undefined, { photo: [{ file_id: "p" }] }),
+    );
+
+    assert.equal(consumed, true);
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["deleteMessage", "sendMessage"],
+    );
+    assert.match(sentTexts(calls), /текстом/u);
+  });
+  dropFlow();
+});
+
+test("a photo during a non-secret wait goes on to eve untouched", async () => {
+  await withBotApi(botOk, async (calls) => {
+    flows.start(7, "42", "menu", {
+      screen: "r",
+      msgId: 1008,
+      awaitText: { kind: "interview" },
+    });
+
+    const consumed = await handleControl(
+      textUpdate(1008, undefined, { photo: [{ file_id: "p" }] }),
+    );
+
+    assert.equal(consumed, false);
+    assert.deepEqual(calls, []);
+  });
+  dropFlow();
+});
+
+test("/menu opens the menu in a private chat", async () => {
+  await withBotApi(botOk, async (calls) => {
+    assert.equal(await handleControl(textUpdate(1009, "/menu")), true);
+    assert.ok(calls.length > 0, "экран меню отправлен");
+    assert.equal(flows.get(7, "42")?.flow, "menu");
+  });
+  dropFlow();
+});
+
+test("a failing /menu is still consumed", async () => {
+  await withBotApi(botDown, async () => {
+    assert.equal(await handleControl(textUpdate(1010, "/menu")), true);
+  });
+  dropFlow();
+});
+
+test("/usage answers from the usage log without the model", async () => {
+  await withBotApi(botOk, async (calls) => {
+    assert.equal(await handleControl(textUpdate(1011, "/usage today")), true);
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["sendMessage"],
+    );
+  });
+});
+
+test("/usage names the reason when the log cannot be summarized", async () => {
+  const usageLog = join(dataDir, "usage.jsonl");
+  writeFileSync(usageLog, "null\n");
+  try {
+    await withBotApi(botOk, async (calls) => {
+      assert.equal(await handleControl(textUpdate(1012, "/usage")), true);
+      assert.match(sentTexts(calls), /Couldn't read the usage log: /u);
+    });
+  } finally {
+    rmSync(usageLog, { force: true });
+  }
+});
+
+test("/usage is retained when its reply fails", async () => {
+  await withBotApi(
+    () => ({ ok: false }),
+    async () => {
+      assert.equal(await handleControl(textUpdate(1013, "/usage")), false);
+    },
+  );
+});
+
+test("/update checks upstream and /update --force asks for a rebuild", async () => {
+  await withBotApi(
+    () => ({ ok: false }),
+    async (calls) => {
+      assert.equal(await handleControl(textUpdate(1014, "/update")), false);
+      assert.equal(
+        await handleControl(textUpdate(1015, "/update@iva_bot --force")),
+        false,
+      );
+      assert.deepEqual(
+        calls.map((call) => call.body.text),
+        ["◇ Проверяю обновления", "◇ Пересобираю текущую версию"],
+      );
+    },
+  );
+});
+
+for (const command of ["/model", "/think"]) {
+  test(`${command} that throws is retained for the inbox`, async () => {
+    await withBotApi(botDown, async () => {
+      assert.equal(await handleControl(textUpdate(1016, command)), false);
+    });
+    dropFlow();
+  });
+}
+
+// ── /new и /restart ──
+
+type ResetCall = [string, Record<string, unknown>, Record<string, unknown>];
+
+function resetDeps(
+  performReset: () => Promise<unknown> = async () => {},
+  { retryPending = false, intentPending = false } = {},
+) {
+  const resets: ResetCall[] = [];
+  const replies: string[] = [];
+  return {
+    resets,
+    replies,
+    deps: {
+      replyImpl: async (_chatId: number | undefined, text: string) => {
+        replies.push(text);
+        return { message_id: 900 };
+      },
+      performResetImpl: async (
+        key: string,
+        target: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ) => {
+        resets.push([key, target, options]);
+        return performReset();
+      },
+      resetRetryPendingImpl: () => retryPending,
+      resetIntentPendingImpl: () => intentPending,
+    },
+  };
+}
+
+function idleSession() {
+  status.setChatStatus("7:", {
+    status: "idle",
+    sessionId: "session-r",
+    turnId: null,
+  });
+}
+
+const edits = (calls: BotCall[]) =>
+  calls
+    .filter((call) => call.method === "editMessageText")
+    .map((call) => JSON.stringify(call.body));
+
+// systemctl подменяется скриптом на PATH: тест никогда не трогает настоящий сервис.
+async function withFakeSystemctl<T>(
+  exitCode: number,
+  run: (argsLog: string) => Promise<T>,
+): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "iva-systemctl-"));
+  const argsLog = join(dir, "args.log");
+  writeFileSync(
+    join(dir, "systemctl"),
+    `#!/bin/sh\necho "$@" >> "${argsLog}"\nexit ${exitCode}\n`,
+    { mode: 0o755 },
+  );
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}:${previousPath ?? ""}`;
+  try {
+    return await run(argsLog);
+  } finally {
+    process.env.PATH = previousPath;
+  }
+}
+
+test("/new resets this private conversation and reports completion", async () => {
+  idleSession();
+  await withBotApi(botOk, async (calls) => {
+    const { resets, replies, deps } = resetDeps();
+
+    assert.equal(await handleControl(textUpdate(1020, "/new"), deps), true);
+    assert.deepEqual(resets, [
+      [
+        "7:",
+        { sessionId: "session-r" },
+        { clearQueue: true, discardThroughUpdateId: 1020 },
+      ],
+    ]);
+    assert.equal(replies.length, 1);
+    assert.equal(edits(calls).length, 1);
+    assert.match(edits(calls)[0] ?? "", /"message_id":900/u);
+  });
+});
+
+test("/restart restarts the service after the reset", async () => {
+  idleSession();
+  await withFakeSystemctl(0, async (argsLog) => {
+    await withBotApi(botOk, async (calls) => {
+      const { deps } = resetDeps();
+
+      assert.equal(
+        await handleControl(textUpdate(1021, "/restart"), deps),
+        true,
+      );
+      assert.equal(
+        readFileSync(argsLog, "utf8"),
+        "--user restart iva.service\n",
+      );
+      assert.equal(edits(calls).length, 1);
+      assert.doesNotMatch(edits(calls)[0] ?? "", /не удалось/u);
+    });
+  });
+});
+
+test("/restart says so when the service cannot restart", async () => {
+  idleSession();
+  await withFakeSystemctl(1, async () => {
+    await withBotApi(botOk, async (calls) => {
+      const { deps } = resetDeps();
+
+      assert.equal(
+        await handleControl(textUpdate(1022, "/restart"), deps),
+        true,
+      );
+      assert.match(edits(calls)[0] ?? "", /перезапустить Iva не удалось/u);
+    });
+  });
+});
+
+const groupChat = { id: -100, type: "group" };
+
+test("/new in a group without an addressed message names the problem", async () => {
+  await withBotApi(botOk, async (calls) => {
+    const { resets, deps } = resetDeps();
+
+    assert.equal(
+      await handleControl(textUpdate(1023, "/new", { chat: groupChat }), deps),
+      true,
+    );
+    assert.deepEqual(resets, []);
+    assert.match(edits(calls)[0] ?? "", /Не удалось определить этот диалог/u);
+  });
+});
+
+test("an unidentified /new whose status reply failed is retained", async () => {
+  const { resets, deps } = resetDeps();
+  deps.replyImpl = async (_chatId, text) => {
+    void text;
+    return null as unknown as { message_id: number };
+  };
+
+  assert.equal(
+    await handleControl(textUpdate(1024, "/new", { chat: groupChat }), deps),
+    false,
+  );
+  assert.deepEqual(resets, []);
+});
+
+test("a failed group reset keeps the shared queue and is consumed", async () => {
+  await withBotApi(botOk, async (calls) => {
+    const { resets, deps } = resetDeps(async () => {
+      throw new Error("cleanup failed");
+    });
+    const update = textUpdate(1025, "/new", {
+      chat: groupChat,
+      reply_to_message: {
+        message_id: 50,
+        date: 1,
+        chat: groupChat,
+        from: { id: 424242, is_bot: true },
+      },
+    });
+
+    assert.equal(await handleControl(update, deps), true);
+    assert.equal(resets.length, 1);
+    assert.deepEqual(resets[0]?.[2], {
+      clearQueue: false,
+      discardThroughUpdateId: undefined,
+    });
+    assert.match(
+      edits(calls)[0] ?? "",
+      /Восстановление после сброса не завершено/u,
+    );
+  });
+});
+
+test("a failed private reset of unknown phase is thrown back for retry", async () => {
+  idleSession();
+  const failure = new Error("cleanup failed");
+  await withBotApi(botOk, async (calls) => {
+    const { deps } = resetDeps(async () => {
+      throw failure;
+    });
+
+    await assert.rejects(
+      handleControl(textUpdate(1026, "/new"), deps),
+      (error) => error === failure,
+    );
+    assert.match(
+      edits(calls)[0] ?? "",
+      /Восстановление после сброса не завершено/u,
+    );
+  });
+});
+
+test("a remote reset failure is left to recovery", async () => {
+  idleSession();
+  await withBotApi(botOk, async (calls) => {
+    const { deps } = resetDeps(async () => {
+      throw Object.assign(new Error("eve down"), { resetPhase: "remote" });
+    });
+
+    assert.equal(await handleControl(textUpdate(1027, "/new"), deps), true);
+    assert.match(edits(calls)[0] ?? "", /Не удалось подтвердить сброс/u);
+  });
+});
+
+test("a backoff failure is consumed only while the reset intent is saved", async () => {
+  idleSession();
+  const backoff = () =>
+    Promise.reject(
+      Object.assign(new Error("backoff"), { resetPhase: "backoff" }),
+    );
+  await withBotApi(botOk, async (calls) => {
+    const saved = resetDeps(backoff, { intentPending: true });
+    assert.equal(
+      await handleControl(textUpdate(1028, "/new"), saved.deps),
+      true,
+    );
+    assert.match(edits(calls)[0] ?? "", /Повтор сброса уже запланирован/u);
+
+    const unsaved = resetDeps(backoff, { intentPending: false });
+    await assert.rejects(
+      handleControl(textUpdate(1029, "/new"), unsaved.deps),
+      /backoff/u,
+    );
+  });
+});
+
+test("an escalated intent failure tells the owner to run iva reset", async () => {
+  idleSession();
+  await withBotApi(botOk, async (calls) => {
+    const { deps } = resetDeps(async () => {
+      throw Object.assign(new Error("disk"), {
+        resetPhase: "intent",
+        resetFailures: 1_000,
+      });
+    });
+
+    assert.equal(await handleControl(textUpdate(1030, "/new"), deps), true);
+    assert.match(edits(calls)[0] ?? "", /iva reset/u);
+  });
+});
+
+test("an intent failure below the escalation bar is thrown back for retry", async () => {
+  idleSession();
+  await withBotApi(botOk, async (calls) => {
+    const { deps } = resetDeps(async () => {
+      throw Object.assign(new Error("disk"), {
+        resetPhase: "intent",
+        resetFailures: 1,
+      });
+    });
+
+    await assert.rejects(
+      handleControl(textUpdate(1031, "/new"), deps),
+      /disk/u,
+    );
+    assert.doesNotMatch(edits(calls)[0] ?? "", /iva reset/u);
+  });
+});
+
+test("a pending reset retry without saved intent holds the offset", async () => {
+  idleSession();
+  const { resets, replies, deps } = resetDeps(async () => {}, {
+    retryPending: true,
+    intentPending: false,
+  });
+
+  await assert.rejects(
+    handleControl(textUpdate(1032, "/new"), deps),
+    (error: { resetPhase?: unknown }) => error.resetPhase === "backoff",
+  );
+  assert.deepEqual(resets, []);
+  assert.deepEqual(replies, []);
+});
+
+// ── handleAwaitNonText: ветки мимо удачной выгрузки ──
+
+function recordingNonTextIo(download: string | null = "content") {
+  const events: Array<string | [string, string]> = [];
+  return {
+    events,
+    io: {
+      deleteSecret: async () => {
+        events.push("delete");
+        return true;
+      },
+      download: async () => {
+        events.push("download");
+        return download;
+      },
+      deliver: async () => {
+        events.push("deliver");
+      },
+      reply: async (_chatId: number | undefined, text: string) => {
+        events.push(["reply", text]);
+      },
+    },
+  };
+}
+
+const fileAwait = {
+  flow: "menu",
+  awaitText: { kind: "gws_client_secret", file: true },
+};
+
+test("an oversized secret file is deleted and never downloaded", async () => {
+  const { events, io } = recordingNonTextIo();
+  const consumed = await handleAwaitNonText(
+    {
+      message_id: 9,
+      chat: { id: 42 },
+      document: { file_id: "file", file_size: 256 * 1024 + 1 },
+    },
+    fileAwait,
+    io,
+  );
+
+  assert.equal(consumed, true);
+  assert.equal(events.length, 2);
+  assert.equal(events[0], "delete");
+  assert.match((events[1] as [string, string])[1], /слишком большой/u);
+});
+
+test("an unreadable secret file asks for the contents as text", async () => {
+  const { events, io } = recordingNonTextIo(null);
+  const consumed = await handleAwaitNonText(
+    {
+      message_id: 10,
+      chat: { id: 42 },
+      document: { file_id: "file" },
+    },
+    fileAwait,
+    io,
+  );
+
+  assert.equal(consumed, true);
+  assert.deepEqual(events.slice(0, 2), ["delete", "download"]);
+  assert.match((events[2] as [string, string])[1], /Не смог прочитать/u);
+  assert.equal(events.length, 3);
+});
+
+test("a photo for a file prompt is deleted with a hint about the json file", async () => {
+  const { events, io } = recordingNonTextIo();
+  const consumed = await handleAwaitNonText(
+    { message_id: 11, chat: { id: 42 }, photo: [{ file_id: "p" }] },
+    fileAwait,
+    io,
+  );
+
+  assert.equal(consumed, true);
+  assert.equal(events[0], "delete");
+  assert.match((events[1] as [string, string])[1], /client_secret\.json/u);
+  assert.equal(events.length, 2);
+});
+
+test("a document outside the menu is deleted, not captured", async () => {
+  const { events, io } = recordingNonTextIo();
+  const consumed = await handleAwaitNonText(
+    {
+      message_id: 12,
+      chat: { id: 42 },
+      document: { file_id: "file", file_size: 10 },
+    },
+    { flow: "model", awaitText: { kind: "apikey", secret: true } },
+    io,
+  );
+
+  assert.equal(consumed, true);
+  assert.equal(events[0], "delete");
+  assert.match((events[1] as [string, string])[1], /текстом/u);
+  assert.equal(events.length, 2);
 });
