@@ -93,4 +93,4 @@ Every model step appends one JSON line to `data/usage.jsonl` — including tool-
 
 The log lives in `data/` next to `tasks.json`, gitignored and outside the vault — otherwise the nightly Brain pass would commit an ever-growing log into your memory repo.
 
-No dollar figures, on purpose. Both providers are flat-rate subscriptions (see [providers.md](providers.md)), so there is no per-token price to multiply. Tokens are the number you can trust; a computed dollar estimate would be fiction.
+No dollar figures, on purpose. Most providers are flat-rate subscriptions and the pay-as-you-go ones price per model (see [providers.md](providers.md)), so there is no single per-token price to multiply. Tokens are the number you can trust; a computed dollar estimate would be fiction.
