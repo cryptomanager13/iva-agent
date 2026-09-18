@@ -179,25 +179,33 @@ await test("зелёное: пользовательский HTML экранир
     );
 });
 
-// НАХОДКА 4 (латентная). Конвертер на строке из одних `[` растёт квадратично:
+// НАХОДКА 4 (латентная). Конвертер на строке из одних `[` рос квадратично:
 // 20 000 знаков - 340 мс, 80 000 - 3 700 мс, 200 000 - 41 секунда. Outbox зовёт
 // конвертер через toTelegramHtmlChunks, а тот сначала режет текст на чанки по 3500,
 // поэтому живой путь ограничен и не висит; но сама mdToTelegramHtml экспортирована и
 // документирована как самостоятельная, и любой прямой вызов большого текста
-// останавливает однопоточный мост на десятки секунд. Тест сравнивает рост времени,
-// а не абсолютные миллисекунды: линейный рост дал бы четырёхкратный скачок на
-// четырёхкратном входе, здесь измерено ~11x.
+// останавливал бы однопоточный мост на десятки секунд. Тест сравнивает рост времени,
+// а не абсолютные миллисекунды: восьмикратный вход при линейном росте даёт ~8x, при
+// прежнем росте ~35x, порог 24x. Время - процессорное (process.cpuUsage), а не по
+// часам: соседние тест-процессы под покрытием отнимают у этого процесса ядро, и по
+// часам 80 000 знаков однажды заняли 12x от 20 000. Из трёх замеров берётся
+// наименьший: шум (сборка мусора) только добавляет время.
+const cpuMs = (run: () => void): number => {
+  const start = process.cpuUsage();
+  run();
+  const spent = process.cpuUsage(start);
+  return (spent.user + spent.system) / 1000;
+};
+const fastestCpuMs = (run: () => void): number =>
+  Math.min(cpuMs(run), cpuMs(run), cpuMs(run));
+
 await test("НАХОДКА 4 (латентная): конвертер не тормозит квадратично на скобках", () => {
   const warmup = mdToTelegramHtml("[".repeat(1000));
   assert.equal(warmup.length, 1000);
-  const small = performance.now();
-  mdToTelegramHtml("[".repeat(20_000));
-  const smallMs = performance.now() - small;
-  const large = performance.now();
-  mdToTelegramHtml("[".repeat(80_000));
-  const largeMs = performance.now() - large;
+  const smallMs = fastestCpuMs(() => mdToTelegramHtml("[".repeat(10_000)));
+  const largeMs = fastestCpuMs(() => mdToTelegramHtml("[".repeat(80_000)));
   assert.ok(
-    largeMs < smallMs * 8,
-    `вход вырос в 4 раза, время в ${(largeMs / smallMs).toFixed(1)} раза (${smallMs.toFixed(0)}мс -> ${largeMs.toFixed(0)}мс) - рост быстрее линейного`,
+    largeMs < smallMs * 24,
+    `вход вырос в 8 раз, время в ${(largeMs / smallMs).toFixed(1)} раза (${smallMs.toFixed(0)}мс -> ${largeMs.toFixed(0)}мс) - рост быстрее линейного`,
   );
 });
