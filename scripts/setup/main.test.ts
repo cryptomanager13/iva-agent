@@ -220,7 +220,7 @@ test("complete configuration: one question, nothing written when nothing changed
   assert.equal(result.candidate, null);
 });
 
-test("Russian: «2.» picks Russian, and the questions follow the language", async (t) => {
+test("Russian: «2.» picks Russian and «да» reconfigures", async (t) => {
   const port = await freePort();
   const result = await driveWizard(t, {
     source: completeOpencode(port).replace(
@@ -228,7 +228,7 @@ test("Russian: «2.» picks Russian, and the questions follow the language", asy
       "AGENT_LANGUAGE=ru",
     ),
     port,
-    answers: ["2.", "y"],
+    answers: ["2.", "да"],
     stopAt: /Провайдер \(1\/2\/3\/4\/5\) \[2\]: $/u,
   });
   assert.match(result.transcript, /Iva будет отвечать по-русски/u);

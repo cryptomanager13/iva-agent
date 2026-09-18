@@ -150,8 +150,10 @@ function settle(d: Core, typed: string, offer: Offer): string {
 const keepsExisting = (d: Core, typed: string, existing: string) =>
   Boolean(existing) && (!typed || typed.endsWith(keepMark(d)));
 
+// Ответ «да/нет» в .env не пишется, поэтому проверка значения для .env его не касается:
+// иначе русское «да» отвергалось как символ вне латиницы.
 async function askYesNo(d: Core, q: string, def = false): Promise<boolean> {
-  const answer = await ask(d, `${q} (${yesNoHint(def)})`);
+  const answer = (await d.question(`${q} (${yesNoHint(def)}): `)).trim();
   return answer ? isYesAnswer(answer) : def;
 }
 

@@ -113,6 +113,13 @@ test("askYesNo: Enter takes the default, y and n answer", async () => {
   assert.deepEqual(screen.slice(0, 2), ["? Go? (Y/n): ", "? Go? (y/N): "]);
 });
 
+test("askYesNo: Russian «да» and «нет» answer without a complaint about Latin letters", async () => {
+  const { dialog, screen } = scripted(["да", "нет"]);
+  assert.equal(await dialog.askYesNo("Go?"), true);
+  assert.equal(await dialog.askYesNo("Go?", true), false);
+  assert.deepEqual(screen, ["? Go? (y/N): ", "? Go? (Y/n): "]);
+});
+
 test("askRequired: help, the check and ok on a good value", async () => {
   const { dialog, screen } = scripted(["key-1"]);
   const value = await dialog.askRequired("Key", {
