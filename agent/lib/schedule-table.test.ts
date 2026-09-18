@@ -277,9 +277,12 @@ void test("the ⏰ menu screen renders the table verbatim, in table order", asyn
     },
   );
 
+  const { escapeRichText } =
+    await import("../../scripts/lib/telegram-buttons.ts");
   let cursor = -1;
   for (const name of NAMES) {
-    const at = text.indexOf(`• ${name} (${SCHEDULE_CRON[name]}) →`);
+    const row = `| ${escapeRichText(name)} | ${escapeRichText(SCHEDULE_CRON[name])} |`;
+    const at = text.indexOf(row);
     assert.ok(at > cursor, `menu is missing or misorders ${name}`);
     cursor = at;
   }
