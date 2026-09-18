@@ -9,7 +9,7 @@ import type { createCliRuntime } from "./runtime.ts";
 type CliRuntime = ReturnType<typeof createCliRuntime>;
 
 // `../lib/telegram-send.ts` reaches the authored tree through `agent/lib/outbox.ts`, so it
-// is named as a type here and loaded inside the send below: `iva repair`/`iva doctor` run
+// is named as a type here and loaded inside the send below: repair.sh (through `iva update`) and `iva doctor` run
 // on installs whose `agent/` is missing (scripts/authored-tree-guard.test.ts). The other
 // two imports stay static — neither leaves `scripts/`.
 type SendTelegramHtml =

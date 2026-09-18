@@ -5,7 +5,7 @@
 // the call that needs it.
 //
 // Fail-open, like the Gate: with no tree to load - half an update, an installation
-// `iva repair` exists for - the notice still goes out, and the fact that it could not
+// repair.sh exists for - the notice still goes out, and the fact that it could not
 // be scanned is loud in the log. A silent updater is worse than one unredacted line
 // in the owner's own chat.
 type Gate = { redactNotice: (text: string) => string };

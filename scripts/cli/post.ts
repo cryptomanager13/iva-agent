@@ -28,7 +28,7 @@ import type { createCliRuntime } from "./runtime.ts";
 type CliRuntime = ReturnType<typeof createCliRuntime>;
 
 // Как в notify: отправитель тянет авторское дерево (agent/lib/outbox.ts), поэтому
-// здесь он только тип, а грузится внутри самой отправки — `iva doctor`/`iva repair`
+// здесь он только тип, а грузится внутри самой отправки — `iva doctor` и repair.sh (через `iva update`)
 // обязаны стартовать на установке без `agent/` (scripts/authored-tree-guard.test.ts).
 type SendTelegramRich =
   typeof import("../lib/telegram-send.ts").sendTelegramRich;

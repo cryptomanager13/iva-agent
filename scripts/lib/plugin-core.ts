@@ -2,7 +2,7 @@
  * The one place the CLI reaches the plugin code that lives in the authored tree.
  *
  * `iva` has to start on an installation whose `agent/` is missing or half-written,
- * because that is exactly when `iva doctor` and `iva repair` are run (ADR-0003,
+ * because that is exactly when `iva doctor` and repair.sh (through `iva update`) are run (ADR-0003,
  * scripts/authored-tree-guard.test.ts). A static import of `#lib/…` from a CLI
  * module breaks that; a lazy import inside the command does not. Keeping the lazy
  * import here means there is one such import in the tree instead of one per command.
