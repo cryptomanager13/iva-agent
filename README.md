@@ -141,7 +141,7 @@ The installer reuses the existing checkout instead of re-cloning, keeps `.env` a
 
 ## Providers & cost
 
-Four model providers. Pick one and fill its block in `.env`:
+Five model providers. Pick one and fill its block in `.env`:
 
 | Provider         | How you pay                            |
 | ---------------- | -------------------------------------- |
@@ -149,6 +149,7 @@ Four model providers. Pick one and fill its block in `.env`:
 | Ollama Cloud     | API key, ~$20/mo                       |
 | OpenRouter       | API key, pay-as-you-go, 300+ models    |
 | OpenAI (ChatGPT) | your Plus/Pro subscription, no API key |
+| Custom           | your own OpenAI-compatible endpoint    |
 
 Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo all-in ($10 model + $4–5 VPS; the model's first month is $5), no markup; voice rides Deepgram's free starter credit. Model lists, limits and the search matrix: [docs/providers.md](docs/providers.md).
 
