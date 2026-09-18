@@ -274,6 +274,14 @@ const callbackUpdate = {
     data: "eve:foreign_callback",
   },
 };
+const buttonTapUpdate = {
+  ...callbackUpdate,
+  callback_query: {
+    ...callbackUpdate.callback_query,
+    id: "button-tap-101",
+    data: "Remind me in an hour",
+  },
+};
 const coreFinishCallbackUpdate = {
   update_id: 101,
   callback_query: {
@@ -719,11 +727,15 @@ const fetchHarness = async (url: unknown, options: FetchOptions = {}) => {
     }
     if (
       mode === "callback" ||
+      mode === "button-tap" ||
       mode === "callback-rejected" ||
       mode === "callback-rejected-crash"
     ) {
       if (getUpdatesCalls === 1) {
-        return jsonResponse({ ok: true, result: [callbackUpdate] });
+        return jsonResponse({
+          ok: true,
+          result: [mode === "button-tap" ? buttonTapUpdate : callbackUpdate],
+        });
       }
       if (mode === "callback-rejected-crash") {
         writeFileSync(join(dataDir, "callback-rejected-ready"), "ready\n");
