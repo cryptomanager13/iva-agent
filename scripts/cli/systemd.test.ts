@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,6 +55,8 @@ type SystemdSetup = {
   readonly failing?: readonly string[];
   /** Units `is-active` reports as inactive. */
   readonly inactive?: readonly string[];
+  /** Replaces the runtime's data-dir resolver, e.g. to make it throw. */
+  readonly dataDirAbs?: () => string;
 };
 
 function fixture(env: string | null): Fixture {
@@ -90,8 +93,10 @@ function cli(fx: Fixture, setup: SystemdSetup = {}) {
         : { code: 0, out: "active" };
     return { code: 0, out: "" };
   };
+  const runtime = createCliRuntime(fx.project);
   return createCliSystemd({
-    ...createCliRuntime(fx.project),
+    ...runtime,
+    dataDirAbs: setup.dataDirAbs ?? runtime.dataDirAbs,
     C: NO_COLOR,
     UNIT_DIR: fx.unitDir,
     hasSystemd: () => setup.hasSystemd ?? true,
@@ -223,6 +228,30 @@ test("writeUnits canonicalises an alias timezone and keeps the default port", ()
   });
 });
 
+test("a perms target that fails is reported and the other targets are still closed", () => {
+  withFixture("", (fx) => {
+    mkdirSync(join(fx.project, ".eve"), { mode: 0o755 });
+    chmodSync(join(fx.project, ".eve"), 0o755);
+    // Only the perms pass fails: the unit templates resolve the same dir afterwards.
+    let calls = 0;
+    const systemd = cli(fx, {
+      dataDirAbs: () => {
+        if (calls++ === 0) throw new Error("data dir unreadable");
+        return join(fx.project, "data");
+      },
+    });
+
+    systemd.writeUnits({ ensureBearer: false });
+
+    assert.deepEqual(fx.warnings, [
+      "perms migration (data/) failed: data dir unreadable",
+    ]);
+    assert.equal(mode(fx.envPath), 0o600);
+    assert.equal(mode(join(fx.project, ".eve")), 0o700);
+    assert.ok(existsSync(join(fx.unitDir, "iva.service")));
+  });
+});
+
 test("a failing daemon-reload surfaces with the systemctl exit code", () => {
   withFixture("", (fx) => {
     assert.throws(
@@ -246,6 +275,23 @@ test("the bearer is created once and reused on every later run", () => {
     assert.equal(envOf(fx).ASSISTANT_BEARER, bearer);
     assert.equal(envOf(fx).TELEGRAM_BOT_TOKEN, "123:abc");
     assert.equal(mode(fx.envPath), 0o600);
+    assert.deepEqual(fx.reports, [
+      ".env protected and internal bearer configured",
+    ]);
+  });
+});
+
+test("a world-readable .env with a valid bearer is closed and keeps the bearer", () => {
+  withFixture(`ASSISTANT_BEARER=${BEARER}\nA=1\n`, (fx) => {
+    chmodSync(fx.envPath, 0o644);
+
+    assert.equal(cli(fx).ensureAssistantBearer(), true);
+
+    assert.equal(mode(fx.envPath), 0o600);
+    assert.equal(
+      readFileSync(fx.envPath, "utf8"),
+      `ASSISTANT_BEARER=${BEARER}\nA=1\n`,
+    );
     assert.deepEqual(fx.reports, [
       ".env protected and internal bearer configured",
     ]);
@@ -327,7 +373,13 @@ test("migrateEnv does nothing without .env or on the new scheme", () => {
 });
 
 const envKey = fc.stringMatching(/^[A-Z][A-Z0-9_]{0,11}$/);
-const envValue = fc.stringMatching(/^[A-Za-z0-9_./:@+-]{0,24}$/);
+const envValue = fc.oneof(
+  fc.stringMatching(/^[A-Za-z0-9_./:@+-]{0,24}$/),
+  // quoted: spaces, # and = only survive inside quotes
+  fc
+    .stringMatching(/^[A-Za-z0-9 #=_./:-]{0,24}$/)
+    .chain((body) => fc.constantFrom(`"${body}"`, `'${body}'`)),
+);
 const envHost = fc.oneof(
   fc.constant("http://127.0.0.1:3000"),
   fc.integer({ min: 1, max: 65535 }).map((port) => `http://localhost:${port}`),
@@ -343,20 +395,30 @@ const envFile = fc
       maxLength: 12,
     }),
     host: fc.option(envHost, { nil: undefined }),
+    hostIndent: fc.constantFrom("", "  ", "\t"),
+    port: fc.option(fc.integer({ min: 1, max: 65535 }), { nil: undefined }),
     comments: fc.array(fc.constantFrom("# note", "", "   "), { maxLength: 4 }),
+    eol: fc.constantFrom("\n", "\r\n"),
     trailingNewlines: fc.integer({ min: 0, max: 3 }),
   })
-  .map(({ entries, host, comments, trailingNewlines }) => {
-    const lines = entries
-      .filter(([key]) => key !== "IVA_PORT" && key !== "ASSISTANT_HOST")
-      .map(([key, value]) => `${key}=${value}`);
-    if (host !== undefined)
-      lines.splice(lines.length >> 1, 0, `ASSISTANT_HOST=${host}`);
-    lines.splice(1, 0, ...comments);
-    return lines.join("\n") + "\n".repeat(trailingNewlines);
-  });
+  .map(
+    ({ entries, host, hostIndent, port, comments, eol, trailingNewlines }) => {
+      const lines = entries
+        .filter(([key]) => key !== "IVA_PORT" && key !== "ASSISTANT_HOST")
+        .map(([key, value]) => `${key}=${value}`);
+      if (host !== undefined)
+        lines.splice(
+          lines.length >> 1,
+          0,
+          `${hostIndent}ASSISTANT_HOST=${host}`,
+        );
+      if (port !== undefined) lines.push(`IVA_PORT=${port}`);
+      lines.splice(1, 0, ...comments);
+      return lines.join(eol) + eol.repeat(trailingNewlines);
+    },
+  );
 
-test("property: migrateEnv keeps every key and line, adds one IVA_PORT, and is idempotent", () => {
+test("property: migrateEnv keeps every key and line, adds one IVA_PORT, and is idempotent; an existing IVA_PORT is a no-op", () => {
   const seed = Number(process.env.FC_SEED ?? Date.now() % 2 ** 31);
   console.log(`migrateEnv property seed=${seed} (rerun with FC_SEED=${seed})`);
   fc.assert(
@@ -364,6 +426,11 @@ test("property: migrateEnv keeps every key and line, adds one IVA_PORT, and is i
       withFixture(raw, (fx) => {
         const before = parseEnv(raw);
         const systemd = cli(fx);
+        if (before.IVA_PORT) {
+          assert.equal(systemd.migrateEnv({ quiet: true }), false);
+          assert.equal(readFileSync(fx.envPath, "utf8"), raw);
+          return;
+        }
 
         assert.equal(systemd.migrateEnv({ quiet: true }), true);
         const migrated = readFileSync(fx.envPath, "utf8");
@@ -377,7 +444,7 @@ test("property: migrateEnv keeps every key and line, adds one IVA_PORT, and is i
         assert.match(after.IVA_PORT ?? "", /^\d+$/);
         const kept = migrated.split("\n");
         for (const line of raw.split("\n").filter((l) => l.trim()))
-          if (!(movedHost && line.startsWith("ASSISTANT_HOST=")))
+          if (!(movedHost && /^\s*ASSISTANT_HOST=/.test(line)))
             assert.ok(kept.includes(line), `line lost: ${line}`);
         if (movedHost)
           assert.equal(
@@ -483,6 +550,26 @@ test("a deferred brain retirement skips activation; a failed disable keeps the u
   });
 });
 
+test("a legacy unit that cannot be rewritten is kept and the failed repoint is named", () => {
+  withFixture("", (fx) => {
+    seedLegacyBrain(fx);
+    chmodSync(join(fx.unitDir, "iva-memory-doctor.service"), 0o444);
+
+    cli(fx, { failing: ["enable --now iva-brain.timer"] }).writeUnits();
+
+    assert.ok(
+      fx.warnings.some((w) =>
+        w.startsWith(
+          "could not repoint iva-memory-doctor.service at scripts/memory/brain.ts",
+        ),
+      ),
+      fx.warnings.join("\n"),
+    );
+    assert.equal(unit(fx, "iva-memory-doctor.service"), LEGACY_BRAIN_BODY);
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-doctor.timer")));
+  });
+});
+
 test("an unreadable or already repointed legacy unit is left as it is", () => {
   withFixture("", (fx) => {
     mkdirSync(join(fx.unitDir, "iva-memory-doctor.service"), {
@@ -533,6 +620,27 @@ test("restartServices reports a failed restart with its cause and keeps the memo
   });
 });
 
+test("restartServices survives a memory timer that will not disable and names the cause", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+
+    cli(fx, {
+      failing: ["disable --now iva-memory-daily.timer"],
+    }).restartServices();
+
+    assert.ok(fx.calls.includes("restart iva.service"));
+    assert.ok(
+      fx.warnings.some(
+        (w) =>
+          w.includes("legacy memory-timer cleanup incomplete") &&
+          w.includes("disable --now iva-memory-daily.timer failed (exit 1)"),
+      ),
+      fx.warnings.join("\n"),
+    );
+  });
+});
+
 test("restartServices with deferred memory migration keeps the memory timers", () => {
   withFixture("", (fx) => {
     seedLegacyMemory(fx);
@@ -550,6 +658,41 @@ test("memory timers stay when the build carries the markers only outside JS", ()
     seedSchedules(fx, "txt");
 
     assert.deepEqual(cli(fx).retireLegacyMemoryUnits(), []);
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-daily.timer")));
+    assert.ok(
+      fx.warnings.some((w) => w.includes("doesn't contain the eve schedules")),
+    );
+  });
+});
+
+test("unreadable build files are skipped, not fatal, while the markers are found elsewhere", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+    const server = join(fx.project, ".output/server");
+    symlinkSync(join(server, "gone.mjs"), join(server, "a-dangling.mjs"));
+    writeFileSync(join(server, "b-locked.mjs"), "locked");
+    chmodSync(join(server, "b-locked.mjs"), 0o000);
+
+    cli(fx).retireLegacyMemoryUnits();
+
+    assert.equal(existsSync(join(fx.unitDir, "iva-memory-daily.timer")), false);
+  });
+});
+
+test("a build tree that cannot be listed keeps the memory timers", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+    const locked = join(fx.project, ".output/server/locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      assert.deepEqual(cli(fx).retireLegacyMemoryUnits(), []);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+
     assert.ok(existsSync(join(fx.unitDir, "iva-memory-daily.timer")));
     assert.ok(
       fx.warnings.some((w) => w.includes("doesn't contain the eve schedules")),
