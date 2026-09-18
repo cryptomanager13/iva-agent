@@ -59,7 +59,7 @@ Five steps. Each key comes with a direct link to where it lives, and each is val
 - 🟢 **Node 24 via nvm** — no root needed; 24 is a hard floor because memory search uses the built-in `node:sqlite`.
 - 🌐 **agent-browser + Chromium** — headless browser for web tasks; the longest step, 1–3 minutes of visible download output.
 - 🗂️ **Vault init** — your memory is created from `vault-template/` as a separate git repo, so personal data never enters the code repo.
-- ⚙️ **Background runtime** — two systemd user services, two systemd watchdog timers and five in-process eve schedules, with linger enabled so they survive logout. Details: [deploy.md](deploy.md).
+- ⚙️ **Background runtime** — two systemd user services, two systemd watchdog timers and seven in-process eve schedules, with linger enabled so they survive logout. Details: [deploy.md](deploy.md).
 - 🧰 **The `iva` command** — installed into `~/.local/bin`: `iva status`, `iva doctor`, `iva update`. Full reference: [cli.md](cli.md).
 - ✅ **Telegram confirmation** — the last thing the installer does is message you from your own bot: "Iva is installed and online. Send me a message — I'll reply." That's the success signal.
 

@@ -1,6 +1,6 @@
 # Deploy
 
-Iva runs on one VPS as two systemd user services, two systemd watchdog timers, and five in-process eve schedules. `install.sh` sets all of it up ([install](./install.md)); this page is what's actually running and how to operate it.
+Iva runs on one VPS as two systemd user services, two systemd watchdog timers, and seven in-process eve schedules. `install.sh` sets all of it up ([install](./install.md)); this page is what's actually running and how to operate it.
 
 ## Transport: long polling
 
@@ -72,17 +72,19 @@ ASSISTANT_TIMEZONE="$(node --env-file=.env -p 'process.env.ASSISTANT_TIMEZONE ||
 
 ### Memory rollups and the digest: in-process eve schedules
 
-The four memory-rollup cadences moved off systemd and run as `agent/schedules/*.ts` — eve's native `defineSchedule` API — inside the `iva.service` process itself:
+The four memory-rollup cadences moved off systemd and, with the digest, the jobs watchdog and the reminder dispatcher, run as `agent/schedules/*.ts` — eve's native `defineSchedule` API — inside the `iva.service` process itself:
 
-| Schedule         | Cron (local time)           | Job                                                                                                                                |
-| ---------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `memory-daily`   | `0 4 * * *` (04:00 nightly) | transcript → cards + daily summary; Telegram report **off by default**, enable via `memoryReports.enabled` in `data/settings.json` |
-| `memory-weekly`  | `15 4 * * 1` (Mon 04:15)    | 7 dailies → weekly summary; same report switch as `memory-daily`                                                                   |
-| `memory-monthly` | `20 4 1 * *` (1st, 04:20)   | weeklies → monthly summary (silent)                                                                                                |
-| `memory-yearly`  | `25 4 1 1 *` (Jan 1, 04:25) | monthlies → yearly summary (silent)                                                                                                |
-| `digest`         | `0 8 * * *` (08:00 daily)   | morning digest — **off by default**, enable via `digestSchedule.enabled` in `data/settings.json`                                   |
+| Schedule         | Cron (local time)           | Job                                                                                                                                 |
+| ---------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `memory-daily`   | `0 4 * * *` (04:00 nightly) | transcript → cards + daily summary; Telegram report **off by default**, enable via `memoryReports.enabled` in `data/settings.json`  |
+| `memory-weekly`  | `15 4 * * 1` (Mon 04:15)    | 7 dailies → weekly summary; same report switch as `memory-daily`                                                                    |
+| `memory-monthly` | `20 4 1 * *` (1st, 04:20)   | weeklies → monthly summary (silent)                                                                                                 |
+| `memory-yearly`  | `25 4 1 1 *` (Jan 1, 04:25) | monthlies → yearly summary (silent)                                                                                                 |
+| `digest`         | `0 8 * * *` (08:00 daily)   | morning digest — **off by default**, enable via `digestSchedule.enabled` in `data/settings.json`                                    |
+| `jobs-watchdog`  | `17 7 * * *` (07:17 daily)  | `scripts/jobs/watchdog.ts`: one message to the owner when schedules failed and the agent cannot wake ([schedules.md](schedules.md)) |
+| `reminders`      | `* * * * *` (every minute)  | reminder dispatcher: hands due rows of `data/reminders.json` to `scripts/reminders/fire.ts` ([reminders.md](reminders.md))          |
 
-Each one is a thin spawner (`agent/lib/schedule-runner.ts`): it runs the exact same command the old timer did (`flock -w 3900 .memory.lock node --env-file-if-exists=.env scripts/memory/rollup.ts <period>`), under a hard timeout, and records the outcome to `data/rollup-status.json`. `iva.service` sets `Environment=TZ` from `ASSISTANT_TIMEZONE` (`ivaServiceBody()` in `scripts/cli/systemd.ts`), so cron expressions above tick in the configured local time, not the host's system TZ — Nitro's schedule runner carries no timezone of its own otherwise.
+Each rollup is a thin spawner (`agent/lib/schedule-runner.ts`): it runs the exact same command the old timer did (`flock -w 3900 .memory.lock node --env-file-if-exists=.env scripts/memory/rollup.ts <period>`), under a hard timeout, and records the outcome to `data/rollup-status.json`. `iva.service` sets `Environment=TZ` from `ASSISTANT_TIMEZONE` (`ivaServiceBody()` in `scripts/cli/systemd.ts`), so cron expressions above tick in the configured local time, not the host's system TZ — Nitro's schedule runner carries no timezone of its own otherwise.
 
 Nitro's scheduled-task runner has no `Persistent=true` equivalent, so a period missed while the server was down does **not** auto-fire on its own. `agent/lib/schedule-migration.ts` replaces that: on every server start it compares each period's last recorded success against its most recent scheduled point and, if it's stale and still within a grace window (20h daily / 3d weekly / 7d monthly / 14d yearly), runs it once. A brand-new install seeds a baseline and runs nothing on its first boot, so installing never triggers an immediate storm of catch-up jobs. The same start-up hook also retires the old `iva-memory-{daily,weekly,monthly,yearly}.{service,timer}` units on any existing install, by exact name only — any unrelated timer you've set up yourself is left alone.
 

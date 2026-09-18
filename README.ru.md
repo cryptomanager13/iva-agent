@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/smixs/iva-agent/main/install.sh | b
 
 <img src="assets/iva-flow.webp" alt="Как работает Iva: голосовые, тексты, фото и PDF летят из Telegram в агента-иву, вокруг - память, ночная сборка, cron, напоминания, поиск, веб, workspace и документы" width="100%">
 
-Мост опрашивает Telegram через long-poll, так что публичный HTTPS, домен и webhook не нужны. Ива работает как два systemd user service, два systemd watchdog-таймера и пять внутрипроцессных eve schedules - эксплуатация описана в [docs/deploy.md](docs/deploy.md).
+Мост опрашивает Telegram через long-poll, так что публичный HTTPS, домен и webhook не нужны. Ива работает как два systemd user service, два systemd watchdog-таймера и семь внутрипроцессных eve schedules - эксплуатация описана в [docs/deploy.md](docs/deploy.md).
 
 **Зачем вам это** → [25+ живых сценариев - бизнес, работа, жизнь](docs/ru/use-cases.md).
 
