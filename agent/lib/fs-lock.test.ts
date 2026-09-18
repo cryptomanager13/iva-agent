@@ -1,10 +1,11 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns test registration. */
 // Adversarial lock tests: ownership, stale takeover, crash windows, and path replacement.
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import {
+import fs, {
   existsSync,
   mkdirSync,
   readFileSync,
@@ -15,6 +16,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import {
   acquireFileLock,
@@ -542,4 +544,115 @@ test("мигающий чужой лок не зацикливает захва�
 
   if (result) releaseFileLock(result);
   assert.ok(elapsed < 3_000, `захват завис на ${elapsed}ms вместо дедлайна`);
+});
+
+// ─── one contender step at a time ──────────────────────────────────────────
+// A race between two processes lands on a different branch of the acquisition every run.
+// Here a hook on one node:fs call plays the other contender at an exact step, in process,
+// so every branch runs on every run (syncBuiltinESMExports carries the hook to the
+// named imports fs-atomic.ts uses).
+
+const realOpenSync = fs.openSync;
+const realReaddirSync = fs.readdirSync;
+
+function withFsHook(install: () => void, run: () => void): void {
+  install();
+  syncBuiltinESMExports();
+  try {
+    run();
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+}
+
+const quickLock = { timeoutMs: 40, staleMs: 60_000, retryMs: 5 };
+
+test("a lock directory replaced right after mkdir is left to its new owner", () => {
+  const path = join(workspace(), "store.json.lock");
+  let swapped = false;
+  withFsHook(
+    () =>
+      mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+        if (!swapped && String(args[0]) === path && args[1] === "r") {
+          swapped = true;
+          fs.rmdirSync(path);
+          fs.mkdirSync(path, { mode: 0o700 });
+        }
+        return realOpenSync(...args);
+      }),
+    () => {
+      assert.equal(acquireFileLockSync(path, quickLock), null);
+    },
+  );
+  assert.equal(swapped, true);
+  assert.deepEqual(readdirSync(path), [], "the replacement is not touched");
+});
+
+test("a second owner entry beside ours withdraws ours and keeps theirs", () => {
+  const path = join(workspace(), "store.json.lock");
+  const foreign = `.owner-${randomUUID()}`;
+  let planted = false;
+  withFsHook(
+    () =>
+      mock.method(
+        fs,
+        "readdirSync",
+        (...args: Parameters<typeof fs.readdirSync>) => {
+          if (!planted && String(args[0]) === path) {
+            planted = true;
+            writeFileSync(join(path, foreign), "");
+          }
+          return realReaddirSync(...args);
+        },
+      ),
+    () => {
+      assert.equal(acquireFileLockSync(path, quickLock), null);
+    },
+  );
+  assert.equal(planted, true);
+  assert.deepEqual(readdirSync(path), [foreign]);
+});
+
+test("an owner entry that fails with a retryable error is retried and then held", () => {
+  const path = join(workspace(), "store.json.lock");
+  let failed = false;
+  withFsHook(
+    () =>
+      mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+        if (!failed && args[1] === "wx") {
+          failed = true;
+          throw Object.assign(new Error("EINVAL: open"), {
+            code: "EINVAL",
+            syscall: "open",
+          });
+        }
+        return realOpenSync(...args);
+      }),
+    () => {
+      const held = acquireFileLockSync(path, quickLock);
+      assert.ok(held);
+      assert.deepEqual(readdirSync(path), [`.owner-${held.token}`]);
+      releaseFileLock(held);
+    },
+  );
+  assert.equal(failed, true);
+});
+
+test("an owner entry that fails for another reason is thrown and leaves no lock", () => {
+  const path = join(workspace(), "store.json.lock");
+  withFsHook(
+    () =>
+      mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+        if (args[1] === "wx")
+          throw Object.assign(new Error("EACCES: open"), { code: "EACCES" });
+        return realOpenSync(...args);
+      }),
+    () => {
+      assert.throws(() => acquireFileLockSync(path, quickLock), {
+        code: "EACCES",
+      });
+    },
+  );
+  assert.equal(existsSync(path), false);
 });
