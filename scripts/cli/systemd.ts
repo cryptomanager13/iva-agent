@@ -60,6 +60,32 @@ type BrainCleanupOptions = {
   readonly activateNewTimer?: boolean;
 };
 
+type PortMigration = {
+  readonly port: string;
+  /** ASSISTANT_HOST is the old :3000 default and moves to the new port. */
+  readonly moveHost: boolean;
+};
+
+/**
+ * `.env` text with `IVA_PORT` appended after the last non-empty line. Every other line
+ * stays as it is, except a stale :3000 `ASSISTANT_HOST`, which would keep clients on
+ * the taken port.
+ */
+function withIvaPort(raw: string, migration: PortMigration): string {
+  const appended = `${raw.replace(/\n*$/, "\n")}IVA_PORT=${migration.port}\n`;
+  return migration.moveHost
+    ? appended.replace(
+        /^(\s*ASSISTANT_HOST\s*=).*$/m,
+        `$1http://127.0.0.1:${migration.port}`,
+      )
+    : appended;
+}
+
+function portMigrationMessage(migration: PortMigration): string {
+  const moved = migration.moveHost ? ", ASSISTANT_HOST moved off :3000" : "";
+  return `.env migrated → IVA_PORT=${migration.port}${moved}`;
+}
+
 export function createCliSystemd(runtime: CliRuntime) {
   const {
     ROOT,
@@ -85,28 +111,54 @@ export function createCliSystemd(runtime: CliRuntime) {
 
   // Existing installs gain the server-side bearer on their next unit refresh/update.
   // The same migration also repairs .env permissions because it contains every runtime secret.
-  function ensureAssistantBearer({
-    quiet = false,
-  }: QuietOptions = {}): boolean {
+  function ensureAssistantBearer(options: QuietOptions = {}): boolean {
     if (!existsSync(ENV_PATH)) return false;
-    let changed = false;
-    const bearer = (readEnv().ASSISTANT_BEARER || "").trim();
-    const bearerLines =
-      readFileSync(ENV_PATH, "utf8").match(/^\s*ASSISTANT_BEARER\s*=/gm)
-        ?.length || 0;
-    if (!isAssistantBearer(bearer)) {
-      writeEnvVars({ ASSISTANT_BEARER: generateAssistantBearer() });
-      changed = true;
-    } else if (bearerLines !== 1) {
-      writeEnvVars({ ASSISTANT_BEARER: bearer });
-      changed = true;
-    }
-    if ((statSync(ENV_PATH).mode & 0o777) !== 0o600) {
-      chmodSync(ENV_PATH, 0o600);
-      changed = true;
-    }
-    if (changed && !quiet) ok(".env protected and internal bearer configured");
+    // Both repairs run every time: the array is built before some() looks at it.
+    const changed = [repairBearer(), protectEnvFile()].some(Boolean);
+    return announce(
+      changed,
+      options,
+      ".env protected and internal bearer configured",
+    );
+  }
+
+  function announce(
+    changed: boolean,
+    options: QuietOptions,
+    message: string,
+  ): boolean {
+    if (changed && !options.quiet) ok(message);
     return changed;
+  }
+
+  // A valid bearer is kept; a duplicated one collapses to a single line; anything else
+  // is replaced by a fresh one.
+  function repairBearer(): boolean {
+    const bearer = (readEnv().ASSISTANT_BEARER || "").trim();
+    if (!bearerNeedsWrite(bearer)) return false;
+    writeEnvVars({ ASSISTANT_BEARER: usableBearer(bearer) });
+    return true;
+  }
+
+  function bearerNeedsWrite(bearer: string): boolean {
+    return !isAssistantBearer(bearer) || bearerLineCount() !== 1;
+  }
+
+  function usableBearer(bearer: string): string {
+    return isAssistantBearer(bearer) ? bearer : generateAssistantBearer();
+  }
+
+  function bearerLineCount(): number {
+    return (
+      readFileSync(ENV_PATH, "utf8").match(/^\s*ASSISTANT_BEARER\s*=/gm)
+        ?.length ?? 0
+    );
+  }
+
+  function protectEnvFile(): boolean {
+    if ((statSync(ENV_PATH).mode & 0o777) === 0o600) return false;
+    chmodSync(ENV_PATH, 0o600);
+    return true;
   }
 
   // Same regex-validated timezone both writeUnits() (substituted into the deploy/ timer
@@ -115,14 +167,21 @@ export function createCliSystemd(runtime: CliRuntime) {
   // local time) need — one place so the fallback/validation rule can't drift between them.
   function configuredTimezone(): string {
     const raw = readEnv().ASSISTANT_TIMEZONE;
-    const timezone = resolveTimeZone(raw);
-    if (!raw?.trim()) return timezone;
-    if (/^[A-Za-z0-9_+/-]+$/.test(raw)) {
-      const validated = validateTimeZone(raw);
-      if (validated) return validated;
-    }
+    return raw?.trim() ? explicitTimezone(raw) : resolveTimeZone(raw);
+  }
+
+  // Only a name systemd can carry unquoted is accepted, and then only one Intl knows.
+  function explicitTimezone(raw: string): string {
+    return shapedTimezone(raw) || rejectedTimezone(raw);
+  }
+
+  function shapedTimezone(raw: string): string | null {
+    return /^[A-Za-z0-9_+/-]+$/.test(raw) ? validateTimeZone(raw) : null;
+  }
+
+  function rejectedTimezone(raw: string): string {
     warn(`invalid ASSISTANT_TIMEZONE=${JSON.stringify(raw)}; using UTC`);
-    return timezone;
+    return resolveTimeZone(raw);
   }
 
   function canonicalDataDirEnvironment(): string {
@@ -184,21 +243,8 @@ export function createCliSystemd(runtime: CliRuntime) {
     // Каждая цель — независимо: сбой на .env не должен отменять миграцию data/ (и наоборот).
     // Предупреждаем, но установку юнитов не срываем: юниты сами несут UMask=0077, а сорванный
     // writeUnits оставил бы систему вовсе без юнитов — хуже, чем старые права.
-    try {
-      if (existsSync(ENV_PATH)) chmodSync(ENV_PATH, 0o600);
-    } catch (error) {
-      warn(
-        `perms migration (.env) failed: ${(error as { message: string }).message}`,
-      );
-    }
-    try {
-      const data = dataDirAbs();
-      if (existsSync(data)) chmodSync(data, 0o700);
-    } catch (error) {
-      warn(
-        `perms migration (data/) failed: ${(error as { message: string }).message}`,
-      );
-    }
+    tightenIfPresent(() => ENV_PATH, 0o600, ".env");
+    tightenIfPresent(dataDirAbs, 0o700, "data/");
     // Стор воркфлоу несёт транскрипты диалогов, vault — саму память; оба старше UMask-фикса
     // могли быть созданы world-readable. chmod только верхнего уровня (закрывает traversal).
     const vaultDir = resolveVaultDir(ROOT, readEnv().ASSISTANT_VAULT_DIR);
@@ -206,47 +252,93 @@ export function createCliSystemd(runtime: CliRuntime) {
       join(ROOT, ".eve"),
       join(ROOT, ".workflow-data"),
       vaultDir,
-    ]) {
-      try {
-        if (existsSync(path)) chmodSync(path, 0o700);
-      } catch (error) {
-        warn(
-          `perms migration (${relative(ROOT, path)}) failed: ${(error as { message: string }).message}`,
-        );
-      }
+    ])
+      tightenIfPresent(() => path, 0o700, relative(ROOT, path));
+  }
+
+  // The path is resolved inside the try: reading .env for the data dir can fail too, and
+  // that must not cancel the other targets.
+  function tightenIfPresent(
+    target: () => string,
+    mode: number,
+    label: string,
+  ): void {
+    try {
+      const path = target();
+      if (existsSync(path)) chmodSync(path, mode);
+    } catch (error) {
+      warn(
+        `perms migration (${label}) failed: ${(error as { message: string }).message}`,
+      );
     }
   }
 
   // Writes iva.service + all deploy/iva-*.{service,timer} with placeholder substitution. daemon-reload.
-  function writeUnits({
-    deferBrainMigration = false,
-    ensureBearer = true,
-    skipUnits = [],
-  }: WriteUnitsOptions = {}): string[] {
-    hardenPerms();
-    if (ensureBearer) ensureAssistantBearer({ quiet: true });
+  function writeUnits(options: WriteUnitsOptions = {}): string[] {
+    protectSecrets(options);
     mkdirSync(UNIT_DIR, { recursive: true });
     writeFileSync(join(UNIT_DIR, "iva.service"), ivaServiceBody());
-    const written = ["iva.service"];
+    const written = [
+      "iva.service",
+      ...writeDeployUnits(new Set(options.skipUnits)),
+    ];
+    reloadUnits();
+    if (!options.deferBrainMigration) removeLegacyBrainUnits(written);
+    return written;
+  }
+
+  function protectSecrets(options: WriteUnitsOptions): void {
+    hardenPerms();
+    if (options.ensureBearer !== false) ensureAssistantBearer({ quiet: true });
+  }
+
+  function writeDeployUnits(skipped: ReadonlySet<string>): string[] {
     const deploy = join(ROOT, "deploy");
-    const skipped = new Set(skipUnits);
+    const fill = unitPlaceholders();
+    return readdirSync(deploy)
+      .filter((file) => isDeployUnit(file, skipped))
+      .map((file) => {
+        const template = readFileSync(join(deploy, file), "utf8");
+        writeFileSync(join(UNIT_DIR, file), fill(template));
+        return file;
+      });
+  }
+
+  function isDeployUnit(file: string, skipped: ReadonlySet<string>): boolean {
+    return /^iva-.*\.(service|timer)$/.test(file) && !skipped.has(file);
+  }
+
+  // Resolved once per write, so every unit of one run carries the same values.
+  function unitPlaceholders(): (template: string) => string {
     const timezone = configuredTimezone();
     const dataDirEnvironment = canonicalDataDirEnvironment();
-    for (const file of readdirSync(deploy)) {
-      if (!/^iva-.*\.(service|timer)$/.test(file) || skipped.has(file))
-        continue;
-      const template = readFileSync(join(deploy, file), "utf8")
+    return (template) =>
+      template
         .replaceAll("__PROJECT_DIR__", ROOT)
         .replaceAll("__NODE_BIN__", NODE)
         .replaceAll("__PYTHON_BIN__", VENV_PY)
         .replaceAll("__DATA_DIR_ENV__", dataDirEnvironment)
         .replaceAll("__TIMEZONE__", timezone);
-      writeFileSync(join(UNIT_DIR, file), template);
-      written.push(file);
-    }
+  }
+
+  function reloadUnits(): void {
     if (hasSystemd()) systemd.daemonReload();
-    if (!deferBrainMigration) removeLegacyBrainUnits(written);
-    return written;
+  }
+
+  // The unit names from `names` that are installed; none without systemd.
+  function installedUnits(names: readonly string[]): string[] {
+    return hasSystemd()
+      ? names.filter((unit) => existsSync(join(UNIT_DIR, unit)))
+      : [];
+  }
+
+  function unitCleanupSteps() {
+    return {
+      disable: (unit: string) => systemd.disableNow([unit]),
+      remove: (unit: string) => rmSync(join(UNIT_DIR, unit)),
+      reload: () => systemd.daemonReload(),
+      reset: () => systemd.resetFailed(),
+    };
   }
 
   // The Brain rename: iva-memory-doctor.{service,timer} → iva-brain.{service,timer}. deploy/
@@ -275,85 +367,111 @@ export function createCliSystemd(runtime: CliRuntime) {
   // Silent on its own: the callers that keep the pair report it, the one that retires the
   // pair right after has nothing to report.
   function repointLegacyBrainUnits(stale: readonly string[]): string[] {
-    const repointed: string[] = [];
-    for (const unit of stale) {
-      const path = join(UNIT_DIR, unit);
-      let body: string;
-      try {
-        body = readFileSync(path, "utf8");
-      } catch {
-        continue; // unreadable — nothing safe to rewrite, and cleanup below still tries
-      }
-      if (!body.includes(LEGACY_BRAIN_ENTRYPOINT)) continue;
-      try {
-        writeFileSync(
-          path,
-          body.replaceAll(LEGACY_BRAIN_ENTRYPOINT, BRAIN_ENTRYPOINT),
-        );
-        repointed.push(unit);
-      } catch (error) {
-        warn(
-          `could not repoint ${unit} at ${BRAIN_ENTRYPOINT}: ${(error as { message: string }).message}`,
-        );
-      }
-    }
+    const repointed = stale.filter(repointLegacyBrainUnit);
     if (repointed.length) systemd.daemonReload();
     return repointed;
   }
 
+  function repointLegacyBrainUnit(unit: string): boolean {
+    const path = join(UNIT_DIR, unit);
+    // unreadable — nothing safe to rewrite, and the cleanup after still tries
+    const body = readUnit(path);
+    if (!body?.includes(LEGACY_BRAIN_ENTRYPOINT)) return false;
+    return rewriteUnit(
+      unit,
+      body.replaceAll(LEGACY_BRAIN_ENTRYPOINT, BRAIN_ENTRYPOINT),
+    );
+  }
+
+  function readUnit(path: string): string | null {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  function rewriteUnit(unit: string, body: string): boolean {
+    try {
+      writeFileSync(join(UNIT_DIR, unit), body);
+      return true;
+    } catch (error) {
+      warn(
+        `could not repoint ${unit} at ${BRAIN_ENTRYPOINT}: ${(error as { message: string }).message}`,
+      );
+      return false;
+    }
+  }
+
   function removeLegacyBrainUnits(
     written: readonly string[],
-    { activateNewTimer = true }: BrainCleanupOptions = {},
+    options: BrainCleanupOptions = {},
   ): string[] {
-    if (!hasSystemd()) return [];
-    const stale = LEGACY_BRAIN_UNITS.filter((unit) =>
-      existsSync(join(UNIT_DIR, unit)),
-    );
+    const stale = installedUnits(LEGACY_BRAIN_UNITS);
     if (!stale.length) return [];
+    return retireBrainPair(stale, written, options);
+  }
+
+  function retireBrainPair(
+    stale: readonly string[],
+    written: readonly string[],
+    options: BrainCleanupOptions,
+  ): string[] {
     // Before anything else: whatever the steps below decide, a kept unit must be able to run.
     const repointed = repointLegacyBrainUnits(stale);
-    const keeping = (): void => {
-      if (repointed.length)
-        ok(
-          `kept ${repointed.join(", ")} — repointed at ${BRAIN_ENTRYPOINT}, so tonight's vault care still runs`,
-        );
-    };
-    const missing = [BRAIN_SERVICE, BRAIN_TIMER].filter(
+    const blocker = brainPairBlocker(written, options);
+    if (!blocker) return cleanupBrainUnits(stale, repointed);
+    warn(`skipping legacy brain-unit cleanup — ${blocker}`);
+    reportKeptBrainUnits(repointed);
+    return [];
+  }
+
+  // Why the old pair must stay this run, or null when it may go.
+  function brainPairBlocker(
+    written: readonly string[],
+    options: BrainCleanupOptions,
+  ): string | null {
+    const missing = missingBrainUnits(written);
+    if (missing.length)
+      return `${missing.join(" and ")} not installed yet (run \`iva doctor\`, then it will run automatically)`;
+    return options.activateNewTimer === false ? null : brainTimerBlocker();
+  }
+
+  function missingBrainUnits(written: readonly string[]): string[] {
+    return [BRAIN_SERVICE, BRAIN_TIMER].filter(
       (unit) => !written.includes(unit) || !existsSync(join(UNIT_DIR, unit)),
     );
-    if (missing.length) {
-      warn(
-        `skipping legacy brain-unit cleanup — ${missing.join(" and ")} not installed yet (run \`iva doctor\`, then it will run automatically)`,
-      );
-      keeping();
-      return [];
-    }
-    if (activateNewTimer) {
-      try {
-        systemd.activate([BRAIN_TIMER]);
-      } catch (error) {
-        warn(
-          `skipping legacy brain-unit cleanup — ${BRAIN_TIMER} did not come up: ${(error as { message: string }).message}`,
-        );
-        keeping();
-        return [];
-      }
-    }
+  }
+
+  function brainTimerBlocker(): string | null {
     try {
-      return cleanupSystemdUnits({
-        units: stale,
-        disable: (unit) => systemd.disableNow([unit]),
-        remove: (unit) => rmSync(join(UNIT_DIR, unit)),
-        reload: () => systemd.daemonReload(),
-        reset: () => systemd.resetFailed(),
-      });
+      systemd.activate([BRAIN_TIMER]);
+      return null;
+    } catch (error) {
+      return `${BRAIN_TIMER} did not come up: ${(error as { message: string }).message}`;
+    }
+  }
+
+  function cleanupBrainUnits(
+    stale: readonly string[],
+    repointed: readonly string[],
+  ): string[] {
+    try {
+      return cleanupSystemdUnits({ units: stale, ...unitCleanupSteps() });
     } catch (error) {
       warn(
         `legacy brain-unit cleanup incomplete: ${(error as { message: string }).message}`,
       );
-      keeping();
-      return stale;
+      reportKeptBrainUnits(repointed);
+      return [...stale];
     }
+  }
+
+  function reportKeptBrainUnits(repointed: readonly string[]): void {
+    if (repointed.length)
+      ok(
+        `kept ${repointed.join(", ")} — repointed at ${BRAIN_ENTRYPOINT}, so tonight's vault care still runs`,
+      );
   }
 
   // Existing installs may still carry the 8 retired iva-memory-{daily,weekly,monthly,yearly}
@@ -388,77 +506,100 @@ export function createCliSystemd(runtime: CliRuntime) {
     "schedules/memory-yearly.ts",
   ];
   const BUILD_SCAN_MAX_FILE_BYTES = 15_000_000;
+  const NOTHING = Buffer.alloc(0);
   function buildHasSchedules(): boolean {
     const outputServer = join(ROOT, ".output/server");
     if (!existsSync(outputServer)) return false;
-    const remaining = new Set(BUILD_SCHEDULE_MARKERS);
     try {
-      for (const path of readdirSync(outputServer, {
-        recursive: true,
-      }) as string[]) {
-        if (remaining.size === 0) break;
-        const full = join(outputServer, path);
-        let stat: ReturnType<typeof statSync>;
-        try {
-          stat = statSync(full);
-        } catch {
-          continue;
-        }
-        if (!stat.isFile() || stat.size > BUILD_SCAN_MAX_FILE_BYTES) continue;
-        // .output/server is the WHOLE server bundle plus every vendored dependency — a
-        // miss (the common case: doctor/writeUnits runs on every `iva update`) would
-        // otherwise mean synchronously reading tens to hundreds of MB. The markers can only
-        // ever land in Nitro's own compiled JS/JSON output, never in a vendored asset.
-        if (!/\.(mjs|cjs|js|json)$/.test(path)) continue;
-        let content: Buffer;
-        try {
-          content = readFileSync(full); // Buffer — no need to decode as UTF-8 just to substring-search
-        } catch {
-          continue; // unreadable — not where a schedule name would live anyway
-        }
-        // Markers can land in different files (each schedule may compile to its own
-        // _virtual/*.schedule.mjs, or all get inlined into one bundle) — check every
-        // still-missing marker against every file rather than stopping at the first hit.
-        for (const marker of remaining) {
-          if (content.includes(marker)) remaining.delete(marker);
-        }
-      }
+      return missingScheduleMarkers(outputServer).size === 0;
     } catch {
       return false;
     }
-    return remaining.size === 0;
   }
 
-  function removeLegacyMemoryUnits({
-    requireActiveOwner = false,
-    strict = false,
-  }: MemoryCleanupOptions = {}): string[] {
-    if (!hasSystemd()) return [];
-    const units = LEGACY_MEMORY_UNITS.filter((unit) =>
-      existsSync(join(UNIT_DIR, unit)),
-    );
+  function missingScheduleMarkers(outputServer: string): Set<string> {
+    const remaining = new Set(BUILD_SCHEDULE_MARKERS);
+    for (const path of readdirSync(outputServer, {
+      recursive: true,
+    }) as string[]) {
+      if (remaining.size === 0) break;
+      strikeMarkers(remaining, scannableContent(outputServer, path));
+    }
+    return remaining;
+  }
+
+  // Markers can land in different files (each schedule may compile to its own
+  // _virtual/*.schedule.mjs, or all get inlined into one bundle) — check every
+  // still-missing marker against every file rather than stopping at the first hit.
+  function strikeMarkers(remaining: Set<string>, content: Buffer): void {
+    for (const marker of remaining)
+      if (content.includes(marker)) remaining.delete(marker);
+  }
+
+  // .output/server is the WHOLE server bundle plus every vendored dependency — a
+  // miss (the common case: doctor/writeUnits runs on every `iva update`) would
+  // otherwise mean synchronously reading tens to hundreds of MB. The markers can only
+  // ever land in Nitro's own compiled JS/JSON output, never in a vendored asset.
+  // Anything else reads as empty.
+  function scannableContent(outputServer: string, path: string): Buffer {
+    const full = join(outputServer, path);
+    if (!/\.(mjs|cjs|js|json)$/.test(path)) return NOTHING;
+    return isScannableFile(full) ? readOrNothing(full) : NOTHING;
+  }
+
+  function isScannableFile(full: string): boolean {
+    try {
+      const stat = statSync(full);
+      return stat.isFile() && stat.size <= BUILD_SCAN_MAX_FILE_BYTES;
+    } catch {
+      return false;
+    }
+  }
+
+  // Buffer — no need to decode as UTF-8 just to substring-search; unreadable is not
+  // where a schedule name would live anyway.
+  function readOrNothing(full: string): Buffer {
+    try {
+      return readFileSync(full);
+    } catch {
+      return NOTHING;
+    }
+  }
+
+  function removeLegacyMemoryUnits(
+    options: MemoryCleanupOptions = {},
+  ): string[] {
+    const units = installedUnits(LEGACY_MEMORY_UNITS);
     if (!units.length) return [];
+    return retireMemoryUnits(units, options);
+  }
+
+  function retireMemoryUnits(
+    units: string[],
+    options: MemoryCleanupOptions,
+  ): string[] {
     if (!buildHasSchedules()) {
       warn(
         "skipping legacy memory-timer cleanup — the current build doesn't contain the eve schedules yet (rebuild with `iva doctor` or `npm run build`, then it will run automatically)",
       );
       return [];
     }
-    if (requireActiveOwner) {
-      const owner = SERVICES[0];
-      if (!owner || !systemd.isActive(owner))
-        throw new Error(
-          "legacy memory schedules have no active committed service owner",
-        );
-    }
+    if (options.requireActiveOwner)
+      requireScheduleOwner(
+        "legacy memory schedules have no active committed service owner",
+      );
+    return cleanupMemoryUnits(units, options.strict === true);
+  }
+
+  // The first service runs the in-process schedules; it must be up for them to fire.
+  function requireScheduleOwner(message: string): void {
+    const owner = SERVICES[0];
+    if (!owner || !systemd.isActive(owner)) throw new Error(message);
+  }
+
+  function cleanupMemoryUnits(units: string[], strict: boolean): string[] {
     try {
-      return cleanupSystemdUnits({
-        units,
-        disable: (unit) => systemd.disableNow([unit]),
-        remove: (unit) => rmSync(join(UNIT_DIR, unit)),
-        reload: () => systemd.daemonReload(),
-        reset: () => systemd.resetFailed(),
-      });
+      return cleanupSystemdUnits({ units, ...unitCleanupSteps() });
     } catch (error) {
       warn(
         `legacy memory-timer cleanup incomplete: ${(error as { message: string }).message}`,
@@ -477,64 +618,60 @@ export function createCliSystemd(runtime: CliRuntime) {
     const units = readdirSync(UNIT_DIR).filter((file) =>
       /^iva.*\.(service|timer)$/.test(file),
     );
-    return cleanupSystemdUnits({
-      units,
-      disable: (unit) => systemd.disableNow([unit]),
-      remove: (unit) => rmSync(join(UNIT_DIR, unit)),
-      reload: () => systemd.daemonReload(),
-      reset: () => systemd.resetFailed(),
-    });
+    return cleanupSystemdUnits({ units, ...unitCleanupSteps() });
   }
 
   // Migrate old installs to IVA_PORT. Idempotent: on the first `iva update`
   // after switching to the new scheme it guarantees the variable and keeps the server
   // (Environment=PORT=$IVA_PORT) from drifting away from clients (whose default is ASSISTANT_HOST).
-  function migrateEnv({ quiet = false }: QuietOptions = {}): boolean {
-    if (!existsSync(ENV_PATH)) return false;
-    const env = readEnv();
-    if (env.IVA_PORT) return false; // already on the new scheme — leave it alone
-    const host = env.ASSISTANT_HOST || "";
-    const local = host.match(
-      /^https?:\/\/(?:127\.0\.0\.1|localhost):(\d+)\/?$/i,
+  function migrateEnv(options: QuietOptions = {}): boolean {
+    const migration = portMigration();
+    if (!migration) return false;
+    writeEnvAtomicSync(
+      ENV_PATH,
+      withIvaPort(readFileSync(ENV_PATH, "utf8"), migration),
     );
-    const isOldDefault = host === OLD_DEFAULT_HOST;
-    // old default :3000 → new default 8723; custom local host → its port; otherwise the default
-    const port = isOldDefault ? DEFAULT_PORT : local ? local[1] : DEFAULT_PORT;
-    let raw =
-      readFileSync(ENV_PATH, "utf8").replace(/\n*$/, "\n") +
-      `IVA_PORT=${port}\n`;
-    // don't leave a stale :3000 in ASSISTANT_HOST — otherwise clients get stuck on the taken port
-    if (isOldDefault)
-      raw = raw.replace(
-        /^(\s*ASSISTANT_HOST\s*=).*$/m,
-        `$1http://127.0.0.1:${port}`,
-      );
-    writeEnvAtomicSync(ENV_PATH, raw);
-    if (!quiet)
-      ok(
-        `.env migrated → IVA_PORT=${port}${isOldDefault ? ", ASSISTANT_HOST moved off :3000" : ""}`,
-      );
-    return true;
+    return announce(true, options, portMigrationMessage(migration));
+  }
+
+  // null: no .env, or already on the new scheme — leave it alone.
+  function portMigration(): PortMigration | null {
+    if (!existsSync(ENV_PATH)) return null;
+    const env = readEnv();
+    return env.IVA_PORT ? null : portFor(env.ASSISTANT_HOST);
+  }
+
+  // old default :3000 → new default 8723; custom local host → its port; otherwise the default
+  function portFor(host = ""): PortMigration {
+    const moveHost = host === OLD_DEFAULT_HOST;
+    return { port: moveHost ? DEFAULT_PORT : localPort(host), moveHost };
+  }
+
+  function localPort(host: string): string {
+    return (
+      host.match(/^https?:\/\/(?:127\.0\.0\.1|localhost):(\d+)\/?$/i)?.[1] ??
+      DEFAULT_PORT
+    );
   }
 
   // Any restart via `iva` first regenerates the unit → Environment=PORT always equals
   // the current IVA_PORT from .env. Without this, editing IVA_PORT + restart would leave the server
   // on the old port (the unit was already baked) while clients read the new one — the same desync.
-  function restartServices({
-    afterUnitWrite = () => undefined,
-    deferBrainMigration = false,
-    deferMemoryMigration = false,
-    skipUnits = [],
-  }: RestartServicesOptions = {}): void {
-    writeUnits({ deferBrainMigration, skipUnits });
-    afterUnitWrite();
+  function restartServices(options: RestartServicesOptions = {}): void {
+    writeUnits({
+      deferBrainMigration: options.deferBrainMigration,
+      skipUnits: options.skipUnits,
+    });
+    options.afterUnitWrite?.();
     systemd.restart(SERVICES);
-    const scheduleOwner = SERVICES[0];
-    if (!scheduleOwner || !systemd.isActive(scheduleOwner))
-      throw new Error("iva.service is not active after unit restart");
-    // The old timers remain the recovery owner until the compiled schedules and
-    // their freshly restarted process owner have both been proved.
-    if (!deferMemoryMigration) removeLegacyMemoryUnits();
+    requireScheduleOwner("iva.service is not active after unit restart");
+    settleMemoryUnits(options);
+  }
+
+  // The old timers remain the recovery owner until the compiled schedules and
+  // their freshly restarted process owner have both been proved.
+  function settleMemoryUnits(options: RestartServicesOptions): void {
+    if (!options.deferMemoryMigration) removeLegacyMemoryUnits();
   }
 
   /** Retire recovery units only after the updater commits the live service. */
