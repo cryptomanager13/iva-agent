@@ -1,0 +1,636 @@
+/* eslint-disable @typescript-eslint/no-floating-promises -- Node owns test registration. */
+// The unit writer and the .env migrations, in-process against a temp project: the runtime
+// is the real one with UNIT_DIR, hasSystemd and the systemctl runner replaced, so nothing
+// here reaches ~/.config/systemd or a real systemctl.
+import assert from "node:assert/strict";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { parseEnv } from "node:util";
+import fc from "fast-check";
+import { isAssistantBearer } from "../lib/assistant-auth.ts";
+import { createSystemdControl } from "../lib/systemd-control.ts";
+import { createCliRuntime } from "./runtime.ts";
+import { createCliSystemd } from "./systemd.ts";
+
+const NO_COLOR = { g: "", y: "", r: "", c: "", b: "", d: "", x: "" };
+const BEARER = "b".repeat(43);
+
+const TEMPLATES: Readonly<Record<string, string>> = {
+  "iva-brain.service":
+    "ExecStart=/usr/bin/env __DATA_DIR_ENV__ __NODE_BIN__ __PROJECT_DIR__/scripts/memory/brain.ts\n",
+  "iva-brain.timer": "OnCalendar=*-*-* 05:00:00 __TIMEZONE__\n",
+  "iva-telegram-userbot.service": "ExecStart=__PYTHON_BIN__ -m userbot\n",
+  "iva-tree.ans": "__PROJECT_DIR__ is not a unit\n",
+};
+
+const LEGACY_BRAIN_BODY =
+  "ExecStart=/usr/bin/node __PROJECT__/scripts/memory/doctor.ts\n";
+
+type Fixture = {
+  readonly project: string;
+  readonly unitDir: string;
+  readonly envPath: string;
+  readonly calls: string[];
+  readonly reports: string[];
+  readonly warnings: string[];
+  cleanup(): void;
+};
+
+type SystemdSetup = {
+  readonly hasSystemd?: boolean;
+  /** systemctl arguments (joined by a space) that exit 1. */
+  readonly failing?: readonly string[];
+  /** Units `is-active` reports as inactive. */
+  readonly inactive?: readonly string[];
+};
+
+function fixture(env: string | null): Fixture {
+  const dir = mkdtempSync(join(tmpdir(), "iva-systemd-cli-"));
+  const project = join(dir, "iva");
+  const unitDir = join(dir, "home/.config/systemd/user");
+  mkdirSync(join(project, "deploy"), { recursive: true });
+  for (const [file, body] of Object.entries(TEMPLATES))
+    writeFileSync(join(project, "deploy", file), body);
+  const envPath = join(project, ".env");
+  if (env !== null) writeFileSync(envPath, env, { mode: 0o644 });
+  return {
+    project,
+    unitDir,
+    envPath,
+    calls: [],
+    reports: [],
+    warnings: [],
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+function cli(fx: Fixture, setup: SystemdSetup = {}) {
+  const failing = new Set(setup.failing ?? []);
+  const inactive = new Set(setup.inactive ?? []);
+  const run = (args: readonly string[]) => {
+    const line = args.join(" ");
+    fx.calls.push(line);
+    if (failing.has(line)) return { code: 1, out: "" };
+    if (args[0] === "is-enabled") return { code: 0, out: "enabled" };
+    if (args[0] === "is-active")
+      return inactive.has(args[1] ?? "")
+        ? { code: 3, out: "inactive" }
+        : { code: 0, out: "active" };
+    return { code: 0, out: "" };
+  };
+  return createCliSystemd({
+    ...createCliRuntime(fx.project),
+    C: NO_COLOR,
+    UNIT_DIR: fx.unitDir,
+    hasSystemd: () => setup.hasSystemd ?? true,
+    systemd: createSystemdControl({ run }),
+    ok: (message: string) => fx.reports.push(message),
+    warn: (message: string) => fx.warnings.push(message),
+  });
+}
+
+function withFixture(env: string | null, body: (fx: Fixture) => void): void {
+  const fx = fixture(env);
+  try {
+    body(fx);
+  } finally {
+    fx.cleanup();
+  }
+}
+
+const unit = (fx: Fixture, name: string): string =>
+  readFileSync(join(fx.unitDir, name), "utf8");
+const envOf = (fx: Fixture): Record<string, string | undefined> =>
+  parseEnv(readFileSync(fx.envPath, "utf8"));
+const mode = (path: string): number => statSync(path).mode & 0o777;
+
+function snapshot(fx: Fixture): Record<string, string> {
+  const files: Record<string, string> = {
+    ".env": readFileSync(fx.envPath, "utf8"),
+  };
+  for (const name of readdirSync(fx.unitDir)) files[name] = unit(fx, name);
+  return files;
+}
+
+function seedLegacyBrain(fx: Fixture): void {
+  mkdirSync(fx.unitDir, { recursive: true });
+  for (const name of ["iva-memory-doctor.service", "iva-memory-doctor.timer"])
+    writeFileSync(join(fx.unitDir, name), LEGACY_BRAIN_BODY);
+}
+
+function seedLegacyMemory(fx: Fixture): void {
+  mkdirSync(fx.unitDir, { recursive: true });
+  writeFileSync(join(fx.unitDir, "iva-memory-daily.timer"), "[Timer]\n");
+}
+
+function seedSchedules(fx: Fixture, extension = "mjs"): void {
+  const dir = join(fx.project, ".output/server/_virtual");
+  mkdirSync(dir, { recursive: true });
+  for (const period of ["daily", "weekly", "monthly", "yearly"])
+    writeFileSync(
+      join(dir, `eve-${period}.schedule.${extension}`),
+      `description: "schedules/memory-${period}.ts"\n`,
+    );
+}
+
+// ── writeUnits ──────────────────────────────────────────────────────────────
+
+test("writeUnits writes every unit with its placeholders filled and closes the secrets", () => {
+  withFixture("ASSISTANT_TIMEZONE=Europe/Moscow\nIVA_PORT=9001\n", (fx) => {
+    mkdirSync(join(fx.project, "data"), { mode: 0o755 });
+    chmodSync(join(fx.project, "data"), 0o755);
+
+    const written = cli(fx).writeUnits({
+      skipUnits: ["iva-telegram-userbot.service"],
+    });
+
+    assert.deepEqual(written.sort(), [
+      "iva-brain.service",
+      "iva-brain.timer",
+      "iva.service",
+    ]);
+    assert.deepEqual(readdirSync(fx.unitDir).sort(), written);
+    const service = unit(fx, "iva.service");
+    assert.match(service, /^Environment=PORT=9001$/m);
+    assert.match(service, /^Environment=TZ=Europe\/Moscow$/m);
+    assert.match(service, new RegExp(`^WorkingDirectory=${fx.project}$`, "m"));
+    assert.match(service, /--host 127\.0\.0\.1$/m);
+    assert.equal(
+      unit(fx, "iva-brain.timer"),
+      "OnCalendar=*-*-* 05:00:00 Europe/Moscow\n",
+    );
+    assert.equal(
+      unit(fx, "iva-brain.service"),
+      `ExecStart=/usr/bin/env "ASSISTANT_DATA_DIR=${join(fx.project, "data")}" ${process.execPath} ${fx.project}/scripts/memory/brain.ts\n`,
+    );
+    assert.equal(mode(fx.envPath), 0o600);
+    assert.equal(mode(join(fx.project, "data")), 0o700);
+    assert.ok(isAssistantBearer(envOf(fx).ASSISTANT_BEARER));
+    assert.deepEqual(fx.calls, ["daemon-reload"]);
+  });
+});
+
+test("writeUnits run twice leaves units, bearer and .env exactly as the first run did", () => {
+  withFixture("IVA_PORT=9001\n", (fx) => {
+    const systemd = cli(fx);
+    systemd.writeUnits();
+    const first = snapshot(fx);
+
+    systemd.writeUnits();
+
+    assert.deepEqual(snapshot(fx), first);
+    assert.deepEqual(fx.warnings, []);
+  });
+});
+
+test("writeUnits falls back to UTC for an invalid timezone and says so", () => {
+  withFixture('ASSISTANT_TIMEZONE="Mars/Base; rm"\n', (fx) => {
+    cli(fx, { hasSystemd: false }).writeUnits({ ensureBearer: false });
+
+    assert.match(unit(fx, "iva.service"), /^Environment=TZ=UTC$/m);
+    assert.equal(
+      unit(fx, "iva-brain.timer"),
+      "OnCalendar=*-*-* 05:00:00 UTC\n",
+    );
+    assert.ok(
+      fx.warnings.some((w) => w.includes("invalid ASSISTANT_TIMEZONE")),
+    );
+    assert.equal(envOf(fx).ASSISTANT_BEARER, undefined);
+    assert.deepEqual(fx.calls, []);
+  });
+});
+
+test("writeUnits canonicalises an alias timezone and keeps the default port", () => {
+  withFixture("ASSISTANT_TIMEZONE=US/Pacific\n", (fx) => {
+    cli(fx).writeUnits({ deferBrainMigration: true });
+
+    const service = unit(fx, "iva.service");
+    assert.match(service, /^Environment=TZ=America\/Los_Angeles$/m);
+    assert.match(service, /^Environment=PORT=8723$/m);
+    assert.deepEqual(fx.warnings, []);
+  });
+});
+
+test("a failing daemon-reload surfaces with the systemctl exit code", () => {
+  withFixture("", (fx) => {
+    assert.throws(
+      () => cli(fx, { failing: ["daemon-reload"] }).writeUnits(),
+      /systemctl --user daemon-reload failed \(exit 1\)/,
+    );
+  });
+});
+
+// ── ensureAssistantBearer ──────────────────────────────────────────────────
+
+test("the bearer is created once and reused on every later run", () => {
+  withFixture("TELEGRAM_BOT_TOKEN=123:abc\n", (fx) => {
+    const systemd = cli(fx);
+
+    assert.equal(systemd.ensureAssistantBearer(), true);
+    const bearer = envOf(fx).ASSISTANT_BEARER;
+    assert.equal(systemd.ensureAssistantBearer(), false);
+
+    assert.ok(isAssistantBearer(bearer));
+    assert.equal(envOf(fx).ASSISTANT_BEARER, bearer);
+    assert.equal(envOf(fx).TELEGRAM_BOT_TOKEN, "123:abc");
+    assert.equal(mode(fx.envPath), 0o600);
+    assert.deepEqual(fx.reports, [
+      ".env protected and internal bearer configured",
+    ]);
+  });
+});
+
+test("a duplicated valid bearer collapses to one line with the same value", () => {
+  withFixture(
+    `ASSISTANT_BEARER=${BEARER}\nA=1\nASSISTANT_BEARER=${BEARER}\n`,
+    (fx) => {
+      chmodSync(fx.envPath, 0o600);
+
+      assert.equal(cli(fx).ensureAssistantBearer({ quiet: true }), true);
+
+      const raw = readFileSync(fx.envPath, "utf8");
+      assert.equal(raw.match(/^ASSISTANT_BEARER=/gm)?.length, 1);
+      assert.equal(envOf(fx).ASSISTANT_BEARER, BEARER);
+      assert.equal(envOf(fx).A, "1");
+      assert.deepEqual(fx.reports, []);
+    },
+  );
+});
+
+test("an invalid bearer is replaced and a missing .env is left missing", () => {
+  withFixture("ASSISTANT_BEARER=short\n", (fx) => {
+    assert.equal(cli(fx).ensureAssistantBearer({ quiet: true }), true);
+    assert.notEqual(envOf(fx).ASSISTANT_BEARER, "short");
+    assert.ok(isAssistantBearer(envOf(fx).ASSISTANT_BEARER));
+  });
+  withFixture(null, (fx) => {
+    assert.equal(cli(fx).ensureAssistantBearer(), false);
+    assert.equal(existsSync(fx.envPath), false);
+  });
+});
+
+// ── migrateEnv ─────────────────────────────────────────────────────────────
+
+test("migrateEnv moves the old :3000 default to the new port and keeps secrets", () => {
+  withFixture(
+    `ASSISTANT_HOST=http://127.0.0.1:3000\nASSISTANT_BEARER=${BEARER}\n\n\n`,
+    (fx) => {
+      assert.equal(cli(fx).migrateEnv(), true);
+
+      assert.equal(
+        readFileSync(fx.envPath, "utf8"),
+        `ASSISTANT_HOST=http://127.0.0.1:8723\nASSISTANT_BEARER=${BEARER}\nIVA_PORT=8723\n`,
+      );
+      assert.deepEqual(fx.reports, [
+        ".env migrated → IVA_PORT=8723, ASSISTANT_HOST moved off :3000",
+      ]);
+    },
+  );
+});
+
+test("migrateEnv takes the port of a custom local host and leaves the host alone", () => {
+  withFixture("ASSISTANT_HOST=http://localhost:4100/", (fx) => {
+    assert.equal(cli(fx).migrateEnv({ quiet: true }), true);
+
+    assert.equal(
+      readFileSync(fx.envPath, "utf8"),
+      "ASSISTANT_HOST=http://localhost:4100/\nIVA_PORT=4100\n",
+    );
+    assert.deepEqual(fx.reports, []);
+  });
+});
+
+test("migrateEnv does nothing without .env or on the new scheme", () => {
+  withFixture(null, (fx) => {
+    assert.equal(cli(fx).migrateEnv(), false);
+    assert.equal(existsSync(fx.envPath), false);
+  });
+  withFixture("IVA_PORT=9000\nASSISTANT_HOST=http://127.0.0.1:3000\n", (fx) => {
+    assert.equal(cli(fx).migrateEnv(), false);
+    assert.equal(
+      readFileSync(fx.envPath, "utf8"),
+      "IVA_PORT=9000\nASSISTANT_HOST=http://127.0.0.1:3000\n",
+    );
+  });
+});
+
+const envKey = fc.stringMatching(/^[A-Z][A-Z0-9_]{0,11}$/);
+const envValue = fc.stringMatching(/^[A-Za-z0-9_./:@+-]{0,24}$/);
+const envHost = fc.oneof(
+  fc.constant("http://127.0.0.1:3000"),
+  fc.integer({ min: 1, max: 65535 }).map((port) => `http://localhost:${port}`),
+  fc
+    .integer({ min: 1, max: 65535 })
+    .map((port) => `https://127.0.0.1:${port}/`),
+  fc.constant("https://iva.example.com"),
+);
+const envFile = fc
+  .record({
+    entries: fc.uniqueArray(fc.tuple(envKey, envValue), {
+      selector: ([key]) => key,
+      maxLength: 12,
+    }),
+    host: fc.option(envHost, { nil: undefined }),
+    comments: fc.array(fc.constantFrom("# note", "", "   "), { maxLength: 4 }),
+    trailingNewlines: fc.integer({ min: 0, max: 3 }),
+  })
+  .map(({ entries, host, comments, trailingNewlines }) => {
+    const lines = entries
+      .filter(([key]) => key !== "IVA_PORT" && key !== "ASSISTANT_HOST")
+      .map(([key, value]) => `${key}=${value}`);
+    if (host !== undefined)
+      lines.splice(lines.length >> 1, 0, `ASSISTANT_HOST=${host}`);
+    lines.splice(1, 0, ...comments);
+    return lines.join("\n") + "\n".repeat(trailingNewlines);
+  });
+
+test("property: migrateEnv keeps every key and line, adds one IVA_PORT, and is idempotent", () => {
+  const seed = Number(process.env.FC_SEED ?? Date.now() % 2 ** 31);
+  console.log(`migrateEnv property seed=${seed} (rerun with FC_SEED=${seed})`);
+  fc.assert(
+    fc.property(envFile, (raw) => {
+      withFixture(raw, (fx) => {
+        const before = parseEnv(raw);
+        const systemd = cli(fx);
+
+        assert.equal(systemd.migrateEnv({ quiet: true }), true);
+        const migrated = readFileSync(fx.envPath, "utf8");
+        const after = parseEnv(migrated);
+
+        const movedHost = before.ASSISTANT_HOST === "http://127.0.0.1:3000";
+        for (const [key, value] of Object.entries(before))
+          if (!(movedHost && key === "ASSISTANT_HOST"))
+            assert.equal(after[key], value, key);
+        assert.equal(migrated.match(/^IVA_PORT=/gm)?.length, 1);
+        assert.match(after.IVA_PORT ?? "", /^\d+$/);
+        const kept = migrated.split("\n");
+        for (const line of raw.split("\n").filter((l) => l.trim()))
+          if (!(movedHost && line.startsWith("ASSISTANT_HOST=")))
+            assert.ok(kept.includes(line), `line lost: ${line}`);
+        if (movedHost)
+          assert.equal(
+            after.ASSISTANT_HOST,
+            `http://127.0.0.1:${after.IVA_PORT}`,
+          );
+
+        assert.equal(systemd.migrateEnv({ quiet: true }), false);
+        assert.equal(readFileSync(fx.envPath, "utf8"), migrated);
+      });
+    }),
+    { seed, numRuns: 60 },
+  );
+});
+
+// ── legacy brain pair ──────────────────────────────────────────────────────
+
+test("the legacy brain pair is retired once the new timer is up", () => {
+  withFixture("", (fx) => {
+    seedLegacyBrain(fx);
+
+    cli(fx).writeUnits();
+
+    assert.equal(
+      existsSync(join(fx.unitDir, "iva-memory-doctor.service")),
+      false,
+    );
+    assert.equal(
+      existsSync(join(fx.unitDir, "iva-memory-doctor.timer")),
+      false,
+    );
+    assert.ok(fx.calls.includes("enable --now iva-brain.timer"));
+    assert.ok(fx.calls.includes("disable --now iva-memory-doctor.timer"));
+    assert.deepEqual(fx.warnings, []);
+  });
+});
+
+test("a brain timer that fails to start keeps the legacy pair, repointed, and names the cause", () => {
+  withFixture("", (fx) => {
+    seedLegacyBrain(fx);
+
+    cli(fx, { failing: ["enable --now iva-brain.timer"] }).writeUnits();
+
+    assert.ok(
+      fx.warnings.some((w) =>
+        w.includes(
+          "iva-brain.timer did not come up: systemctl --user enable --now iva-brain.timer failed (exit 1)",
+        ),
+      ),
+      fx.warnings.join("\n"),
+    );
+    assert.equal(
+      unit(fx, "iva-memory-doctor.service"),
+      "ExecStart=/usr/bin/node __PROJECT__/scripts/memory/brain.ts\n",
+    );
+    assert.ok(
+      fx.reports.some((r) => r.startsWith("kept iva-memory-doctor.service")),
+    );
+    assert.equal(
+      fx.calls.includes("disable --now iva-memory-doctor.timer"),
+      false,
+    );
+  });
+});
+
+test("the legacy brain pair stays while the new pair is not written", () => {
+  withFixture("", (fx) => {
+    seedLegacyBrain(fx);
+
+    cli(fx).writeUnits({ skipUnits: ["iva-brain.timer"] });
+
+    assert.ok(
+      fx.warnings.some((w) => w.includes("iva-brain.timer not installed yet")),
+    );
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-doctor.timer")));
+    assert.equal(fx.calls.includes("enable --now iva-brain.timer"), false);
+  });
+});
+
+test("a deferred brain retirement skips activation; a failed disable keeps the units and says why", () => {
+  withFixture("", (fx) => {
+    seedLegacyBrain(fx);
+    const systemd = cli(fx, {
+      failing: ["disable --now iva-memory-doctor.service"],
+    });
+    systemd.writeUnits({ deferBrainMigration: true });
+
+    const kept = systemd.retireDeferredBrainUnits();
+
+    assert.deepEqual(kept, [
+      "iva-memory-doctor.service",
+      "iva-memory-doctor.timer",
+    ]);
+    assert.equal(fx.calls.includes("enable --now iva-brain.timer"), false);
+    assert.ok(
+      fx.warnings.some(
+        (w) =>
+          w.includes("legacy brain-unit cleanup incomplete") &&
+          w.includes("disable --now iva-memory-doctor.service failed (exit 1)"),
+      ),
+      fx.warnings.join("\n"),
+    );
+  });
+});
+
+test("an unreadable or already repointed legacy unit is left as it is", () => {
+  withFixture("", (fx) => {
+    mkdirSync(join(fx.unitDir, "iva-memory-doctor.service"), {
+      recursive: true,
+    });
+    writeFileSync(join(fx.unitDir, "iva-memory-doctor.timer"), "[Timer]\n");
+
+    cli(fx).writeUnits({ skipUnits: ["iva-brain.service"] });
+
+    assert.equal(unit(fx, "iva-memory-doctor.timer"), "[Timer]\n");
+    assert.deepEqual(
+      fx.reports.filter((r) => r.startsWith("kept")),
+      [],
+    );
+  });
+});
+
+// ── legacy memory units, restart, activate, remove ─────────────────────────
+
+test("restartServices rewrites units, runs the hook, restarts, and retires memory timers", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+    const order: string[] = [];
+
+    cli(fx).restartServices({
+      afterUnitWrite: () =>
+        order.push(`hook:${existsSync(join(fx.unitDir, "iva.service"))}`),
+    });
+
+    assert.deepEqual(order, ["hook:true"]);
+    assert.ok(fx.calls.includes("restart iva.service"));
+    assert.ok(fx.calls.includes("restart iva-telegram-poll.service"));
+    assert.equal(existsSync(join(fx.unitDir, "iva-memory-daily.timer")), false);
+  });
+});
+
+test("restartServices reports a failed restart with its cause and keeps the memory timers", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+
+    assert.throws(
+      () => cli(fx, { failing: ["restart iva.service"] }).restartServices(),
+      /systemctl --user restart iva\.service failed \(exit 1\)/,
+    );
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-daily.timer")));
+  });
+});
+
+test("restartServices with deferred memory migration keeps the memory timers", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+
+    cli(fx).restartServices({ deferMemoryMigration: true });
+
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-daily.timer")));
+  });
+});
+
+test("memory timers stay when the build carries the markers only outside JS", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx, "txt");
+
+    assert.deepEqual(cli(fx).retireLegacyMemoryUnits(), []);
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-daily.timer")));
+    assert.ok(
+      fx.warnings.some((w) => w.includes("doesn't contain the eve schedules")),
+    );
+  });
+});
+
+test("retiring memory timers needs a live owner and fails loudly on a broken cleanup", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedSchedules(fx);
+
+    assert.throws(
+      () => cli(fx, { inactive: ["iva.service"] }).retireLegacyMemoryUnits(),
+      /no active committed service owner/,
+    );
+    assert.throws(
+      () => cli(fx, { failing: ["daemon-reload"] }).retireLegacyMemoryUnits(),
+      /daemon-reload: systemctl --user daemon-reload failed \(exit 1\)/,
+    );
+    assert.ok(
+      fx.warnings.some((w) =>
+        w.includes("legacy memory-timer cleanup incomplete"),
+      ),
+    );
+  });
+});
+
+test("without systemd no legacy unit is touched", () => {
+  withFixture("", (fx) => {
+    seedLegacyMemory(fx);
+    seedLegacyBrain(fx);
+    seedSchedules(fx);
+    const systemd = cli(fx, { hasSystemd: false });
+
+    systemd.writeUnits();
+
+    assert.deepEqual(systemd.retireLegacyMemoryUnits(), []);
+    assert.deepEqual(systemd.retireDeferredBrainUnits(), []);
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-daily.timer")));
+    assert.ok(existsSync(join(fx.unitDir, "iva-memory-doctor.timer")));
+    assert.deepEqual(fx.calls, []);
+  });
+});
+
+test("activateUnits enables every service and timer", () => {
+  withFixture("", (fx) => {
+    cli(fx).activateUnits();
+
+    for (const name of [
+      "iva.service",
+      "iva-telegram-poll.service",
+      "iva-brain.timer",
+      "iva-update-check.timer",
+    ])
+      assert.ok(fx.calls.includes(`enable --now ${name}`), name);
+  });
+});
+
+test("removeUnits removes only Iva units and reports a failed disable with its cause", () => {
+  withFixture("", (fx) => {
+    const systemd = cli(fx);
+    assert.deepEqual(systemd.removeUnits(), []);
+    systemd.writeUnits({ ensureBearer: false });
+    writeFileSync(join(fx.unitDir, "other.service"), "[Unit]\n");
+
+    assert.deepEqual(systemd.removeUnits().sort(), [
+      "iva-brain.service",
+      "iva-brain.timer",
+      "iva-telegram-userbot.service",
+      "iva.service",
+    ]);
+    assert.deepEqual(readdirSync(fx.unitDir), ["other.service"]);
+  });
+  withFixture("", (fx) => {
+    const systemd = cli(fx, { failing: ["disable --now iva.service"] });
+    systemd.writeUnits({ ensureBearer: false });
+
+    assert.throws(
+      () => systemd.removeUnits(),
+      /disable iva\.service: systemctl --user disable --now iva\.service failed \(exit 1\)/,
+    );
+  });
+});
