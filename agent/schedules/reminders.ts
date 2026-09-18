@@ -1,4 +1,4 @@
-// Reminders dispatcher (docs/patterns/dynamic-scheduling.md): ticks every minute, claims the
+// Reminders dispatcher (docs/reminders.md): ticks every minute, claims the
 // due rows of data/reminders.json and hands each one to scripts/reminders/fire.ts in its
 // own child process (the authored tree cannot import the Telegram transport, see
 // scripts/authored-tree-guard.test.ts). No runScheduledJob status entry: the reminder table
