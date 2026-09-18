@@ -28,7 +28,6 @@ import {
 } from "../lib/notice-policy.ts";
 import { notificationChat } from "../lib/notification-chat.ts";
 import { redactNotice } from "../lib/notice.ts";
-import { REPAIR_COMMAND } from "../lib/update-check.ts";
 import { resolveDataDir } from "../lib/data-dir.ts";
 import { resolveTimeZone } from "../lib/timezone.ts";
 import { vaultDirOrExit } from "../lib/vault-boundary.ts";
@@ -227,7 +226,7 @@ interface CardTools {
 }
 
 // The CORE cap and the fence rules describe the card format, so they live in the authored
-// tree — which eve rebuilds at service start and which repair.sh exists for when it is
+// tree — which eve rebuilds at service start and which `iva update --force` rebuilds when it is
 // missing or half-written (ADR-0003). This unit's load-bearing job is §3, the vault backup,
 // and that needs no tree at all: the tree is therefore reached through a dynamic import here,
 // so its absence costs §1b and §1c and is reported, instead of killing the nightly backup at
@@ -448,9 +447,9 @@ if (!cards) {
     "unloadable",
     T(
       "Iva's own files could not be loaded. The CORE.md size check and the broken-card scan were skipped. " +
-        `The memory backup still ran. To put Iva's files back, on the server run: ${REPAIR_COMMAND}`,
+        "The memory backup still ran. To rebuild Iva's files, on the server run: iva update --force",
       "Файлы самой Ивы не читаются. Проверка размера CORE.md и поиск битых карточек пропущены. " +
-        `Бэкап памяти всё равно прошёл. Вернуть файлы Ивы на место: выполни на сервере ${REPAIR_COMMAND}`,
+        "Бэкап памяти всё равно прошёл. Пересобрать файлы Ивы: выполни на сервере iva update --force",
     ),
   );
 } else {

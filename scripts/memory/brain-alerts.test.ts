@@ -594,10 +594,7 @@ function runBrainWithoutTree(
     "notice-policy.ts",
     "notice.ts",
     "notification-chat.ts",
-    "telegram-buttons.ts",
     "timezone.ts",
-    "update-channel.ts",
-    "update-check.ts",
     "vault-boundary.ts",
   ])
     copyFileSync(
@@ -718,8 +715,7 @@ test("a broken agent/ does not erase the throttle of what it could not check", (
 });
 
 // Совет владельцу обязан называть команду, которая есть: `iva repair` годами стоял в этом
-// алерте, а такой команды в CLI не было. Каждая `iva <имя>` в тексте — ключ таблицы CLI,
-// каждый скрипт по ссылке `…/main/<файл>` — файл в корне репо.
+// алерте, а такой команды в CLI не было. Каждая `iva <имя>` в тексте — ключ таблицы CLI.
 test("the broken-tree alert names only commands that exist", (t) => {
   const commands = createCliMain(ROOT).commands;
   for (const language of ["ru", "en"] as const) {
@@ -730,14 +726,9 @@ test("the broken-tree alert names only commands that exist", (t) => {
     assert.ok(alert, `${language}: the broken-tree alert is missing`);
 
     const cli = [...alert.matchAll(/\biva ([a-z-]+)/gu)].map((m) => m[1]);
-    const scripts = [
-      ...alert.matchAll(/iva-agent\/main\/([\w.-]+\.sh)\b/gu),
-    ].map((m) => m[1]);
-    assert.ok(cli.length + scripts.length > 0, `${language}: no remedy named`);
+    assert.ok(cli.length > 0, `${language}: no remedy named`);
     for (const name of cli)
       assert.ok(Object.hasOwn(commands, name), `${language}: no "iva ${name}"`);
-    for (const file of scripts)
-      assert.ok(existsSync(join(ROOT, file)), `${language}: no ${file}`);
   }
 });
 

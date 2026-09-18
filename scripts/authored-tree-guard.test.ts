@@ -309,7 +309,7 @@ test("the CLI loads without the authored tree present", () => {
   assert.deepEqual(
     cliEdgesIntoAuthoredTree(),
     [],
-    "repair.sh (through iva update) and iva doctor run on installs whose agent/ is missing or half-written — reach the authored tree through a dynamic import inside the call that needs it",
+    "iva update and iva doctor run on installs whose agent/ is missing or half-written — reach the authored tree through a dynamic import inside the call that needs it",
   );
 });
 
