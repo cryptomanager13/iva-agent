@@ -22,8 +22,9 @@ a parallel bespoke UI layer.
 eve rebuilds `agent/` at service start, so a specifier there that resolves into
 `scripts/` drags operational code into the bundle — the failure behind the 0.3.14 crash
 loop (issue #176). RESOLVED: there are none left. `scripts/authored-tree-guard.test.ts`
-asserts an empty set and carries no list to add to, so a new specifier out of `agent/` is
-red on sight. The guard scans production files only: tests never reach the bundle eve
+asserts the exact list of edges out of `agent/`, and every one of them leads into the shared
+`packages/` (`@iva/*` or a relative path there), so a new specifier out of `agent/` is red
+on sight. The guard scans production files only: tests never reach the bundle eve
 rebuilds, so a specifier in a `*.test.ts` cannot drag `scripts/` into it.
 
 Moved to their canonical home in `agent/lib`: `telegram-acceptance`, `run-status`,
@@ -34,7 +35,7 @@ Moved to their canonical home in `agent/lib`: `telegram-acceptance`, `run-status
 consumers reach them through the `#lib/` alias instead of the other way around.
 
 What made the last ten closable is the seam, not a move. `iva` has to work on an install
-whose `agent/` is missing or half-written — that is the state `iva repair` exists for
+whose `agent/` is missing or half-written — that is the state `repair.sh` exists for
 (ADR-0003) — so every module those processes **load** stays in `scripts/`, every module the
 authored tree needs lives in `agent/lib`, and neither side reaches the other while loading.
 "Those processes" is wider than `scripts/cli/*`: the guard's load-time walk stops at a
@@ -293,4 +294,4 @@ session, and refuse a result whose `message.received` is not this Turn's prompt
 (per-execution nonce, `sentNotBefore` at send time). Remove both when a released
 eve correlates `result()` with the sent turn.
 
-eve 0.51.1 wants peer `ai ^7.0.82`, but Iva overrides `ai` to 7.0.39; eve also bundles Workflow SDK 5.0.0-beta and Zod 4.5, and its bundled `@ai-sdk/code-mode` imports `experimental_toolCaller`, which 7.0.39 lacks, so that module does not link. This is harmless while Iva enables no Workflow/code-mode tool, but any such tool would crash server start; revisit this dependency separately by upgrading `ai` to at least 7.0.82. Until that upgrade, the workflow-tool route for Reminders (variant C) stays deferred: ADR-0013 rejects it partly on this pin, because enabling such a tool would crash server start.
+The `ai` pin is gone: Iva used to override `ai` to 7.0.39 against eve 0.51.1's peer `ai ^7.0.82`, so eve's bundled `@ai-sdk/code-mode` (it imports `experimental_toolCaller`) did not link and any Workflow/code-mode tool would crash server start. `package.json` now asks for `ai ^7.0.82` with no override. ADR-0013 rejected the workflow-tool route for Reminders (variant C) partly on that pin; the pin no longer stands in its way, the rest of the ADR's reasoning does.
