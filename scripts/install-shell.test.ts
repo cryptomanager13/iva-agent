@@ -448,6 +448,12 @@ chmodSync(join(TOOLS, "npm"), 0o755);
 // the developer's global binaries, and putting that directory on PATH is how a fixture
 // ends up finding a real gws - or launching a real browser and downloading Chromium.
 symlinkSync(process.execPath, join(TOOLS, "node"));
+// git too: on macOS /usr/bin/git is an Xcode shim that exits 69 until the Xcode licence is
+// accepted, so the fixture takes the git this test process itself runs.
+symlinkSync(
+  execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(),
+  join(TOOLS, "git"),
+);
 after(() => rmSync(TOOLS, { recursive: true, force: true }));
 
 /**
