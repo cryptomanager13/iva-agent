@@ -1,5 +1,8 @@
 import { botCommands, helpText, startText, tr } from "#lib/i18n.ts";
-import { resetTargetForControl } from "../lib/telegram-reset.ts";
+import {
+  resetTargetForControl,
+  type TelegramResetTarget,
+} from "../lib/telegram-reset.ts";
 import { TELEGRAM_STOP_CALLBACK } from "#lib/telegram-status-message.ts";
 import {
   requestTurnCancel,
@@ -9,6 +12,7 @@ import {
 import {
   isTelegramQueueUpdate,
   type TelegramCallbackQuery,
+  type TelegramDocument,
   type TelegramQueueMessage as TelegramMessage,
   type TelegramQueueUpdate as TelegramUpdate,
 } from "../lib/telegram-queue.ts";
@@ -152,19 +156,33 @@ function replySucceeded(value: SentMessage | null | undefined): boolean {
   return typeof value?.message_id === "number";
 }
 
+function isFlowId(value: unknown): boolean {
+  return typeof value === "string" || typeof value === "number";
+}
+
+function hasMessageId(value: PendingFlow): boolean {
+  return value.msgId === null || typeof value.msgId === "number";
+}
+
+function hasFlowData(value: PendingFlow): boolean {
+  return typeof value.data === "object" && value.data !== null;
+}
+
+// Поля, без которых состояние не годится экрану меню; каждое проверяется отдельно.
+const FLOW_STATE_FIELDS: ReadonlyArray<(value: PendingFlow) => boolean> = [
+  (value) => typeof value.flow === "string",
+  (value) => isFlowId(value.chatId),
+  (value) => isFlowId(value.userId),
+  (value) => typeof value.createdAt === "number",
+  hasMessageId,
+  (value) => typeof value.page === "number",
+  hasFlowData,
+];
+
 export function isTelegramFlowState(
   value: PendingFlow,
 ): value is TelegramFlowState {
-  return (
-    typeof value.flow === "string" &&
-    (typeof value.chatId === "string" || typeof value.chatId === "number") &&
-    (typeof value.userId === "string" || typeof value.userId === "number") &&
-    typeof value.createdAt === "number" &&
-    (value.msgId === null || typeof value.msgId === "number") &&
-    typeof value.page === "number" &&
-    typeof value.data === "object" &&
-    value.data !== null
-  );
+  return FLOW_STATE_FIELDS.every((field) => field(value));
 }
 
 const replyTo = (chatId: number | undefined, text: string) =>
@@ -190,7 +208,7 @@ export const OUT_OF_BAND_COMMANDS = [
   "/update",
   "/model",
   "/think",
-];
+] as const;
 
 // Подтверждение нажатия: гасит спиннер кнопки и показывает всплывающую подсказку.
 // Ошибки глотаем — сама отмена уже отправлена, а протухший callback_query_id Telegram
@@ -367,6 +385,36 @@ const nonTextIo: NonTextIo = {
   },
 };
 
+const MAX_SECRET_FILE_BYTES = 256 * 1024;
+
+function chatIdOf(msg: TelegramMessage): number | undefined {
+  return msg.chat?.id;
+}
+
+function awaitedInput(pending: PendingFlow): AwaitText | null {
+  return isAwaitText(pending.awaitText) ? pending.awaitText : null;
+}
+
+// Файл принимает только экран меню, чей промпт умеет файл (client_secret gws).
+function acceptsSecretFile(
+  pending: PendingFlow,
+  awaited: AwaitText | null,
+): boolean {
+  return Boolean(awaited?.file) && pending.flow === "menu";
+}
+
+function capturableDocument(
+  msg: TelegramMessage,
+  pending: PendingFlow,
+  awaited: AwaitText | null,
+): TelegramDocument | undefined {
+  return acceptsSecretFile(pending, awaited) ? msg.document : undefined;
+}
+
+function isOversizedSecretFile(document: TelegramDocument): boolean {
+  return (document.file_size ?? 0) > MAX_SECRET_FILE_BYTES;
+}
+
 // A non-text message arrived while a menu/wizard awaits a SECRET (the caller gates this to
 // secret/file-capable states — a non-secret interview attachment falls through to eve untouched).
 // It must never reach eve. For a file-capable prompt (gws client_secret) a document is captured;
@@ -378,385 +426,758 @@ export async function handleAwaitNonText(
   pending: PendingFlow,
   io: NonTextIo = nonTextIo,
 ) {
-  const chatId = msg.chat?.id;
-  const a = isAwaitText(pending.awaitText) ? pending.awaitText : null;
-  const MAX_BYTES = 256 * 1024;
-  if (a?.file && msg.document && pending.flow === "menu") {
-    if ((msg.document.file_size ?? 0) > MAX_BYTES) {
-      await io.deleteSecret(chatId, msg.message_id);
-      await io.reply(
-        chatId,
-        tr(
-          "That file is too large — paste the contents as text instead.",
-          "Файл слишком большой — вставь содержимое текстом.",
-        ),
-      );
-      return true;
-    }
-    // Delete FIRST, and only proceed once the secret has actually left the chat. If Telegram
-    // refused the deletion, deleteSecret already told the user to remove it manually — we must NOT
-    // download or deliver a secret that is still visible in the conversation. Consume it either way
-    // so it never reaches eve.
-    const deleted = await io.deleteSecret(chatId, msg.message_id);
-    if (!deleted) return true;
-    const content = await io.download(msg.document.file_id, MAX_BYTES);
-    if (content == null) {
-      await io.reply(
-        chatId,
-        tr(
-          "Couldn't read that file — paste the contents as text instead.",
-          "Не смог прочитать файл — вставь содержимое текстом.",
-        ),
-      );
-      return true;
-    }
-    await io.deliver(content, msg, pending); // skipDelete is safe now — the message is confirmed gone
-    return true;
-  }
-  // Secret prompt, but not a capturable file (a photo, or a text-only secret) — delete it so it can't
-  // reach eve, and tell the user how to send it instead of dropping it silently.
+  const awaited = awaitedInput(pending);
+  const document = capturableDocument(msg, pending, awaited);
+  if (document) return captureSecretFile(msg, document, pending, io);
+  return rejectAttachment(msg, awaited, io);
+}
+
+async function captureSecretFile(
+  msg: TelegramMessage,
+  document: TelegramDocument,
+  pending: PendingFlow,
+  io: NonTextIo,
+) {
+  if (isOversizedSecretFile(document)) return rejectOversizedFile(msg, io);
+  return deliverDeletedFile(msg, document, pending, io);
+}
+
+async function rejectOversizedFile(msg: TelegramMessage, io: NonTextIo) {
+  const chatId = chatIdOf(msg);
   await io.deleteSecret(chatId, msg.message_id);
   await io.reply(
     chatId,
-    a?.file
-      ? tr(
-          "Send client_secret.json as text or attach the .json file — not a photo.",
-          "Пришли client_secret.json текстом или прикрепи .json-файл — не фото.",
-        )
-      : tr("Send it as text, please.", "Пришли это, пожалуйста, текстом."),
+    tr(
+      "That file is too large — paste the contents as text instead.",
+      "Файл слишком большой — вставь содержимое текстом.",
+    ),
   );
   return true;
 }
 
-// Control commands are handled by the BRIDGE (out-of-band) — they work even if the agent is stuck.
-// Trusted IDs only. Returns true if the command was handled (we do NOT deliver it to eve).
-async function handleControl(
-  update: TelegramUpdate,
-  {
-    replyImpl = replyTo,
-    ackImpl = answerCallback,
-    cancelImpl,
-    performResetImpl = performScopedReset,
-    resetRetryPendingImpl = isPrivateResetRetryPending,
-    resetIntentPendingImpl = hasPrivateResetIntent,
-  }: ControlDeps = {},
+// Delete FIRST, and only proceed once the secret has actually left the chat. If Telegram
+// refused the deletion, deleteSecret already told the user to remove it manually — we must NOT
+// download or deliver a secret that is still visible in the conversation. Consume it either way
+// so it never reaches eve.
+async function deliverDeletedFile(
+  msg: TelegramMessage,
+  document: TelegramDocument,
+  pending: PendingFlow,
+  io: NonTextIo,
 ) {
-  // Bridge-owned inline-button taps (/update, /model, /think) — not eve HITL callbacks.
-  const cq = update.callback_query;
-  if (cq && hasCallbackData(cq)) {
-    const callback = cq;
-    const updateCallback = parseUpdateCallbackData(callback.data);
-    const isLocalCallback =
-      callback.data === TELEGRAM_STOP_CALLBACK ||
-      updateCallback !== null ||
-      callback.data.startsWith("iva_model:") ||
-      callback.data.startsWith("iva_think:") ||
-      callback.data.startsWith("iva_menu:");
-    const callbackFrom = String(callback.from?.id ?? "");
-    const callbackAllowed = ALLOWED.size > 0 && ALLOWED.has(callbackFrom);
-    if (
-      isLocalCallback &&
-      callbackAllowed &&
-      !isPrivateTelegramChat(callback.message?.chat)
-    ) {
-      await ackImpl(callback.id, privateChatOnlyText()).catch(() => {});
-      return true;
-    }
-    // ⏹ Стоп у статус-сообщения. Тап никогда не уходит в eve: колбэк наш, а отмену
-    // мост делает сам через cancel-роут канала. У канала есть свой обработчик той же
-    // кнопки (agent/lib/telegram-stop.ts), но он для webhook-режима, где моста нет:
-    // здесь апдейт перехватывается раньше любой доставки.
-    if (callback.data === TELEGRAM_STOP_CALLBACK) {
-      const from = String(callback.from?.id ?? "");
-      // Чужой тап в группе: гасим спиннер молча и ничего не отменяем.
-      if (ALLOWED.size === 0 || !ALLOWED.has(from)) {
-        return telegramCallSucceeded(await ackImpl(callback.id));
-      }
-      const outcome = await requestTurnStop(update, { cancelImpl });
-      const acknowledged = telegramCallSucceeded(
-        await ackImpl(callback.id, stopOutcomeText(outcome)),
-      );
-      return outcome === "requested" || acknowledged;
-    }
-    if (updateCallback !== null) return handleUpdateCallback(callback);
-    // Wizard errors must not escape and crash the bridge. A failed handler returns
-    // false so the callback enters durable inbox ownership before offset advances.
-    if (
-      callback.data.startsWith("iva_model:") ||
-      callback.data.startsWith("iva_think:")
-    ) {
-      return handleWizardCallback(callback).catch((e: unknown) => {
-        log("wizard callback error:", errorDetails(e).message);
-        return false;
-      });
-    }
-    // /menu: тот же принцип consume-on-error — тап меню всегда проглатывается (в eve не уходит).
-    if (callback.data.startsWith("iva_menu:")) {
-      return menu.onCallback(callback, update.update_id).catch((e: unknown) => {
-        log("menu callback error:", errorDetails(e).message);
-        return true;
-      });
-    }
-    // Кнопка, написанная моделью: её data — это реплика пользователя. Спиннер гасим
-    // сами и сразу: дальше тап едет сообщением, колбэком его уже никто не увидит
-    // (сессию наполняет только inbound pipeline, а он читает сообщения). Чужому —
-    // пустой ack без подсказок, контрол ему знать нечего. В группе тап сообщением не
-    // станет: там текст принимается лишь как упоминание, команда или reply боту, а
-    // нажатие кнопки — ни то, ни другое, поэтому говорим про личку прямо.
-    if (
-      !callback.data.startsWith("iva_") &&
-      !isEveCallbackData(callback.data)
-    ) {
-      const groupHint =
-        callbackAllowed &&
-        callback.message?.chat !== undefined &&
-        !isPrivateTelegramChat(callback.message.chat)
-          ? privateChatOnlyText()
-          : undefined;
-      await ackImpl(callback.id, groupHint).catch(() => {});
-      // Чужой тап дальше снимет admission по allowlist — со строкой в журнале.
-      if (!callbackAllowed) return false;
-      if (groupHint !== undefined) return true;
-      // Неполный конверт (нет чата, отправителя или номера сообщения) сообщением
-      // стать не может: гасим тап здесь, дальше ему делать нечего.
-      return !applyTelegramButtonTap(update, callback);
-    }
-  }
-  const msg = update.message;
-  const text = (msg?.text || "").trim();
-  // A pending flow (menu screen or /model wizard) awaiting input claims this user's next message
-  // (a key must never reach eve); a command aborts the wait — a silently still-visible prompt would
-  // invite pasting the key later, when nothing intercepts it. This runs BEFORE the busy-buffer gate
-  // (below), so a capture works even mid-turn. Non-text is intercepted only while awaiting a SECRET
-  // (or a file-capable secret): a document/photo could be the secret itself and must not reach eve.
-  // A non-secret await (e.g. the memory interview) lets a non-text message fall through unchanged.
-  if (msg?.from && isPrivateTelegramChat(msg.chat)) {
-    const pending = getWizard(msg.chat?.id, String(msg.from.id));
-    const a = isAwaitText(pending?.awaitText) ? pending.awaitText : null;
-    if (pending && a) {
-      if (text.startsWith("/")) {
-        await endWizard(
-          pending,
-          tr(
-            "Cancelled — no longer waiting for input.",
-            "Отменено — ожидание ввода снято.",
-          ),
-        ).catch(() => {});
-      } else if (text) {
-        if (pending.flow === "menu") {
-          // Menu screens own their capture (interview / key intake / gws JSON / ubcred).
-          return menu.onText(msg, pending).catch((e: unknown) => {
-            log("menu capture error:", errorDetails(e).message); // e.message never contains a secret value
-            return true;
-          });
-        }
-        // /model wizard text intake (key, endpoint address, model id) — consume the update
-        // even on failure (a key must never be re-polled into eve). handleWizardText stays
-        // the wizard's own handler.
-        return handleWizardText(
-          msg as { chat: { id: number }; message_id: number; text: string },
-          pending,
-        ).catch((e: unknown) => {
-          log("wizard key error:", errorDetails(e).message); // e.message never contains the key value
-          return true;
-        });
-      } else if (a.secret || a.file) {
-        // Non-text while awaiting a secret — never let it reach eve (delete-first inside).
-        return handleAwaitNonText(msg, pending).catch((e: unknown) => {
-          log("menu attachment capture error:", errorDetails(e).message); // never contains the secret value
-          return true;
-        });
-      }
-      // else: non-secret await + non-text → fall through so eve handles it normally.
-    }
-  }
-  if (!text.startsWith("/")) return false;
-  const cmd = text.split(/\s+/)[0].replace(/@\w+$/, "").toLowerCase();
-  if (!OUT_OF_BAND_COMMANDS.includes(cmd)) return false;
-  const from = String(msg?.from?.id ?? "");
-  if (ALLOWED.size === 0 || !ALLOWED.has(from)) return false; // untrusted — let eve drop it
-  const chatId = msg?.chat?.id;
-  if (chatId === undefined) return false;
-  if (PRIVATE_ONLY_COMMANDS.has(cmd) && !isPrivateTelegramChat(msg?.chat)) {
-    await replyImpl(chatId, privateChatOnlyText()).catch((e: unknown) =>
-      log("private-chat rejection failed:", errorMessage(e)),
+  const chatId = chatIdOf(msg);
+  if (!(await io.deleteSecret(chatId, msg.message_id))) return true;
+  const content = await io.download(document.file_id, MAX_SECRET_FILE_BYTES);
+  if (content == null) {
+    await io.reply(
+      chatId,
+      tr(
+        "Couldn't read that file — paste the contents as text instead.",
+        "Не смог прочитать файл — вставь содержимое текстом.",
+      ),
     );
     return true;
   }
-  // /menu — open the nested settings menu (out-of-band; errors consumed, never reach eve).
-  if (cmd === "/menu") {
-    await menu
-      .open(chatId, from)
-      .catch((e: unknown) => log("menu error:", errorDetails(e).message));
-    return true;
-  }
-  if (cmd === "/help") {
-    return replySucceeded(await replyImpl(chatId, helpText()));
-  }
+  await io.deliver(content, msg, pending); // skipDelete is safe now — the message is confirmed gone
+  return true;
+}
+
+// Secret prompt, but not a capturable file (a photo, or a text-only secret) — delete it so it can't
+// reach eve, and tell the user how to send it instead of dropping it silently.
+async function rejectAttachment(
+  msg: TelegramMessage,
+  awaited: AwaitText | null,
+  io: NonTextIo,
+) {
+  const chatId = chatIdOf(msg);
+  await io.deleteSecret(chatId, msg.message_id);
+  await io.reply(chatId, attachmentHint(awaited));
+  return true;
+}
+
+function attachmentHint(awaited: AwaitText | null): string {
+  return awaited?.file
+    ? tr(
+        "Send client_secret.json as text or attach the .json file — not a photo.",
+        "Пришли client_secret.json текстом или прикрепи .json-файл — не фото.",
+      )
+    : tr("Send it as text, please.", "Пришли это, пожалуйста, текстом.");
+}
+
+// ── handleControl ──
+// Control commands are handled by the BRIDGE (out-of-band) — they work even if the agent is stuck.
+// Trusted IDs only. Returns true if the command was handled (we do NOT deliver it to eve).
+// Два входа: колбэк (кнопка) и сообщение. Каждый входит в таблицу «вид → обработчик»,
+// поэтому новая кнопка или команда — одна строка в таблице и одна функция.
+
+type ControlIo = Required<Omit<ControlDeps, "cancelImpl">> &
+  Pick<ControlDeps, "cancelImpl">;
+
+const DEFAULT_CONTROL_IO: Omit<ControlIo, "cancelImpl"> = {
+  replyImpl: replyTo,
+  ackImpl: answerCallback,
+  performResetImpl: performScopedReset,
+  resetRetryPendingImpl: isPrivateResetRetryPending,
+  resetIntentPendingImpl: hasPrivateResetIntent,
+};
+
+// Переданный undefined значит «по умолчанию» — как у деструктуризации с дефолтами.
+function controlIo(deps: ControlDeps): ControlIo {
+  const given = Object.entries(deps).filter(([, impl]) => impl !== undefined);
+  return {
+    ...DEFAULT_CONTROL_IO,
+    ...(Object.fromEntries(given) as ControlDeps),
+  };
+}
+
+// Ошибка обработчика не должна уронить мост: пишем её в журнал и отдаём исход по умолчанию.
+function settleLogged<T>(
+  work: Promise<T>,
+  label: string,
+  fallback: T,
+): Promise<T> {
+  return work.catch((e: unknown) => {
+    log(label, errorDetails(e).message);
+    return fallback;
+  });
+}
+
+function senderId(from: TelegramCallbackQuery["from"]): string {
+  return String(from?.id ?? "");
+}
+
+function isAllowlisted(id: string): boolean {
+  return ALLOWED.size > 0 && ALLOWED.has(id);
+}
+
+function isTrustedSender(from: TelegramCallbackQuery["from"]): boolean {
+  return isAllowlisted(senderId(from));
+}
+
+function isGroupChat(chat: TelegramMessage["chat"]): boolean {
+  return chat !== undefined && !isPrivateTelegramChat(chat);
+}
+
+const retryScheduledText = () =>
+  tr(
+    "⚠️ A reset retry is already scheduled.",
+    "⚠️ Повтор сброса уже запланирован.",
+  );
+
+// Исход обработчика уходит вызывающему как есть: экран меню вправе ответить "retry".
+type ControlResult = boolean | Awaited<ReturnType<typeof menu.onCallback>>;
+// Вход не забрал апдейт — решает следующий вход (колбэк → сообщение → команда).
+const UNCLAIMED = Symbol("unclaimed");
+type Claim = Promise<ControlResult | typeof UNCLAIMED>;
+
+async function handleControl(
+  update: TelegramUpdate,
+  deps: ControlDeps = {},
+): Promise<ControlResult> {
+  const io = controlIo(deps);
+  const claimed = await handleCallback(update, io);
+  return claimed === UNCLAIMED ? handleMessage(update, io) : claimed;
+}
+
+// ── Колбэки ──
+type CallbackContext = {
+  update: TelegramUpdate;
+  callback: ControlCallbackQuery;
+  io: ControlIo;
+};
+type CallbackKind =
+  "stop" | "update" | "wizard" | "menu" | "passthrough" | "tap";
+
+// Порядок важен: первое совпадение решает. Всё, что не совпало, — кнопка модели.
+const CALLBACK_KINDS: ReadonlyArray<
+  readonly [CallbackKind, (data: string) => boolean]
+> = [
+  ["stop", (data) => data === TELEGRAM_STOP_CALLBACK],
+  ["update", (data) => parseUpdateCallbackData(data) !== null],
+  ["wizard", isWizardCallbackData],
+  ["menu", (data) => data.startsWith("iva_menu:")],
+  ["passthrough", isUnclaimedCallbackData],
+];
+
+// Кнопки моста (/update, /model, /think, /menu, ⏹) — не HITL-колбэки eve.
+const BRIDGE_CALLBACK_KINDS = new Set<CallbackKind>([
+  "stop",
+  "update",
+  "wizard",
+  "menu",
+]);
+
+const CALLBACK_HANDLERS: Record<
+  CallbackKind,
+  (context: CallbackContext) => Claim
+> = {
+  stop: handleStopTap,
+  update: ({ callback }) => handleUpdateCallback(callback),
+  // Wizard errors must not escape and crash the bridge. A failed handler returns
+  // false so the callback enters durable inbox ownership before offset advances.
+  wizard: ({ callback }) =>
+    settleLogged(
+      handleWizardCallback(callback),
+      "wizard callback error:",
+      false,
+    ),
+  // /menu: тот же принцип consume-on-error — тап меню всегда проглатывается (в eve не уходит).
+  menu: ({ update, callback }) =>
+    settleLogged(
+      menu.onCallback(callback, update.update_id),
+      "menu callback error:",
+      true,
+    ),
+  // Колбэк eve или незнакомый iva_*: не наш, решает путь сообщения.
+  passthrough: () => Promise.resolve(UNCLAIMED),
+  tap: handleButtonTap,
+};
+
+function isWizardCallbackData(data: string): boolean {
+  return data.startsWith("iva_model:") || data.startsWith("iva_think:");
+}
+
+// eve владеет своими префиксами, а пространство iva_* — мосту, даже без экрана.
+function isUnclaimedCallbackData(data: string): boolean {
+  return data.startsWith("iva_") || isEveCallbackData(data);
+}
+
+function callbackKind(data: string): CallbackKind {
+  return CALLBACK_KINDS.find(([, matches]) => matches(data))?.[0] ?? "tap";
+}
+
+function callbackChat(
+  callback: TelegramCallbackQuery,
+): TelegramMessage["chat"] {
+  return callback.message?.chat;
+}
+
+function trustedTapOutsidePrivateChat(
+  callback: TelegramCallbackQuery,
+): boolean {
+  return (
+    isTrustedSender(callback.from) &&
+    !isPrivateTelegramChat(callbackChat(callback))
+  );
+}
+
+async function handleCallback(update: TelegramUpdate, io: ControlIo): Claim {
+  const callback = update.callback_query;
+  if (!callback || !hasCallbackData(callback)) return UNCLAIMED;
+  return dispatchCallback({ update, callback, io });
+}
+
+function dispatchCallback(context: CallbackContext): Claim {
+  const kind = callbackKind(context.callback.data);
+  if (
+    BRIDGE_CALLBACK_KINDS.has(kind) &&
+    trustedTapOutsidePrivateChat(context.callback)
+  )
+    return declineGroupCallback(context);
+  return CALLBACK_HANDLERS[kind](context);
+}
+
+async function declineGroupCallback({ callback, io }: CallbackContext) {
+  await io.ackImpl(callback.id, privateChatOnlyText()).catch(() => {});
+  return true;
+}
+
+// ⏹ Стоп у статус-сообщения. Тап никогда не уходит в eve: колбэк наш, а отмену
+// мост делает сам через cancel-роут канала. У канала есть свой обработчик той же
+// кнопки (agent/lib/telegram-stop.ts), но он для webhook-режима, где моста нет:
+// здесь апдейт перехватывается раньше любой доставки.
+async function handleStopTap({ update, callback, io }: CallbackContext) {
+  // Чужой тап в группе: гасим спиннер молча и ничего не отменяем.
+  if (!isTrustedSender(callback.from))
+    return telegramCallSucceeded(await io.ackImpl(callback.id));
+  const outcome = await requestTurnStop(update, { cancelImpl: io.cancelImpl });
+  const acknowledged = telegramCallSucceeded(
+    await io.ackImpl(callback.id, stopOutcomeText(outcome)),
+  );
+  return outcome === "requested" || acknowledged;
+}
+
+function tapGroupHint(
+  trusted: boolean,
+  chat: TelegramMessage["chat"],
+): string | undefined {
+  return trusted && isGroupChat(chat) ? privateChatOnlyText() : undefined;
+}
+
+// Кнопка, написанная моделью: её data — это реплика пользователя. Спиннер гасим
+// сами и сразу: дальше тап едет сообщением, колбэком его уже никто не увидит
+// (сессию наполняет только inbound pipeline, а он читает сообщения). Чужому —
+// пустой ack без подсказок, контрол ему знать нечего. В группе тап сообщением не
+// станет: там текст принимается лишь как упоминание, команда или reply боту, а
+// нажатие кнопки — ни то, ни другое, поэтому говорим про личку прямо.
+async function handleButtonTap({ update, callback, io }: CallbackContext) {
+  const trusted = isTrustedSender(callback.from);
+  const groupHint = tapGroupHint(trusted, callbackChat(callback));
+  await io.ackImpl(callback.id, groupHint).catch(() => {});
+  // Чужой тап дальше снимет admission по allowlist — со строкой в журнале.
+  if (!trusted) return false;
+  // Неполный конверт (нет чата, отправителя или номера сообщения) сообщением
+  // стать не может: гасим тап здесь, дальше ему делать нечего.
+  return groupHint !== undefined || !applyTelegramButtonTap(update, callback);
+}
+
+// ── Сообщения ──
+
+async function handleMessage(
+  update: TelegramUpdate,
+  io: ControlIo,
+): Promise<ControlResult> {
+  const msg = update.message;
+  if (!msg) return false;
+  const text = messageText(msg);
+  const captured = await capturePendingInput(msg, text);
+  return captured === UNCLAIMED
+    ? handleCommand(update, msg, text, io)
+    : captured;
+}
+
+function messageText(msg: TelegramMessage): string {
+  return (msg.text || "").trim();
+}
+
+// A pending flow (menu screen or /model wizard) awaiting input claims this user's next message
+// (a key must never reach eve); a command aborts the wait — a silently still-visible prompt would
+// invite pasting the key later, when nothing intercepts it. This runs BEFORE the busy-buffer gate
+// (below), so a capture works even mid-turn. Non-text is intercepted only while awaiting a SECRET
+// (or a file-capable secret): a document/photo could be the secret itself and must not reach eve.
+// A non-secret await (e.g. the memory interview) lets a non-text message fall through unchanged.
+type WizardPending = NonNullable<ReturnType<typeof getWizard>>;
+type PendingInput = {
+  msg: TelegramMessage;
+  text: string;
+  pending: WizardPending;
+  awaited: AwaitText;
+};
+type PendingInputRule = readonly [
+  (input: PendingInput) => boolean,
+  (input: PendingInput) => Claim,
+];
+
+// Порядок важен: первое совпадение решает, не совпало ничего — сообщение идёт дальше.
+const PENDING_INPUT_RULES: readonly PendingInputRule[] = [
+  [(input) => input.text.startsWith("/"), abandonPendingInput],
+  [isMenuText, captureMenuText],
+  [(input) => input.text !== "", captureWizardText],
+  [isAwaitedSecret, captureSecretAttachment],
+];
+
+function isMenuText(input: PendingInput): boolean {
+  return input.text !== "" && input.pending.flow === "menu";
+}
+
+function isAwaitedSecret(input: PendingInput): boolean {
+  return Boolean(input.awaited.secret || input.awaited.file);
+}
+
+// Ожидание есть, но сообщение ему не подходит (не-текст при не-секретном вопросе).
+const PASS_PENDING_INPUT: PendingInputRule = [
+  () => true,
+  () => Promise.resolve(UNCLAIMED),
+];
+
+async function capturePendingInput(msg: TelegramMessage, text: string): Claim {
+  const input = pendingInput(msg, text);
+  if (input === null) return UNCLAIMED;
+  const [, capture] =
+    PENDING_INPUT_RULES.find(([matches]) => matches(input)) ??
+    PASS_PENDING_INPUT;
+  return capture(input);
+}
+
+function pendingInput(msg: TelegramMessage, text: string): PendingInput | null {
+  const pending = privatePending(msg);
+  if (pending === null) return null;
+  return isAwaitText(pending.awaitText)
+    ? { msg, text, pending, awaited: pending.awaitText }
+    : null;
+}
+
+function privatePending(msg: TelegramMessage): WizardPending | null {
+  if (!msg.from || !isPrivateTelegramChat(msg.chat)) return null;
+  return getWizard(chatIdOf(msg), String(msg.from.id));
+}
+
+// Команда снимает ожидание и идёт дальше как команда.
+async function abandonPendingInput({ pending }: PendingInput) {
+  await endWizard(
+    pending,
+    tr(
+      "Cancelled — no longer waiting for input.",
+      "Отменено — ожидание ввода снято.",
+    ),
+  ).catch(() => {});
+  return UNCLAIMED;
+}
+
+// Menu screens own their capture (interview / key intake / gws JSON / ubcred).
+// e.message never contains a secret value.
+function captureMenuText({ msg, pending }: PendingInput) {
+  return settleLogged(menu.onText(msg, pending), "menu capture error:", true);
+}
+
+// /model wizard text intake (key, endpoint address, model id) — consume the update
+// even on failure (a key must never be re-polled into eve). handleWizardText stays
+// the wizard's own handler; e.message never contains the key value.
+function captureWizardText({ msg, pending }: PendingInput) {
+  return settleLogged(
+    handleWizardText(
+      msg as { chat: { id: number }; message_id: number; text: string },
+      pending,
+    ),
+    "wizard key error:",
+    true,
+  );
+}
+
+// Non-text while awaiting a secret — never let it reach eve (delete-first inside).
+function captureSecretAttachment({ msg, pending }: PendingInput) {
+  return settleLogged(
+    handleAwaitNonText(msg, pending),
+    "menu attachment capture error:",
+    true,
+  );
+}
+
+// ── Команды ──
+
+type OutOfBandCommand = (typeof OUT_OF_BAND_COMMANDS)[number];
+type ControlCommand = {
+  update: TelegramUpdate;
+  msg: TelegramMessage;
+  text: string;
+  cmd: OutOfBandCommand;
+  from: string;
+  chatId: number;
+  io: ControlIo;
+};
+type CommandHandler = (command: ControlCommand) => Promise<boolean>;
+
+const COMMAND_HANDLERS: Record<OutOfBandCommand, CommandHandler> = {
+  "/menu": openMenu,
+  "/help": ({ io, chatId }) => replyConfirmed(io, chatId, helpText()),
   // /start — кнопка Start у нового пользователя. Без этой ветки приветствие уходило
   // обычным ходом в модель: платный запрос ради «привет». Отвечает мост, out-of-band.
-  if (cmd === "/start") {
-    return replySucceeded(await replyImpl(chatId, startText()));
-  }
-  // /stop — interrupt the current turn, the same door as the ⏹ Stop button.
-  // Out-of-band so it reaches a busy agent (an ordinary message would be queued by
-  // the gate below and never processed).
-  if (cmd === "/stop") {
-    const outcome = await requestTurnStop(update, { cancelImpl });
-    // Успех виден по статус-сообщению: turn.cancelled перепишет его на «Остановлено».
-    if (outcome === "requested") return true;
-    return replySucceeded(await replyImpl(chatId, stopOutcomeText(outcome)));
-  }
-  // /usage — token spend from data/usage.jsonl. Out-of-band and FREE (we don't call the model).
-  if (cmd === "/usage") {
-    const arg = text.split(/\s+/).slice(1).join(" ");
-    try {
-      const agg = summarize(readEntries(), {
-        window: parseWindow(arg),
-        now: Date.now(),
-        tz: process.env.ASSISTANT_TIMEZONE,
-      });
-      return replySucceeded(await replyTo(chatId, formatUsageReport(agg)));
-    } catch (e: unknown) {
-      return replySucceeded(
-        await replyTo(
-          chatId,
-          "Couldn't read the usage log: " + errorMessage(e),
-        ),
-      );
-    }
-  }
+  "/start": ({ io, chatId }) => replyConfirmed(io, chatId, startText()),
+  "/stop": stopCommand,
+  "/usage": reportUsage,
+  "/restart": resetConversation,
+  "/new": resetConversation,
   // /update — check upstream; if newer, offer inline Update/Skip buttons. Out-of-band.
-  if (cmd === "/update") {
-    return handleUpdateCheck(chatId, {
-      force: text.split(/\s+/).includes("--force"),
-    });
-  }
+  "/update": ({ chatId, text }) =>
+    handleUpdateCheck(chatId, { force: text.split(/\s+/).includes("--force") }),
   // /model, /think — provider/model/effort wizard (writes .env; applied on restart).
-  if (cmd === "/model") {
-    return handleModelCmd(chatId, from).catch((e: unknown) => {
-      log("wizard /model error:", errorDetails(e).message);
-      return false;
+  "/model": ({ chatId, from }) =>
+    settleLogged(handleModelCmd(chatId, from), "wizard /model error:", false),
+  "/think": ({ chatId, from }) =>
+    settleLogged(handleThinkCmd(chatId, from), "wizard /think error:", false),
+};
+
+function isOutOfBandCommand(cmd: string): cmd is OutOfBandCommand {
+  return (OUT_OF_BAND_COMMANDS as readonly string[]).includes(cmd);
+}
+
+function commandName(text: string): OutOfBandCommand | null {
+  if (!text.startsWith("/")) return null;
+  const cmd = text.split(/\s+/)[0].replace(/@\w+$/, "").toLowerCase();
+  return isOutOfBandCommand(cmd) ? cmd : null;
+}
+
+async function handleCommand(
+  update: TelegramUpdate,
+  msg: TelegramMessage,
+  text: string,
+  io: ControlIo,
+): Promise<boolean> {
+  const cmd = commandName(text);
+  if (cmd === null) return false;
+  const command = trustedCommand({ update, msg, text, cmd, io });
+  if (command === null) return false; // untrusted — let eve drop it
+  return runCommand(command);
+}
+
+function trustedCommand(
+  base: Omit<ControlCommand, "from" | "chatId">,
+): ControlCommand | null {
+  const from = senderId(base.msg.from);
+  const chatId = chatIdOf(base.msg);
+  return isAllowlisted(from) && chatId !== undefined
+    ? { ...base, from, chatId }
+    : null;
+}
+
+function runCommand(command: ControlCommand): Promise<boolean> {
+  if (needsPrivateChat(command)) return declineGroupCommand(command);
+  return COMMAND_HANDLERS[command.cmd](command);
+}
+
+function needsPrivateChat({ cmd, msg }: ControlCommand): boolean {
+  return PRIVATE_ONLY_COMMANDS.has(cmd) && !isPrivateTelegramChat(msg.chat);
+}
+
+async function declineGroupCommand({ io, chatId }: ControlCommand) {
+  await io
+    .replyImpl(chatId, privateChatOnlyText())
+    .catch((e: unknown) =>
+      log("private-chat rejection failed:", errorMessage(e)),
+    );
+  return true;
+}
+
+async function replyConfirmed(io: ControlIo, chatId: number, text: string) {
+  return replySucceeded(await io.replyImpl(chatId, text));
+}
+
+// /menu — open the nested settings menu (out-of-band; errors consumed, never reach eve).
+async function openMenu({ chatId, from }: ControlCommand) {
+  await menu
+    .open(chatId, from)
+    .catch((e: unknown) => log("menu error:", errorDetails(e).message));
+  return true;
+}
+
+// /stop — interrupt the current turn, the same door as the ⏹ Stop button.
+// Out-of-band so it reaches a busy agent (an ordinary message would be queued by
+// the gate below and never processed).
+async function stopCommand({ update, io, chatId }: ControlCommand) {
+  const outcome = await requestTurnStop(update, { cancelImpl: io.cancelImpl });
+  // Успех виден по статус-сообщению: turn.cancelled перепишет его на «Остановлено».
+  if (outcome === "requested") return true;
+  return replyConfirmed(io, chatId, stopOutcomeText(outcome));
+}
+
+// /usage — token spend from data/usage.jsonl. Out-of-band and FREE (we don't call the model).
+async function reportUsage({ text, chatId }: ControlCommand) {
+  return replySucceeded(await replyTo(chatId, usageReportText(text)));
+}
+
+function usageReportText(text: string): string {
+  try {
+    const agg = summarize(readEntries(), {
+      window: parseWindow(text.split(/\s+/).slice(1).join(" ")),
+      now: Date.now(),
+      tz: process.env.ASSISTANT_TIMEZONE,
     });
+    return formatUsageReport(agg);
+  } catch (e: unknown) {
+    return "Couldn't read the usage log: " + errorMessage(e);
   }
-  if (cmd === "/think") {
-    return handleThinkCmd(chatId, from).catch((e: unknown) => {
-      log("wizard /think error:", errorDetails(e).message);
-      return false;
-    });
-  }
-  // /new retires only this exact Telegram session. /restart does the same first,
-  // then restarts the agent process; histories and queues of other chats survive.
-  const key = chatKey(update);
-  const resetTarget = key
+}
+
+// ── /new и /restart ──
+// /new retires only this exact Telegram session. /restart does the same first,
+// then restarts the agent process; histories and queues of other chats survive.
+
+type ResetRun = ControlCommand & {
+  key: string | null;
+  target: TelegramResetTarget | null;
+  clearsPrivateQueue: boolean;
+};
+type ActiveReset = ResetRun & {
+  key: string;
+  target: TelegramResetTarget;
+  status: SentMessage | null;
+  copy: ReturnType<typeof resetMessageCopy>;
+};
+type ResetFailure = { phase: string; message: unknown; escalated: boolean };
+
+async function resetConversation(command: ControlCommand) {
+  const run = resetRun(command);
+  return (await holdForPendingRetry(run)) ?? startReset(run);
+}
+
+function resetRun(command: ControlCommand): ResetRun {
+  const key = chatKey(command.update);
+  return {
+    ...command,
+    key,
+    target: resetTargetFor(command.update, key),
+    clearsPrivateQueue: command.msg.chat?.type === "private",
+  };
+}
+
+function resetTargetFor(
+  update: TelegramUpdate,
+  key: string | null,
+): TelegramResetTarget | null {
+  return key
     ? resetTargetForControl(
         update,
         getChatStatus(key),
         BOT_USER_ID ?? undefined,
       )
     : null;
-  const clearsPrivateQueue = msg?.chat?.type === "private";
-  if (clearsPrivateQueue && key && resetRetryPendingImpl(key)) {
-    if (resetIntentPendingImpl(key)) {
-      await replyImpl(
-        chatId,
-        tr(
-          "⚠️ A reset retry is already scheduled.",
-          "⚠️ Повтор сброса уже запланирован.",
-        ),
-      );
-      return true;
-    }
-    // Telegram owns one global ordered offset. Advancing it without durable intent loses /new.
+}
+
+function privateResetKey(run: ResetRun): string | null {
+  return run.clearsPrivateQueue && run.key ? run.key : null;
+}
+
+async function holdForPendingRetry(run: ResetRun): Promise<true | undefined> {
+  const key = privateResetKey(run);
+  if (key === null || !run.io.resetRetryPendingImpl(key)) return undefined;
+  return answerPendingRetry(run, key);
+}
+
+async function answerPendingRetry(run: ResetRun, key: string): Promise<true> {
+  // Telegram owns one global ordered offset. Advancing it without durable intent loses /new.
+  if (!run.io.resetIntentPendingImpl(key))
     throw Object.assign(new Error(`reset retry backoff active for ${key}`), {
       resetPhase: "backoff",
     });
-  }
-  const resetCopy = resetMessageCopy(cmd, await readEnvFresh(ENV_PATH));
-  const status = await replyImpl(chatId, resetCopy.pending);
-  if (!resetTarget || !key) {
-    if (status) {
-      await editMessage(
-        chatId,
-        status.message_id,
-        tr(
-          "⚠️ I couldn't identify this conversation. In a group, reply /new to Iva's latest message.",
-          "⚠️ Не удалось определить этот диалог. В группе ответьте /new на последнее сообщение Iva.",
-        ),
-      );
-    }
-    return replySucceeded(status);
-  }
-
-  try {
-    await performResetImpl(key, resetTarget, {
-      // Group/forum queues are keyed only by chat/topic while Eve sessions also
-      // include conversationId. Clearing the shared queue here would lose
-      // messages belonging to other group conversation anchors.
-      clearQueue: clearsPrivateQueue,
-      discardThroughUpdateId: clearsPrivateQueue ? update.update_id : undefined,
-    });
-  } catch (e: unknown) {
-    const error = errorDetails(e);
-    const resetPhase =
-      typeof error.resetPhase === "string" ? error.resetPhase : "unknown";
-    const intentEscalated =
-      resetPhase === "intent" &&
-      typeof error.resetFailures === "number" &&
-      error.resetFailures >= RESET_INTENT_ESCALATION_ATTEMPTS;
-    log(`scoped reset ${resetPhase} failed for ${key}:`, error.message);
-    if (status) {
-      await editMessage(
-        chatId,
-        status.message_id,
-        intentEscalated
-          ? tr(
-              "⚠️ Conversation reset cannot be saved. Run iva reset on the server, then try /new again.",
-              "⚠️ Не удалось сохранить сброс диалога. Запусти iva reset на сервере, затем повтори /new.",
-            )
-          : error.resetPhase === "remote"
-            ? tr(
-                "⚠️ Couldn't confirm this conversation reset. Recovery will retry automatically.",
-                "⚠️ Не удалось подтвердить сброс диалога. Восстановление повторит его автоматически.",
-              )
-            : error.resetPhase === "backoff"
-              ? tr(
-                  "⚠️ A reset retry is already scheduled.",
-                  "⚠️ Повтор сброса уже запланирован.",
-                )
-              : tr(
-                  "⚠️ Conversation reset recovery is incomplete. Iva will retry it before accepting queued work.",
-                  "⚠️ Восстановление после сброса не завершено. Iva повторит его до приёма задач из очереди.",
-                ),
-      );
-    }
-    if (
-      intentEscalated ||
-      error.resetPhase === "remote" ||
-      (error.resetPhase === "backoff" && resetIntentPendingImpl(key))
-    )
-      return true;
-    // Other private failures may precede durable intent or cleanup, so retain the
-    // Telegram update for the polling-loop boundary to retry.
-    if (clearsPrivateQueue) throw e;
-    return true;
-  }
-
-  if (cmd === "/restart" && !(await sc("restart", "iva.service"))) {
-    if (status) {
-      await editMessage(
-        chatId,
-        status.message_id,
-        tr(
-          "⚠️ Conversation reset, but Iva couldn't restart.",
-          "⚠️ Диалог сброшен, но перезапустить Iva не удалось.",
-        ),
-      );
-    }
-    return true;
-  }
-  if (status) await editMessage(chatId, status.message_id, resetCopy.complete);
+  await run.io.replyImpl(run.chatId, retryScheduledText());
   return true;
+}
+
+async function startReset(run: ResetRun) {
+  const copy = resetMessageCopy(run.cmd, await readEnvFresh(ENV_PATH));
+  const status = await run.io.replyImpl(run.chatId, copy.pending);
+  if (!run.target || !run.key) return reportUnidentified(run, status);
+  return performReset({
+    ...run,
+    key: run.key,
+    target: run.target,
+    status,
+    copy,
+  });
+}
+
+async function editStatus(
+  chatId: number,
+  status: SentMessage | null,
+  text: string,
+) {
+  if (status) await editMessage(chatId, status.message_id, text);
+}
+
+async function reportUnidentified(run: ResetRun, status: SentMessage | null) {
+  await editStatus(
+    run.chatId,
+    status,
+    tr(
+      "⚠️ I couldn't identify this conversation. In a group, reply /new to Iva's latest message.",
+      "⚠️ Не удалось определить этот диалог. В группе ответьте /new на последнее сообщение Iva.",
+    ),
+  );
+  return replySucceeded(status);
+}
+
+async function performReset(reset: ActiveReset) {
+  try {
+    await reset.io.performResetImpl(
+      reset.key,
+      reset.target,
+      resetQueueScope(reset),
+    );
+  } catch (e: unknown) {
+    return resetFailed(reset, e);
+  }
+  return finishReset(reset);
+}
+
+// Group/forum queues are keyed only by chat/topic while Eve sessions also
+// include conversationId. Clearing the shared queue here would lose
+// messages belonging to other group conversation anchors.
+function resetQueueScope(run: ResetRun) {
+  return {
+    clearQueue: run.clearsPrivateQueue,
+    discardThroughUpdateId: run.clearsPrivateQueue
+      ? run.update.update_id
+      : undefined,
+  };
+}
+
+async function resetFailed(reset: ActiveReset, e: unknown) {
+  const failure = resetFailure(e);
+  log(
+    `scoped reset ${failure.phase} failed for ${reset.key}:`,
+    failure.message,
+  );
+  await editStatus(reset.chatId, reset.status, resetFailureText(failure));
+  if (resetFailureSettled(reset, failure)) return true;
+  // Other private failures may precede durable intent or cleanup, so retain the
+  // Telegram update for the polling-loop boundary to retry.
+  if (reset.clearsPrivateQueue) throw e;
+  return true;
+}
+
+function resetFailure(e: unknown): ResetFailure {
+  const error = errorDetails(e);
+  const phase =
+    typeof error.resetPhase === "string" ? error.resetPhase : "unknown";
+  return {
+    phase,
+    message: error.message,
+    escalated: intentEscalated(phase, error.resetFailures),
+  };
+}
+
+function intentEscalated(phase: string, failures: unknown): boolean {
+  return (
+    phase === "intent" &&
+    typeof failures === "number" &&
+    failures >= RESET_INTENT_ESCALATION_ATTEMPTS
+  );
+}
+
+const RESET_FAILURE_TEXTS = new Map<string, () => string>([
+  [
+    "remote",
+    () =>
+      tr(
+        "⚠️ Couldn't confirm this conversation reset. Recovery will retry automatically.",
+        "⚠️ Не удалось подтвердить сброс диалога. Восстановление повторит его автоматически.",
+      ),
+  ],
+  ["backoff", retryScheduledText],
+]);
+
+const resetIncompleteText = () =>
+  tr(
+    "⚠️ Conversation reset recovery is incomplete. Iva will retry it before accepting queued work.",
+    "⚠️ Восстановление после сброса не завершено. Iva повторит его до приёма задач из очереди.",
+  );
+
+function resetFailureText(failure: ResetFailure): string {
+  if (failure.escalated)
+    return tr(
+      "⚠️ Conversation reset cannot be saved. Run iva reset on the server, then try /new again.",
+      "⚠️ Не удалось сохранить сброс диалога. Запусти iva reset на сервере, затем повтори /new.",
+    );
+  return (RESET_FAILURE_TEXTS.get(failure.phase) ?? resetIncompleteText)();
+}
+
+function resetFailureSettled(reset: ActiveReset, failure: ResetFailure) {
+  return (
+    failure.escalated ||
+    failure.phase === "remote" ||
+    backoffIntentSaved(reset, failure)
+  );
+}
+
+function backoffIntentSaved(reset: ActiveReset, failure: ResetFailure) {
+  return (
+    failure.phase === "backoff" && reset.io.resetIntentPendingImpl(reset.key)
+  );
+}
+
+async function finishReset(reset: ActiveReset) {
+  const text = (await restartFailed(reset.cmd))
+    ? tr(
+        "⚠️ Conversation reset, but Iva couldn't restart.",
+        "⚠️ Диалог сброшен, но перезапустить Iva не удалось.",
+      )
+    : reset.copy.complete;
+  await editStatus(reset.chatId, reset.status, text);
+  return true;
+}
+
+async function restartFailed(cmd: OutOfBandCommand): Promise<boolean> {
+  return cmd === "/restart" && !(await sc("restart", "iva.service"));
 }
 
 export { registerBotCommands, handleControl };
