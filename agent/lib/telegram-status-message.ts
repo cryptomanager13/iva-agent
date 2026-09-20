@@ -93,6 +93,7 @@ function messageIdFromResponse(response: { body: unknown }): number | null {
 function statusBody(tg: TelegramStatusHandle): Record<string, unknown> {
   return {
     chat_id: tg.chatId,
+    disable_notification: true,
     ...(tg.messageThreadId !== undefined
       ? { message_thread_id: tg.messageThreadId }
       : {}),

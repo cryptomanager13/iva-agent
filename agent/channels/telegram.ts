@@ -14,6 +14,7 @@ import {
   type OutboxTransport,
 } from "../lib/outbox.js";
 import { hasRichButtons } from "../lib/telegram-format.js";
+import { parseTelegramDelivery } from "../lib/telegram-delivery.js";
 import {
   TELEGRAM_RICH_REPLIES,
   type RichReplies,
@@ -86,6 +87,7 @@ import {
 export function outboxTransport(
   tg: Pick<TelegramHandle, "chatId" | "messageThreadId" | "request" | "post">,
   richReplies: RichReplies,
+  silent = false,
 ): OutboxTransport {
   const transport: OutboxTransport = {
     async sendHtml(html) {
@@ -96,6 +98,7 @@ export function outboxTransport(
         await tg.post({
           text: html,
           parse_mode: "HTML",
+          ...(silent ? { disable_notification: true } : {}),
         } as TelegramMessageBody & { parse_mode: "HTML" });
         return { ok: true };
       } catch (err) {
@@ -110,7 +113,7 @@ export function outboxTransport(
     },
     async sendPlain(text) {
       try {
-        await tg.post(text);
+        await tg.post(silent ? { text, disable_notification: true } : text);
         return { ok: true };
       } catch (e2) {
         console.error("[telegram] plain-фолбэк тоже упал:", e2);
@@ -130,6 +133,7 @@ export function outboxTransport(
         ...(tg.messageThreadId !== undefined
           ? { message_thread_id: tg.messageThreadId }
           : {}),
+        ...(silent ? { disable_notification: true } : {}),
       });
       if (res.ok) return { ok: true };
       console.error(
@@ -299,7 +303,7 @@ const telegram = telegramChannel({
     // delivered у вызывающего больше нет.
     async "message.completed"(data, channel, ctx) {
       if (data.finishReason === "tool-calls" || !data.message) return;
-      const message = data.message;
+      const { text: message, silent } = parseTelegramDelivery(data.message);
       const recordDelivery = (delivered: boolean) =>
         emitTelegramTurnLatency({
           chatKey: chatKeyOf(
@@ -325,7 +329,7 @@ const telegram = telegramChannel({
         () =>
           sendThroughOutbox(
             message,
-            outboxTransport(channel.telegram, TELEGRAM_RICH_REPLIES),
+            outboxTransport(channel.telegram, TELEGRAM_RICH_REPLIES, silent),
           ),
       );
       if (result.ok) recordDelivery(true);
