@@ -78,8 +78,13 @@ import {
 // eve из RouteHandlerArgs (agent/lib/eve-cancel.ts). Дальше eve абортит ход и присылает
 // turn.cancelled, который правит статус-сообщение.
 
-// Транспорт Outbox для канала: доставка через хендл eve. Что и в каком виде отдавать,
-// решает шов (agent/lib/outbox.ts) — здесь только вызовы Bot API и логи отказов.
+/**
+ * Creates an Outbox transport that delivers a Telegram reply through Eve.
+ *
+ * The Outbox seam selects the rendered form; this transport performs Bot API calls,
+ * records delivery failures, and preserves the requested quiet-delivery mode.
+ */
+// Что и в каком виде отдавать, решает шов (agent/lib/outbox.ts).
 // stop канал не выставляет намеренно: ответ в диалоге короткий, и упавший кусок
 // не повод молчать остальными. Обрыв хвоста — про ночные отчёты, не про разговор.
 // При TELEGRAM_RICH_REPLIES=never ключа sendRich в транспорте нет вовсе, и шов

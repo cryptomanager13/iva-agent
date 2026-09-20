@@ -193,6 +193,12 @@ function messageTransport(
   };
 }
 
+/**
+ * Delivers a scheduled model result through Telegram, retaining its delivery choice.
+ *
+ * A leading IVA quiet-delivery marker is removed before formatting and enables
+ * Telegram's soundless notification mode for every delivery fallback.
+ */
 export async function sendTelegramHtml(
   bot: string,
   chat: string,

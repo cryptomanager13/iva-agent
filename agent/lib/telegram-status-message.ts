@@ -90,6 +90,7 @@ function messageIdFromResponse(response: { body: unknown }): number | null {
   return typeof result?.message_id === "number" ? result.message_id : null;
 }
 
+/** Builds the shared Telegram request body for a quiet temporary status message. */
 function statusBody(tg: TelegramStatusHandle): Record<string, unknown> {
   return {
     chat_id: tg.chatId,
