@@ -374,8 +374,8 @@ function withCardLock(
   }
 }
 
-/** history_entry там, где вытеснять нельзя или нечего (UPDATE подделывал бы append-only
- * архив, у ADD вытесненной истины ещё нет), и карточка, которой нет. */
+/** history_entry там, где вытеснять нельзя или нечего (UPDATE подделывал бы ## History,
+ * у ADD вытесненной истины ещё нет), и карточка, которой нет. */
 function requestStateError(
   effectiveOperation: CardOperation,
   request: CardWrite & { existing?: string },

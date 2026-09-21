@@ -14,12 +14,11 @@ Creating a fact card (contact/project/decision/idea/note) — write it with the
 **`write_card`** tool, not `write_file`: it guarantees a valid type and schema
 (no invented types, no extra fields). Do not use `write_file` for cards. Every
 call names its `operation`: `ADD` for a new subject, `UPDATE` for a new fact
-that fits the card's current truth (it goes to `## Log`), `SUPERSEDE` when the
-new fact CONTRADICTS the Compiled Truth — then pass the displaced value as
-`history_entry`, one dated line `YYYY-MM-DD: fact`. Never leave two
-contradictory Compiled Truths on one subject. Other spellings of a name
-(language, translit, colloquial, typo) go into `aliases`, and that is what makes
-the card findable by any of them.
+that fits the card's current truth (it goes to `## Log`, and the card's
+`description` goes back verbatim), `SUPERSEDE` when the new fact CONTRADICTS the
+Compiled Truth — then pass the displaced value as `history_entry`, one dated line
+`YYYY-MM-DD: fact`. Other spellings of a name (language, translit, colloquial,
+typo) go into `aliases`, and that is what makes the card findable by any of them.
 
 ### What lives where (coarse → precise)
 

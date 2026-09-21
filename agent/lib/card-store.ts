@@ -429,8 +429,8 @@ function removeH2Sections(body: string, heading: string): string {
 }
 
 /** История хранится как `- YYYY-MM-DD: факт`. Дата, которую назвала модель, считается
- * своей независимо от буллета — иначе в append-only архив навсегда уезжает вторая дата
- * поверх первой. Строку без даты датируем днём записи. */
+ * своей независимо от буллета — иначе навсегда уезжает вторая дата поверх первой. Строку
+ * без даты датируем днём записи. */
 function canonicalHistoryEntry(historyEntry: string, date: string): string {
   const entry = historyEntry.trim().replace(/^[-*]\s+/, "");
   return /^\d{4}-\d{2}-\d{2}:/.test(entry)
@@ -631,7 +631,7 @@ function collapseLogSections(body: string): string {
 
 interface CompiledTruthResult {
   body: string;
-  /** historyEntry совпал со строкой лежащего архива, поэтому НЕ дописан. */
+  /** То же самое уже лежит в ## History, поэтому строка НЕ дописана. */
   suppressedAgainstArchive: boolean;
 }
 
@@ -985,7 +985,7 @@ function assertRelatedSectionAbsent(trimmedBody: string): void {
 }
 
 /** Сочетания полей, которые не значат ничего: replace_body без SUPERSEDE и history_entry
- * там, где вытеснять нечего или нельзя (UPDATE/NOOP подделывал бы append-only архив). */
+ * там, где вытеснять нечего или нельзя (UPDATE/NOOP подделывал бы ## History). */
 function assertRequestShape(input: MergeInput, operation: CardOperation): void {
   if (input.replaceBody && operation !== "SUPERSEDE")
     throw new Error("replaceBody is valid only for SUPERSEDE");
@@ -1013,9 +1013,9 @@ function assertHistoryEntryShape(historyEntry: string): void {
  * тело отклоняется целиком, включая легаси-путь replace_body: он единственный, через
  * который открытый фенс попадал в карточку и ломал её следующий SUPERSEDE. NOOP тела не
  * пишет вовсе, поэтому его фенс никого не касается. Секции карточки принадлежат
- * write_card: H1 - заголовку, ## History/## Log - append-only архивам. Тело, которое
- * сочинила модель, несёт факт и только факт, иначе выдуманный архив въезжает в карточку
- * соседним полем и вычистить его уже нечем. */
+ * write_card: H1 - заголовку, ## History/## Log - append-only секциям. Тело, которое
+ * сочинила модель, несёт факт и только факт, иначе выдуманная History въезжает в карточку
+ * соседним полем и вычистить её уже нечем. */
 function assertBodyShape(
   trimmedBody: string,
   operation: CardOperation,
@@ -1034,8 +1034,8 @@ function assertBodyShape(
 /** Проверки выше судят сырое тело, а UPDATE кладёт его в карточку сдвинутым на два пробела
  * под буллет Log. Фенс с отступом 2-3 после сдвига уезжает на 4-5 и фенсом быть
  * перестаёт: его содержимое выходит наружу, и спрятанный внутри ## History становится
- * настоящим заголовком append-only архива. Поэтому запись судим в том виде, в каком
- * она ляжет в карточку. */
+ * настоящим заголовком append-only секции History. Поэтому запись судим в том виде, в
+ * каком она ляжет в карточку. */
 function assertLogEntryShape(trimmedBody: string, date: string): void {
   const entry = logEntryLines(trimmedBody, date);
   const scanned = scanFences(entry);
@@ -1071,7 +1071,7 @@ function assertCardAvailability(
 
 /** SUPERSEDE обязан назвать вытесняемый факт - либо history_entry, либо (в легаси-пути
  * replace_body без operation) секцией ## History в теле. Тело SUPERSEDE переписывает
- * Compiled Truth, поэтому свои H2 ему разрешены, а H1 и структурные архивы - нет: иначе
+ * Compiled Truth, поэтому свои H2 ему разрешены, а H1 и структурные секции - нет: иначе
  * модель дописывает в append-only ## History строки с произвольными датами, и вычистить их
  * уже нечем. Легаси-путь не трогаем - там ## History и есть способ передать вытесненный
  * факт. */
@@ -1114,8 +1114,8 @@ function createCard(input: MergeInput, trimmedBody: string): MergeResult {
 }
 
 /** Тот же принцип со стороны диска: открытый фенс в лежащей карточке уводит её
- * ## History и ## Log в код, границ секций нет - SUPERSEDE молча снёс бы весь
- * append-only архив, а UPDATE не нашёл бы Log и дописал бы факт внутрь кода, откуда
+ * ## History и ## Log в код, границ секций нет - SUPERSEDE молча снёс бы всю
+ * append-only History, а UPDATE не нашёл бы Log и дописал бы факт внутрь кода, откуда
  * его уже не видно. Отказ для обеих операций; фенс в карточке чинит человек. */
 function assertStoredBody(oldBody: string, operation: CardOperation): void {
   if (
@@ -1181,7 +1181,7 @@ interface AssemblyInput {
 interface BodyAssembly {
   newBody: string;
   appended: boolean;
-  /** historyEntry совпал со строкой лежащего архива, поэтому НЕ дописан. */
+  /** То же самое уже лежит в ## History, поэтому строка НЕ дописана. */
   suppressedHistoryEntry: boolean;
 }
 
@@ -1217,9 +1217,9 @@ function assembleBody(input: AssemblyInput): BodyAssembly {
   newBody = mergeRelated(newBody, input.related ?? []);
   if (beforeRelated !== newBody) appended = true;
   // Прежнее описание не выбрасывается: перед записью нового значения Compiled Truth
-  // старое уезжает в append-only архив датированной строкой. Ночной rollup передаёт
-  // description на КАЖДОМ UPDATE и по инструкции его «заостряет», поэтому вытеснением
-  // считается только реальная смена значения — см. displacedDescription.
+  // старое уезжает в ## History датированной строкой. Ночной rollup передаёт description
+  // на КАЖДОМ UPDATE и без нужды его не переписывает, поэтому вытеснением считается
+  // только реальная смена значения — см. displacedDescription.
   newBody = archiveDisplacedDescription(
     newBody,
     input.previousDescription,

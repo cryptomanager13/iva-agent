@@ -37,8 +37,11 @@ primary way weekly/monthly/yearly rollups understand the period.
 
 Update an existing card when the new info is the _same subject_. Signs you should update:
 same person, same project, same decision being refined. Append a dated line under a
-`## Log` section and sharpen the `description`. Creating a near-duplicate is the most
-common mistake — grep first.
+`## Log` section and pass the card's `description` back **verbatim**. The `description` is
+half of the Compiled Truth and an UPDATE never rewrites it: a "sharper" wording of the same
+fact is not new information, and a changed fact is a SUPERSEDE with `history_entry`, not a
+quiet rewrite of the description. Creating a near-duplicate is the most common mistake —
+grep first.
 
 ## ADD / UPDATE / SUPERSEDE / NOOP (temporal conflict)
 
@@ -47,8 +50,9 @@ For every fact, pick one operation:
 - **ADD** — genuinely new subject → create a card (prefer the `write_card` tool; it enforces
   the schema so you can't invent a type or field).
 - **UPDATE** — existing subject, new fact compatible with current truth → add it to
-  the card's single dated `## Log`. UPDATE never creates a card and never carries a
-  contradictory former/superseded pair.
+  the card's single dated `## Log` and repeat the card's `description` verbatim (the tool
+  refuses nothing here, but a rewritten description is a change of fact: see SUPERSEDE).
+  UPDATE never creates a card and never carries a contradictory former/superseded pair.
 - **NOOP** — already captured and unchanged → do nothing.
 - **SUPERSEDE** — the new fact _contradicts_ the Compiled Truth of an existing card (job changed,
   moved city, status flipped). Do NOT just append: **rewrite** the card's Compiled Truth

@@ -54,7 +54,7 @@ source: daily/YYYY-MM-DD.md
 type: project
 description: >-
   [What it delivers, for whom]
-aliases: [Пепси, Pepsi Gamer]
+aliases: [Пепси, Pepsi12]
 tags: [area, kind]
 status: active
 created: YYYY-MM-DD
