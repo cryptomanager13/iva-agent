@@ -544,3 +544,38 @@ test("осиротевшая запись убитого хода не уезж�
   assert.deepEqual(touched(vault), ["cards/notes/следующая.md"]);
   assert.match(porcelain(vault), /^A {2}cards\/notes\/сирота\.md$/mu);
 });
+test("vault внутри чужого репозитория: память не уезжает в чужую историю", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "iva-parent-"));
+  t.after(() =>
+    rmSync(parent, {
+      force: true,
+      maxRetries: 3,
+      recursive: true,
+      retryDelay: 50,
+    }),
+  );
+  sh(["init", "-q", "-b", "main"], parent);
+  sh(["config", "user.email", "owner@example.com"], parent);
+  sh(["config", "user.name", "Owner"], parent);
+  writeFileSync(join(parent, "SOURCE.md"), "чужой репозиторий\n");
+  sh(["add", "-A"], parent);
+  sh(["commit", "-q", "-m", "parent base"], parent);
+  const vault = join(parent, "vault");
+  mkdirSync(join(vault, "cards", "notes"), { recursive: true });
+  cpSync(SCHEMA, join(vault, "schema.json"));
+  process.env.ASSISTANT_VAULT_DIR = vault;
+
+  const { logged, value: result } = await journal(() =>
+    tool.card(card({ operation: "ADD", title: "Внутри" })),
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(existsSync(join(vault, "cards", "notes", "внутри.md")), true);
+  assert.deepEqual(
+    sh(["log", "--pretty=%s"], parent).split("\n"),
+    ["parent base"],
+    "чужой репозиторий не знает о записи в память",
+  );
+  assert.equal(trySh(["status", "--porcelain"], parent), "?? vault/");
+  assert.match(logged, /^\[vault-commit\] card внутри: ADD: /u);
+  assert.equal(logged.split("\n").length, 1, "причина отказа - одна строка");
+});

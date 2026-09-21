@@ -36,7 +36,12 @@ const IDENTITY_MISSING = /tell me who you are|user\.name|user\.email/iu;
 const NOTHING_TO_COMMIT =
   /nothing to commit|nothing added to commit|no changes added to commit/u;
 export type VaultCommit =
-  | { readonly ok: true; readonly committed: boolean }
+  | {
+      readonly ok: true;
+      readonly committed: boolean;
+      /** Почему коммита нет, если его не должно быть (чужой репозиторий, нечего коммитить). */
+      readonly reason?: string;
+    }
   | { readonly ok: false; readonly reason: string };
 
 type GitRun = {
@@ -160,6 +165,20 @@ function vaultPath(vault: string, path: string): string | null {
   return rel;
 }
 
+type RepoCheck =
+  { readonly kind: "own" } | { readonly kind: "skip"; readonly reason: string };
+
+/** Свой ли это репозиторий: шов коммитит только в vault, иначе память легла бы в историю
+ * репозитория кода, который двигает обновлятор. Отказ git называет себя сам. */
+async function checkRepository(vault: string): Promise<RepoCheck> {
+  const run = await git(["rev-parse", "--show-toplevel"], vault);
+  if (run.code !== 0) return { kind: "skip", reason: reasonOf(run) };
+  const root = run.out.trim();
+  const owner = realOf(root) ?? root;
+  if (owner === vault) return { kind: "own" };
+  return { kind: "skip", reason: `репозиторий чужой: ${owner}` };
+}
+
 function vaultRoot(root: string): string | null {
   try {
     return realpathSync(root);
@@ -186,6 +205,9 @@ async function commitPaths(
   message: string,
   paths: readonly string[],
 ): Promise<VaultCommit> {
+  const repo = await checkRepository(vault);
+  if (repo.kind === "skip")
+    return { ok: true, committed: false, reason: repo.reason };
   const staged = await withIndexRetry(vault, () =>
     git(["add", "--", ...paths], vault),
   );
@@ -220,7 +242,8 @@ export async function commitVaultWrite(
           .filter((path): path is string => path !== null);
   if (vault === null || rel.length === 0) return { ok: true, committed: false };
   const outcome = await serialized(() => commitPaths(vault, message, rel));
-  if (!outcome.ok) console.error(`${LOG_PREFIX} ${message}: ${outcome.reason}`);
+  if (outcome.reason !== undefined)
+    console.error(`${LOG_PREFIX} ${message}: ${outcome.reason}`);
   return outcome;
 }
 
