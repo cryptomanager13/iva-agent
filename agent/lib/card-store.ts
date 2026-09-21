@@ -438,6 +438,57 @@ function canonicalHistoryEntry(historyEntry: string, date: string): string {
     : `- ${date}: ${entry}`;
 }
 
+/** Тот же факт другими словами: регистр, пунктуация и порядок слов значения не имеют.
+ * «работает в TDI Group» и «в TDI Group работает» — одно значение, а не смена факта. */
+function sameFact(left: string, right: string): boolean {
+  const sortedWords = (text: string) =>
+    comparableFact(text).split(" ").filter(Boolean).sort();
+  const a = sortedWords(left);
+  const b = sortedWords(right);
+  return a.length === b.length && a.every((word, index) => word === b[index]);
+}
+
+/** Прежнее значение frontmatter-половины Compiled Truth, если вызов вытесняет его по
+ * существу. null — вытеснять нечего: значения нет, факт тот же (в том числе переставленный
+ * словами), или такая формулировка уже лежит в архиве. */
+function displacedDescription(
+  previous: FmValue | undefined,
+  next: FmValue | undefined,
+  archived: string[],
+): string | null {
+  if (typeof previous !== "string" || typeof next !== "string") return null;
+  const old = previous.trim();
+  if (!old || !next.trim() || sameFact(old, next)) return null;
+  return archived.some((line) => sameFact(historyFact(line), old)) ? null : old;
+}
+
+/** Дописать факт в append-only ## History. Один путь записи в архив — поэтому у карточки
+ * не бывает двух секций истории. */
+function appendHistory(body: string, fact: string, date: string): string {
+  const entries = sectionContent(body, "History");
+  const withoutHistory = removeH2Sections(body, "History");
+  return replaceH2Sections(withoutHistory, "History", [
+    ...entries,
+    canonicalHistoryEntry(fact, date),
+  ]);
+}
+
+/** Frontmatter-половина Compiled Truth не меняется молча: прежнее описание уходит в
+ * append-only ## History датированной строкой (см. displacedDescription). */
+function archiveDisplacedDescription(
+  body: string,
+  previous: FmValue | undefined,
+  next: FmValue | undefined,
+  date: string,
+): string {
+  const displaced = displacedDescription(
+    previous,
+    next,
+    sectionContent(body, "History"),
+  );
+  return displaced ? appendHistory(body, displaced, date) : body;
+}
+
 /** Строки-факты append-only архива. Пусто, если ## History нет или их несколько: границы
  * архива неоднозначны, судить по нему нельзя. */
 function historyEntries(body: string): string[] {
@@ -799,8 +850,10 @@ export function mergeCard(input: MergeInput): MergeResult {
   const assembled = assembleBody({
     date: input.date,
     historyEntry: input.historyEntry,
+    nextDescription: updates.description,
     oldBody,
     operation,
+    previousDescription: parsed.fields?.description,
     related: input.related,
     title: input.title,
     trimmedBody,
@@ -1013,6 +1066,9 @@ interface AssemblyInput {
   date: string;
   title: string;
   related?: string[];
+  /** Прежнее и нынешнее значение frontmatter-половины Compiled Truth. */
+  previousDescription?: FmValue;
+  nextDescription?: FmValue;
 }
 
 interface BodyAssembly {
@@ -1053,6 +1109,16 @@ function assembleBody(input: AssemblyInput): BodyAssembly {
   const beforeRelated = newBody;
   newBody = mergeRelated(newBody, input.related ?? []);
   if (beforeRelated !== newBody) appended = true;
+  // Прежнее описание не выбрасывается: перед записью нового значения Compiled Truth
+  // старое уезжает в append-only архив датированной строкой. Ночной rollup передаёт
+  // description на КАЖДОМ UPDATE и по инструкции его «заостряет», поэтому вытеснением
+  // считается только реальная смена значения — см. displacedDescription.
+  newBody = archiveDisplacedDescription(
+    newBody,
+    input.previousDescription,
+    input.nextDescription,
+    input.date,
+  );
   return { newBody, appended, suppressedHistoryEntry };
 }
 

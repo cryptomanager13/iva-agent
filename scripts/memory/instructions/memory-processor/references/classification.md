@@ -59,8 +59,10 @@ For every fact, pick one operation:
   `write_card` owns the `## History` section: never write that heading into `body` yourself.
   Never pass `history_entry` with ADD, UPDATE, or NOOP. History is append-only and never edited.
   **Never leave two contradictory Compiled Truths on the same subject.**
-  If a whole card is obsolete (project renamed, decision reverted), set `status: superseded`
-  and add `superseded_by: [[new-card]]`.
+  If a whole card is obsolete (project renamed, decision reverted), say it in the card's
+  new `## Log` fact, set `status: superseded` where the type's schema allows it, and point
+  at the replacement through `related` (`[[new-card]]`) — `write_card` has no
+  `superseded_by` field, so asking for it writes nothing.
 
 Whatever the operation, the `body` you pass is facts only, with no H1/H2 headings —
 `write_card` builds the card's structure (the `#` title, `## Log`, `## Related`,
