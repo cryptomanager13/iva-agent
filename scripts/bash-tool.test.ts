@@ -66,19 +66,22 @@ function readPid(file: string): number | null {
   return Number.isSafeInteger(pid) && pid > 1 ? pid : null;
 }
 
+// «Нашего процесса здесь уже нет»: ESRCH — номера никто не держит; EPERM — номер занят
+// чужим процессом (наш исчез, а чужой нам не подчиняется). То же правило и для группы:
+// спрашиваем её отрицательным PID. Всё остальное — неожиданность, её не глотаем.
+function isGone(error: unknown): boolean {
+  if (error === null || typeof error !== "object" || !("code" in error))
+    return false;
+  return error.code === "ESRCH" || error.code === "EPERM";
+}
+
 function isAlive(pid: number | null | undefined): boolean {
   if (pid === null || pid === undefined) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error: unknown) {
-    if (
-      error !== null &&
-      (typeof error === "object" || typeof error === "function") &&
-      "code" in error &&
-      error.code === "ESRCH"
-    )
-      return false;
+    if (isGone(error)) return false;
     throw error;
   }
 }
@@ -126,13 +129,7 @@ function isGroupAlive(pid: number): boolean {
     process.kill(-pid, 0);
     return true;
   } catch (error: unknown) {
-    if (
-      error !== null &&
-      (typeof error === "object" || typeof error === "function") &&
-      "code" in error &&
-      error.code === "ESRCH"
-    )
-      return false;
+    if (isGone(error)) return false;
     throw error;
   }
 }
@@ -315,6 +312,17 @@ function startFakeManager(requestFile: string, pidFile: string): () => void {
     killIfAlive(managed?.pid, "SIGKILL");
   };
 }
+
+// Живость проверяется отрицательным PID, и под нагрузкой ядро отвечает EPERM: номер
+// переиспользован чужим процессом — значит, нашей группы с ним уже нет. Неожиданную
+// ошибку глотать нельзя: иначе проверка молча считала бы живую группу мёртвой.
+test("a foreign owner of the group id counts as a dead group, other errors are thrown", () => {
+  assert.equal(isGone({ code: "EPERM" }), true);
+  assert.equal(isGone({ code: "ESRCH" }), true);
+  assert.equal(isGone({ code: "EINVAL" }), false);
+  assert.equal(isGone(new Error("boom")), false);
+  assert.throws(() => isGroupAlive(Number.MAX_SAFE_INTEGER));
+});
 
 test("bash preserves stdout, stderr and the effective cwd", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "iva-bash-normal-"));
