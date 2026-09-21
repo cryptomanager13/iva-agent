@@ -20,6 +20,7 @@ import {
   sleep,
 } from "./config.ts";
 import { tg } from "./transport.ts";
+import { scheduleBridgeTask } from "./background.ts";
 import { fastForwardOffset, saveOffset } from "./offset.ts";
 import {
   admitTelegramUpdate,
@@ -226,8 +227,8 @@ async function reconcileResetIntentsSafely(): Promise<number> {
   }
 }
 
-let resetIntentReconciliationInFlight: Promise<void> | null = null;
-
+// Сверка интентов сброса — фоновая задача моста из общего слота (background.ts): приём один
+// на всех, второй такой же ключ во время работы получает false.
 export function scheduleResetIntentReconciliation({
   reconcileImpl = reconcileResetIntentsSafely,
   logImpl = log,
@@ -235,20 +236,16 @@ export function scheduleResetIntentReconciliation({
   reconcileImpl?: () => Promise<number>;
   logImpl?: (...args: unknown[]) => void;
 } = {}): boolean {
-  if (resetIntentReconciliationInFlight) return false;
-  resetIntentReconciliationInFlight = reconcileImpl()
-    .then((count) => {
+  return scheduleBridgeTask(
+    "reset-intents",
+    async () => {
+      const count = await reconcileImpl();
       if (count > 0) {
         logImpl(`reconciled ${count} durable private Telegram reset intent(s)`);
       }
-    })
-    .catch((error: unknown) => {
-      logImpl("reset intent background task failed:", errorMessage(error));
-    })
-    .finally(() => {
-      resetIntentReconciliationInFlight = null;
-    });
-  return true;
+    },
+    { logImpl },
+  );
 }
 
 async function deleteWebhookOrThrow(

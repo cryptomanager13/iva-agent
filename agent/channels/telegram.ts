@@ -217,7 +217,16 @@ const telegram = telegramChannel({
       await ack();
       return;
     }
-    await handleTelegramStopCallback(query, { ackImpl: ack });
+    // Моста в этом режиме нет, поэтому о неостановленном ходе канал говорит сам: текст
+    // уходит уже после ответа на колбэк. Кнопки рестарта тут нет — рестарт делает мост.
+    const chatId = query.message?.chat?.id;
+    await handleTelegramStopCallback(query, {
+      ackImpl: ack,
+      notifyImpl: async (text) => {
+        if (chatId === undefined) return;
+        await ctx.telegram.request("sendMessage", { chat_id: chatId, text });
+      },
+    });
   },
   events: {
     // Начало хода: сначала публикуем running, затем отправляем медленное статус-сообщение.

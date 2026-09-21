@@ -66,10 +66,6 @@ const BLIND_SPOT: ReadonlyArray<{
     why: "прицеп канала; приватный чат в тестах канала",
   },
   {
-    path: "agent/lib/telegram-stop.ts",
-    why: "прицеп стопа; сценарии в failure-events",
-  },
-  {
     path: "agent/transcribe.ts",
     why: "прицеп медиа; транскрипция замокана в тестах медиа",
   },

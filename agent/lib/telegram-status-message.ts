@@ -32,7 +32,9 @@ export type TelegramStatusHandle = {
 
 // Функция, а не const: перевод выбирается в момент вызова (правило репо — module-level
 // const не должна захватывать tr(), иначе язык замерзает до рестарта).
-function stoppedText(): string {
+// Экспорт нужен мосту: сообщение «ход не остановился» переписывается тем же текстом, когда
+// подтверждение всё-таки приходит.
+export function stoppedText(): string {
   return tr(
     "⏹ Stopped. I'll hold new messages and handle them together with the next one.",
     "⏹ Остановлено. Новые сообщения накоплю и обработаю вместе со следующим.",
