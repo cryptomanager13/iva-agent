@@ -102,6 +102,9 @@ void test("add stores a one-time reminder and answers with the owner-zone time",
   const schedule = rows[0].schedule;
   if (schedule.kind !== "at") assert.fail("expected an at schedule");
   assert.equal(schedule.atMs, NOW + 1_800_000);
+  // Сессия идущего хода: созданной строке её ещё нет — null, а не пустая строка
+  // (старые таблицы без поля читаются так же: agent/lib/reminder-store.test.ts).
+  assert.equal(rows[0].sessionId, null);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
     "chat",
     "createdAt",
@@ -111,6 +114,7 @@ void test("add stores a one-time reminder and answers with the owner-zone time",
     "id",
     "nextRunAtMs",
     "schedule",
+    "sessionId",
     "status",
     "text",
   ]);
