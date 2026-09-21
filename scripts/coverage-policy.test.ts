@@ -46,10 +46,6 @@ const BLIND_SPOT: ReadonlyArray<{
   },
   // Транзитивно покрыты: свой тест грузит соседа, этот едет прицепом.
   {
-    path: "agent/lib/embeddings.ts",
-    why: "прицеп embed-index; ключи и фолбэки в его тесте",
-  },
-  {
     path: "agent/lib/plugin-skills.ts",
     why: "прицеп plugin-store/reader; листинг в их тестах",
   },
