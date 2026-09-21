@@ -833,3 +833,28 @@ test("подметальщик Brain коммитит только в свой �
   assert.deepEqual(subjects(foreign), ["foreign base"]);
   assert.equal(fingerprint(foreign), before);
 });
+
+test("нечего коммитить: коммита нет, журнал молчит, чужой staged цел", async (t) => {
+  const vault = makeVault(t);
+  mkdirSync(join(vault, "daily"), { recursive: true });
+  const file = join(vault, "daily", "2026-09-21.md");
+  writeFileSync(file, "текст\n");
+  sh(["add", "--", "daily/2026-09-21.md"], vault);
+  sh(["commit", "-q", "-m", "daily"], vault);
+  const foreign = join(vault, "owner-staged.md");
+  writeFileSync(foreign, "чужая работа\n");
+  sh(["add", "--", "owner-staged.md"], vault);
+
+  const { logged, value: result } = await journal(() =>
+    tool.file(file, "текст\n"),
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(subjects(vault), ["daily"]);
+  assert.equal(
+    logged,
+    "",
+    "нечего коммитить - это не отказ и не строка в журнале",
+  );
+  assert.match(statusAll(vault), /^A {2}owner-staged\.md$/mu);
+  assert.equal(readFileSync(file, "utf8"), "текст\n");
+});
