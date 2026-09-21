@@ -49,28 +49,38 @@ export function embeddingModelName(): string {
   return pickProvider().cfg.model;
 }
 
-// Батчами (эмбеддинг-эндпоинты OpenAI-совместимы: {input: string[], model}). Бросает при
-// сетевой/HTTP-ошибке — вызывающий (memory_search) ловит и уходит в чистый BM25 (graceful).
-export async function embedTexts(
-  texts: string[],
-  batchSize = 64,
-): Promise<number[][]> {
-  const { cfg } = pickProvider();
+// Кастомный эндпоинт (MEMORY_EMBED_URL) может быть без ключа, а без ключа и без URL
+// эмбеддинги недоступны вовсе: вызывающий уходит в чистый BM25.
+function assertEmbeddingEndpoint(cfg: EmbedProvider): void {
   if (!cfg.key && !process.env.MEMORY_EMBED_URL)
     throw new Error(
       "no embedding API key (JINA_API_KEY / DEEPINFRA_API_KEY) or MEMORY_EMBED_URL",
     );
+}
+
+// Батчами (эмбеддинг-эндпоинты OpenAI-совместимы: {input: string[], model}). Бросает при
+// сетевой/HTTP-ошибке — вызывающий (memory_search) ловит и уходит в чистый BM25 (graceful).
+// signal — отмена хода: обрывает текущий запрос и не пускает следующие батчи, каждый из
+// которых стоит денег.
+export async function embedTexts(
+  texts: string[],
+  { batchSize = 64, signal }: { batchSize?: number; signal?: AbortSignal } = {},
+): Promise<number[][]> {
+  const { cfg } = pickProvider();
+  assertEmbeddingEndpoint(cfg);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
   if (cfg.key) headers.Authorization = `Bearer ${cfg.key}`; // custom endpoint может быть без auth
   const out: number[][] = [];
   for (let i = 0; i < texts.length; i += batchSize) {
+    signal?.throwIfAborted(); // отмена между батчами: следующий вызов не уходит
     const batch = texts.slice(i, i + batchSize);
     const res = await fetch(cfg.url, {
       method: "POST",
       headers,
       body: JSON.stringify({ model: cfg.model, input: batch }),
+      signal,
     });
     if (!res.ok)
       throw new Error(

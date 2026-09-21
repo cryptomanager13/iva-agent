@@ -301,10 +301,11 @@ async function denseRanked(
   query: string,
   docs: Doc[],
   limit: number,
+  signal?: AbortSignal,
 ): Promise<string[] | null> {
   const index = loadEmbedIndex();
   if (!index) return null;
-  const [qvec] = await embedTexts([query]);
+  const [qvec] = await embedTexts([query], { signal });
   if (!qvec) return null;
   const scored: Array<{ path: string; s: number }> = [];
   for (const doc of docs) {
@@ -448,12 +449,17 @@ function naiveSearch(docs: Doc[], tokens: string[]): string[] {
 const MAX_QUERY_TOKENS = 64;
 const MAX_QUERY_CHARS = 4000;
 
-function rejectLongQuery(detail: string): {
+// Ответ тула: считается один раз, чтобы отказ и результат не разъезжались по форме.
+type MemoryAnswer = {
   count: number;
-  engine: string;
+  engine?: string;
   hits: Hit[];
-  note: string;
-} {
+  note?: string;
+  ok?: boolean;
+  error?: string;
+};
+
+function rejectLongQuery(detail: string): MemoryAnswer {
   return {
     count: 0,
     engine: "rejected",
@@ -464,152 +470,217 @@ function rejectLongQuery(detail: string): {
   };
 }
 
-async function searchMemoryInner({
-  query,
-  limit,
-  scope,
-}: {
-  query: string;
-  limit?: number;
-  scope?: string[];
-}): Promise<{
-  count: number;
-  engine?: string;
-  hits: Hit[];
-  note?: string;
-  ok?: boolean;
-  error?: string;
-}> {
-  {
-    if (query.length > MAX_QUERY_CHARS)
-      return rejectLongQuery(`${query.length} знаков`);
-    const tokens = contentTokens(query);
-    if (tokens.length > MAX_QUERY_TOKENS)
-      return rejectLongQuery(`${tokens.length} слов`);
-    const topN = limit ?? 12;
-    const { docs, signature } = await loadDocs(
-      scope && scope.length ? scope : DEFAULT_DIRS,
-    );
-    if (docs.length === 0)
-      return { count: 0, hits: [] as Hit[], note: "vault пуст или недоступен" };
+// Потолки судятся до чтения вольта: отказ обязан быть дешёвым.
+function tokenizeQuery(
+  query: string,
+): { tokens: string[] } | { rejected: MemoryAnswer } {
+  if (query.length > MAX_QUERY_CHARS)
+    return { rejected: rejectLongQuery(`${query.length} знаков`) };
+  const tokens = contentTokens(query);
+  if (tokens.length > MAX_QUERY_TOKENS)
+    return { rejected: rejectLongQuery(`${tokens.length} слов`) };
+  return { tokens };
+}
 
-    // BM25 (FTS5) → пути в порядке релевантности, с мягкой деградацией в наивный поиск.
-    let ranked: string[];
-    let engine = "bm25";
-    try {
-      const ftsQuery = toFtsQuery(tokens);
-      ranked = ftsQuery ? bm25Search(docs, signature, ftsQuery, topN) : [];
-      if (ranked.length === 0) {
-        ranked = naiveSearch(docs, tokens);
-        engine = "naive-empty-bm25";
-      }
-    } catch (error) {
-      console.error(`[memory] BM25 упал, ищу наивно: ${String(error)}`);
-      ranked = naiveSearch(docs, tokens);
-      engine = "naive-fallback";
-    }
-
-    // Плагин: hybrid = BM25 ⊕ dense через RRF. Только при MEMORY_SEARCH_MODE=hybrid и наличии
-    // ключа/индекса. Любой сбой (нет ключа/индекса, сеть) → тихо остаёмся на чистом BM25.
-    if (process.env.MEMORY_SEARCH_MODE === "hybrid" && hasEmbeddingKey()) {
-      try {
-        const dense = await denseRanked(query, docs, topN * 4);
-        if (dense && dense.length) {
-          ranked = rrfFuse([ranked, dense], topN * 4);
-          engine = "hybrid-rrf";
-        }
-      } catch {
-        /* fallback на BM25 — engine остаётся как есть */
-      }
-    }
-
-    // Ранговый скор (RRF-style, K=60): стабилен независимо от абсолютной величины bm25 и
-    // готов к слиянию с dense-списком в плагине.
-    const K = 60;
-    const baseScore = new Map<string, number>();
-    ranked.forEach((path, i) => baseScore.set(path, 1 / (K + i)));
-
-    // Link-distance реранк: якоря = топ-3 BM25-хита; BFS даёт близость каждой карточки к теме.
-    const graph = loadGraph();
-    const anchors = ranked.slice(0, 3).map((p) => p.replace(/\.md$/, ""));
-    const dist = bfsDistances(graph, anchors, 2);
-
-    // Graph-recall: сильные соседи якорей (1 хоп), которых лексика не подняла — добавляем с
-    // маленьким базовым скором, чтобы граф давал recall, а не только реранкил.
-    const NEIGHBOR_BASE = 1 / (K + ranked.length + 5);
-    for (const [noext, d] of dist) {
-      if (d === 1 && !baseScore.has(noext + ".md"))
-        baseScore.set(noext + ".md", NEIGHBOR_BASE);
-    }
-
-    // Язык-агностичное взвешивание: вес термина = его IDF в самом вольте (частое слово на ЛЮБОМ
-    // языке — the/с/的/und — редкое → большое). Считаем haystack по каждой карточке один раз.
-    const hayByPath = new Map<string, string>();
-    for (const dd of docs)
-      hayByPath.set(
-        dd.path,
-        (
-          dd.title +
-          " " +
-          dd.meta +
-          " " +
-          dd.tags +
-          " " +
-          dd.body
-        ).toLowerCase(),
-      );
-    const idf = new Map<string, number>();
-    for (const t of tokens) {
-      let dfc = 0;
-      for (const h of hayByPath.values()) if (h.includes(t)) dfc++;
-      idf.set(t, Math.log((docs.length + 1) / (dfc + 1)) + 1); // сглажённый, >0; редкий термин → вес↑
-    }
-    const idfTotal = tokens.reduce((s, t) => s + (idf.get(t) ?? 0), 0) || 1;
-
-    // Coverage: доля ВЕСА (не количества) терминов запроса, покрытых карточкой. Документ, совпавший
-    // лишь по одному общему токену («rush»→«Rushana»), покрывает малый вес → уступает тому, кто
-    // покрыл редкие, различающие термины. Работает на любом языке без списков — вес даёт корпус.
-    function coverage(path: string): number {
-      if (tokens.length === 0) return 1;
-      const hay = hayByPath.get(path) || "";
-      let s = 0;
-      for (const t of tokens) if (hay.includes(t)) s += idf.get(t) ?? 0;
-      return s / idfTotal;
-    }
-
-    const STALE = new Set([
-      "superseded",
-      "archived",
-      "cancelled",
-      "inactive",
-      "reverted",
-    ]);
-    const byPath = new Map(docs.map((d) => [d.path, d]));
-    const scored: Hit[] = [];
-    for (const [path, s0] of baseScore) {
-      const doc = byPath.get(path);
-      if (!doc) continue;
-      const noext = path.replace(/\.md$/, "");
-      const d = dist.get(noext);
-      // Близость к якорю: 0 хопов ×1.5, 1 хоп ×1.3, 2 хопа ×1.15, недостижим ×1.
-      const proximity =
-        d === undefined ? 1 : d === 0 ? 1.5 : d === 1 ? 1.3 : 1.15;
-      const incoming = graph[noext]?.incoming?.length ?? 0;
-      // Coverage — сильный множитель (0.3..1.3): покрыл весь смысл запроса → буст, один из многих → штраф.
-      const cov = 0.3 + coverage(doc.path);
-      let score = s0 * cov * proximity * (1 + Math.min(incoming, 10) * 0.03);
-      if (STALE.has(doc.status)) score *= 0.3; // пессимизируем устаревшее/неактивное (findable, но ниже)
-      scored.push({
-        file: doc.path,
-        score: Number(score.toFixed(6)),
-        status: doc.status,
-        confidence: doc.confidence,
-        snippet: snippet(doc.body, tokens),
-      });
-    }
-    scored.sort((a, b) => b.score - a.score);
-    return { count: scored.length, engine, hits: scored.slice(0, topN) };
+// BM25 (FTS5) → пути в порядке релевантности, с мягкой деградацией в наивный поиск.
+function rankByBm25(
+  docs: Doc[],
+  signature: string,
+  tokens: string[],
+  topN: number,
+): { ranked: string[]; engine: string } {
+  try {
+    const ftsQuery = toFtsQuery(tokens);
+    const ranked = ftsQuery ? bm25Search(docs, signature, ftsQuery, topN) : [];
+    if (ranked.length > 0) return { ranked, engine: "bm25" };
+    return { ranked: naiveSearch(docs, tokens), engine: "naive-empty-bm25" };
+  } catch (error) {
+    console.error(`[memory] BM25 упал, ищу наивно: ${String(error)}`);
+    return { ranked: naiveSearch(docs, tokens), engine: "naive-fallback" };
   }
+}
+
+// Плагин: hybrid = BM25 ⊕ dense через RRF. Только при MEMORY_SEARCH_MODE=hybrid и наличии
+// ключа/индекса. Любой сбой (нет ключа/индекса, сеть, отмена хода) → тихо остаёмся на чистом BM25.
+async function mergeDense(
+  ranked: string[],
+  engine: string,
+  input: { query: string; docs: Doc[]; topN: number; signal?: AbortSignal },
+): Promise<{ ranked: string[]; engine: string }> {
+  if (process.env.MEMORY_SEARCH_MODE !== "hybrid" || !hasEmbeddingKey())
+    return { ranked, engine };
+  try {
+    const dense = await denseRanked(
+      input.query,
+      input.docs,
+      input.topN * 4,
+      input.signal,
+    );
+    if (!dense || dense.length === 0) return { ranked, engine };
+    return {
+      ranked: rrfFuse([ranked, dense], input.topN * 4),
+      engine: "hybrid-rrf",
+    };
+  } catch {
+    return { ranked, engine }; // fallback на BM25 — engine остаётся как есть
+  }
+}
+
+// Веса терминов: язык-агностичное взвешивание — вес = IDF термина в самом вольте (частое слово
+// на ЛЮБОМ языке — the/с/的/und — редкое → большое). Haystack каждой карточки считается один раз.
+type TermWeights = {
+  tokens: string[];
+  hayByPath: Map<string, string>;
+  idf: Map<string, number>;
+  idfTotal: number;
+};
+
+function termWeights(tokens: string[], docs: Doc[]): TermWeights {
+  const hayByPath = new Map<string, string>();
+  for (const doc of docs)
+    hayByPath.set(
+      doc.path,
+      (
+        doc.title +
+        " " +
+        doc.meta +
+        " " +
+        doc.tags +
+        " " +
+        doc.body
+      ).toLowerCase(),
+    );
+  const idf = new Map<string, number>();
+  for (const t of tokens) {
+    let dfc = 0;
+    for (const h of hayByPath.values()) if (h.includes(t)) dfc++;
+    idf.set(t, Math.log((docs.length + 1) / (dfc + 1)) + 1); // сглажённый, >0; редкий термин → вес↑
+  }
+  const idfTotal = tokens.reduce((s, t) => s + (idf.get(t) ?? 0), 0) || 1;
+  return { tokens, hayByPath, idf, idfTotal };
+}
+
+// Coverage: доля ВЕСА (не количества) терминов запроса, покрытых карточкой. Документ, совпавший
+// лишь по одному общему токену («rush»→«Rushana»), покрывает малый вес → уступает тому, кто
+// покрыл редкие, различающие термины. Работает на любом языке без списков — вес даёт корпус.
+function coverage(path: string, weights: TermWeights): number {
+  if (weights.tokens.length === 0) return 1;
+  const hay = weights.hayByPath.get(path) || "";
+  let s = 0;
+  for (const t of weights.tokens)
+    if (hay.includes(t)) s += weights.idf.get(t) ?? 0;
+  return s / weights.idfTotal;
+}
+
+// Близость к якорю: 0 хопов ×1.5, 1 хоп ×1.3, 2 хопа ×1.15, недостижим ×1.
+const PROXIMITY = [1.5, 1.3, 1.15];
+const proximityOf = (hops: number | undefined): number =>
+  hops === undefined ? 1 : (PROXIMITY[hops] ?? 1.15);
+
+// Ранговый скор (RRF-style, K=60) плюс графовый recall: сильные соседи якорей (1 хоп), которых
+// лексика не подняла, добавляются с маленьким базовым скором — граф даёт recall, а не только реранк.
+function baseScores(
+  ranked: string[],
+  dist: Map<string, number>,
+  K: number,
+): Map<string, number> {
+  const baseScore = new Map<string, number>();
+  ranked.forEach((path, i) => baseScore.set(path, 1 / (K + i)));
+  const NEIGHBOR_BASE = 1 / (K + ranked.length + 5);
+  for (const [noext, hop] of dist) {
+    if (hop === 1 && !baseScore.has(noext + ".md"))
+      baseScore.set(noext + ".md", NEIGHBOR_BASE);
+  }
+  return baseScore;
+}
+
+const STALE = new Set([
+  "superseded",
+  "archived",
+  "cancelled",
+  "inactive",
+  "reverted",
+]);
+
+// Link-distance реранк: якоря = топ-3 BM25-хита; BFS даёт близость каждой карточки к теме.
+function scoreHits(input: {
+  ranked: string[];
+  engine: string;
+  docs: Doc[];
+  tokens: string[];
+  topN: number;
+}): MemoryAnswer {
+  const K = 60;
+  const graph = loadGraph();
+  const anchors = input.ranked.slice(0, 3).map((p) => p.replace(/\.md$/, ""));
+  const dist = bfsDistances(graph, anchors, 2);
+  const baseScore = baseScores(input.ranked, dist, K);
+  const weights = termWeights(input.tokens, input.docs);
+  const byPath = new Map(input.docs.map((d) => [d.path, d]));
+  const scored: Hit[] = [];
+  for (const [path, s0] of baseScore) {
+    const doc = byPath.get(path);
+    if (!doc) continue;
+    const noext = path.replace(/\.md$/, "");
+    const incoming = graph[noext]?.incoming?.length ?? 0;
+    // Coverage — сильный множитель (0.3..1.3): покрыл весь смысл запроса → буст, один из многих → штраф.
+    const cov = 0.3 + coverage(doc.path, weights);
+    let score =
+      s0 *
+      cov *
+      proximityOf(dist.get(noext)) *
+      (1 + Math.min(incoming, 10) * 0.03);
+    if (STALE.has(doc.status)) score *= 0.3; // пессимизируем устаревшее/неактивное (findable, но ниже)
+    scored.push({
+      file: doc.path,
+      score: Number(score.toFixed(6)),
+      status: doc.status,
+      confidence: doc.confidence,
+      snippet: snippet(doc.body, input.tokens),
+    });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return {
+    count: scored.length,
+    engine: input.engine,
+    hits: scored.slice(0, input.topN),
+  };
+}
+
+async function searchMemoryInner(
+  {
+    query,
+    limit,
+    scope,
+  }: {
+    query: string;
+    limit?: number;
+    scope?: string[];
+  },
+  signal?: AbortSignal,
+): Promise<MemoryAnswer> {
+  const parsed = tokenizeQuery(query);
+  if ("rejected" in parsed) return parsed.rejected;
+  const topN = limit ?? 12;
+  const { docs, signature } = await loadDocs(
+    scope && scope.length ? scope : DEFAULT_DIRS,
+  );
+  if (docs.length === 0)
+    return { count: 0, hits: [] as Hit[], note: "vault пуст или недоступен" };
+  const bm25 = rankByBm25(docs, signature, parsed.tokens, topN);
+  const merged = await mergeDense(bm25.ranked, bm25.engine, {
+    query,
+    docs,
+    topN,
+    signal,
+  });
+  return scoreHits({
+    ranked: merged.ranked,
+    engine: merged.engine,
+    docs,
+    tokens: parsed.tokens,
+    topN,
+  });
 }
 
 export default defineTool({
@@ -639,22 +710,19 @@ export default defineTool({
 
 /**
  * Точка входа тула: неверная настройка каталога вольта — отказ `ok:false` с текстом
- * резолвера, а не исключение на границе фреймворка.
+ * резолвера, а не исключение на границе фреймворка. ctx — контекст хода от eve:
+ * отменённый ход обрывает и поход в сеть за эмбеддингом запроса.
  */
-export async function searchMemory(input: {
-  query: string;
-  limit?: number;
-  scope?: string[];
-}): Promise<{
-  count: number;
-  engine?: string;
-  hits: Hit[];
-  note?: string;
-  ok?: boolean;
-  error?: string;
-}> {
+export async function searchMemory(
+  input: {
+    query: string;
+    limit?: number;
+    scope?: string[];
+  },
+  ctx?: { abortSignal?: AbortSignal },
+): Promise<MemoryAnswer> {
   try {
-    return await searchMemoryInner(input);
+    return await searchMemoryInner(input, ctx?.abortSignal);
   } catch (error) {
     const text = vaultDirErrorText(error);
     if (text !== null)
