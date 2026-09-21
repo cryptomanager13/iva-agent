@@ -250,3 +250,30 @@ test("Trace: та же выдача без сессии в контексте ж
 
   assert.equal(traceEvents().length, before);
 });
+
+test("отмена хода доезжает до запроса к провайдеру и обрывает его", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.SEARCH_PROVIDER = "tavily";
+  process.env.TAVILY_API_KEY = "test-key";
+  const controller = new AbortController();
+  let seen: AbortSignal | null | undefined;
+  globalThis.fetch = (_url, init) => {
+    seen = init?.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      seen?.addEventListener("abort", () =>
+        reject(new Error("This operation was aborted")),
+      );
+    });
+  };
+  try {
+    const execution = webSearchTool.execute({ query: "курс доллара" }, {
+      abortSignal: controller.signal,
+    } as unknown as ToolContext);
+    assert.equal(seen, controller.signal, "запрос ушёл без сигнала отмены");
+    controller.abort();
+    const value = (await execution) as SearchResult;
+    assert.match(value.error ?? "", /сеть/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

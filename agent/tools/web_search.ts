@@ -187,6 +187,76 @@ function pickProvider(): SearchProvider {
   return PROVIDERS.find((p) => p.name === name) ?? PROVIDERS[0]; // неизвестный → tavily
 }
 
+type SearchAnswer = {
+  results?: { title: string; url: string; snippet: string }[];
+  answer?: string;
+  warning?: string;
+  note?: string;
+  error?: string;
+};
+
+// HTTP-статус провайдера → текст отказа; null, если ответ успешный. Ключ в текст не попадает.
+function httpError(
+  provider: SearchProvider,
+  status: number,
+): { error: string } | null {
+  if (status === 401 || status === 403)
+    return {
+      error: `${provider.name} отклонил ключ (401/403) — проверь ${provider.keyEnv}.`,
+    };
+  if (status === 429)
+    return {
+      error: `${provider.name}: превышен лимит запросов (429) — попробуй позже.`,
+    };
+  if (status < 200 || status >= 300)
+    return { error: `${provider.name} HTTP ${status}` };
+  return null;
+}
+
+// Ответ провайдера → то, что увидит модель. Каждый кусок текста отдаёт провайдер,
+// и каждый идёт через inbound-Gate; url проверяется на сигнал, но НЕ переписывается:
+// ссылка обязана остаться кликабельной и рабочей.
+function shapeAnswer(
+  provider: SearchProvider,
+  norm: Normalized,
+  n: number,
+): SearchAnswer {
+  const outcomes: WebGateOutcome[] = [];
+  const gated = (raw: string): string => {
+    const outcome = gateWebText(raw);
+    outcomes.push(outcome);
+    return outcome.text;
+  };
+  const probed = (url: string): string => {
+    outcomes.push(...probeWebText(url));
+    return url;
+  };
+
+  const results = norm.results
+    .filter((r) => r.url)
+    .slice(0, n)
+    .map((r) => ({
+      title: clip(gated(r.title), TITLE_MAX),
+      url: probed(r.url),
+      snippet: clip(gated(r.snippet), SNIPPET_MAX),
+    }));
+  const answer = norm.answer?.trim() ? gated(norm.answer.trim()) : undefined;
+  const { warning } = reportWebGate(`web_search ${provider.name}`, outcomes);
+
+  if (!results.length)
+    return {
+      results: [],
+      ...(answer ? { answer } : {}),
+      ...(warning ? { warning } : {}),
+      note: "Ничего не найдено.",
+    };
+  return {
+    ...(answer ? { answer } : {}),
+    results,
+    ...(warning ? { warning } : {}),
+  };
+}
+
 export default defineTool({
   description:
     "Поиск в интернете (SEARCH_PROVIDER): title, url, snippet (+ answer). " +
@@ -221,20 +291,14 @@ export default defineTool({
         method: req.method,
         headers: req.headers,
         body: req.body,
+        // Отмена хода обрывает и запрос к провайдеру, а не только ожидание ответа.
+        signal: ctx.abortSignal,
       });
     } catch (e) {
       return { error: `сеть: ${(e as Error).message}` };
     }
-
-    if (res.status === 401 || res.status === 403)
-      return {
-        error: `${provider.name} отклонил ключ (401/403) — проверь ${provider.keyEnv}.`,
-      };
-    if (res.status === 429)
-      return {
-        error: `${provider.name}: превышен лимит запросов (429) — попробуй позже.`,
-      };
-    if (!res.ok) return { error: `${provider.name} HTTP ${res.status}` };
+    const failed = httpError(provider, res.status);
+    if (failed) return failed;
 
     let json: unknown;
     try {
@@ -248,44 +312,6 @@ export default defineTool({
       };
     }
 
-    const norm = provider.parse(json);
-
-    // Каждый кусок текста от провайдера — через гейт; url проверяется на сигнал,
-    // но НЕ переписывается: ссылка обязана остаться кликабельной и рабочей.
-    const outcomes: WebGateOutcome[] = [];
-    const gated = (raw: string): string => {
-      const outcome = gateWebText(raw);
-      outcomes.push(outcome);
-      return outcome.text;
-    };
-    const probed = (url: string): string => {
-      outcomes.push(...probeWebText(url));
-      return url;
-    };
-
-    const results = norm.results
-      .filter((r) => r.url)
-      .slice(0, n)
-      .map((r) => ({
-        title: clip(gated(r.title), TITLE_MAX),
-        url: probed(r.url),
-        snippet: clip(gated(r.snippet), SNIPPET_MAX),
-      }));
-    const answer =
-      norm.answer && norm.answer.trim() ? gated(norm.answer.trim()) : undefined;
-    const { warning } = reportWebGate(`web_search ${provider.name}`, outcomes);
-
-    if (!results.length)
-      return {
-        results: [],
-        ...(answer ? { answer } : {}),
-        ...(warning ? { warning } : {}),
-        note: "Ничего не найдено.",
-      };
-    return {
-      ...(answer ? { answer } : {}),
-      results,
-      ...(warning ? { warning } : {}),
-    };
+    return shapeAnswer(provider, provider.parse(json), n);
   },
 });
