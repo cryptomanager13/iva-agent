@@ -162,7 +162,20 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.4.4 · 17.09.2026 — expand the latest releases</b></summary>
+<summary><b>v0.4.5 · 21.09.2026 — expand the latest releases</b></summary>
+
+### 21.09.2026
+
+#### v0.4.5
+
+- ⏹ **Stop kills the work at once, not just the talk with the model**: the `bash` tool ignored a cancelled turn, so "Stop" ended the model request while the command it had started kept running. Now a stop kills the whole process group immediately, and the web search and embedding requests of the turn are aborted with it.
+- ⏹ **Stop always arrives and tells the truth**: the button and `/stop` no longer answer "nothing is running" to a turn that has been silent for half an hour, the bridge keeps reading messages while it waits for the confirmation, and "Stopped" is said only after the agent confirmed it.
+- 🔁 **A turn that did not stop gets a "Restart Iva" button**: if no confirmation comes within a minute, the owner gets an honest message in the private chat with a button that restarts the service; Iva never restarts herself on her own.
+- ⏰ **A reminder turn has no time cap any more**: the turn was cut at the eighth minute and its process killed at the tenth, so long scheduled jobs never finished. Now it runs as long as events keep coming; three minutes of silence or the owner's `/stop` end it, and a stopped turn sends nothing.
+- 🔎 **Memory finds a card by another spelling**: `write_card` takes `aliases` (up to 8 spellings: Cyrillic and Latin, transliteration, the everyday name), search ranks them highest, and the tool descriptions no longer promise word forms the index does not catch.
+- 🧾 **A fact in a card never changes silently**: an update with a new `description` used to erase the old value without a trace. Now the previous value goes to `## History` in a line dated by code only; swapped numbers and names, a changed sign or a negation count as a change of fact, case and spacing do not.
+- 🗂 **Every memory write is its own commit in the vault's git**: `write_card`, `write_file` inside the vault and `CORE.md` edits each leave a commit with exactly their own paths, so one broken card can be reverted. Someone else's uncommitted work is never swept in, the commit goes only to the vault's own repository, a git failure never fails the write, and Brain commits without a remote too.
+- 🩹 **The "iva repair" advice is replaced with a command that exists**: the nightly alert about unreadable files now advises `iva update --force`.
 
 ### 17.09.2026
 
@@ -182,27 +195,6 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - 🔌 **A tool schema the provider rejects no longer kills the turn**: OpenAI (codex) rejects the whole request when any tool carries a regex with lookaround; Iva now retries once without those patterns, and if it still fails, the error names the field and where the tool lives.
 - 🧷 **Codex tools without strict mode**: tools go to codex with `strict: false`, so optional fields stay optional and reminders are set on the first call instead of looping.
 - 🧰 **`diagnose.sh` collects more**: the plugin list, the reminder dispatcher pulse and the schedule lines of the last day.
-
-### 13.09.2026
-
-#### v0.4.2
-
-- 🎤 **The voice key is no longer required at install**: the Deepgram step of the wizard is skipped with Enter (console.deepgram.com does not open from some countries, and people got stuck on install for an optional feature); without the key voice notes are saved and Iva suggests `/menu` → 🎤 Voice, and `iva doctor` shows a warning instead of a failure.
-- 🔘 **A new menu, on request: buttons inside the message**: by default the menu, the `/model` and `/think` wizards, the update offer and the "Working" status look as before (a message with buttons under it); `/menu` → Maintenance → **✨ New menu** switches them to Telegram rich messages — every button a full-width row with what it does right under it, headings, status and timers as tables, and **◀︎ Classic menu** at the bottom brings the old look back. Iva also offers buttons in her own replies when there are two to four options, and a tap comes back to her as your message; the `rich-replies` skill covers the whole palette. The new menu needs a Telegram client from August 2026; in groups the reply buttons don't work. [ADR-0015](docs/adr/0015-buttons-live-inside-the-message.md)
-- 💬 **Rich replies and voice are set from the menu**: two new `/menu` screens — a switch for rich replies (`Auto`: tables, task lists, folds and formulas go as rich messages; `Plain text`: ordinary messages) and `🎤 Voice` with the Deepgram key and the recognition language (`Auto`/`Русский`/`English`/`Oʻzbek`); the key is taken from your next message in a private chat and deleted from the chat, and both screens offer a restart after saving.
-- 📦 **Dependencies cleaned up**: the unused `@vercel/connect` is gone, `fast-uri`, `hono` and `qs` under `@modelcontextprotocol/sdk` are bumped past their vulnerabilities (`npm audit`: 0 high, 0 moderate), and the `ai` pin is lifted to `^7.0.82`, the peer eve 0.51.1 requires.
-
-#### v0.4.1
-
-- ⏰ **A reminder is an instruction Iva gives her future self**: a `data/` row moves "pending → fired" in one atomic transition, and at the due minute the text of the reminder is the prompt of one fresh turn — Iva does what it says with her tools and the code sends the final text of that turn back to the chat and topic you asked in, so "in 3 minutes find the news and send it" arrives as the news, not as its own wording. A turn that could not run, failed or came back empty still delivers: the code sends your text verbatim and names the cause in the row. The firing fact (`fired_at`, `delivered`, `error`) sits in the row, `iva doctor` shows it, and rows from the old schema survive the update.
-- 🔔 **One `remind` tool with `add`, `list`, `remove`**: one-off reminders ("in 30 minutes", "at 14:30") and repeating ones (a cron expression in your time zone) are set, listed and removed by a single tool with an `action` field instead of three. The moment is computed in code and handed to the agent as a ready time, schedules firing more often than every 10 minutes are refused, and the destination is always your chat. [ADR-0013](docs/adr/0013-reminders-live-in-data-with-a-minute-dispatcher.md)
-- 🛡 **`bash` cannot set timers of its own or talk to Telegram anymore**: `systemd-run`, writing `crontab`, `at`/`batch`, units under `~/.config/systemd/user`, `~/.iva-scripts`, `sleep` chains and direct calls to api.telegram.org are refused before they run, and the refusal names the replacement; reading (`crontab -l`, `systemctl status`, `journalctl`) still passes.
-- 📋 **Every schedule run leaves a fact, and the agent wakes up with it**: each run writes a row to `data/jobs.json` (reason, exit code, secret-free tail, kept seven days). On success Iva stays silent; on failure she fixes the cause and tells the owner, open failures are visible to every turn and in `iva doctor` and close on the next success or with `iva jobs ack <name>`, and if the agent cannot wake at all, one message a day reaches you. A wake turn that ended by waiting for the next message is a normal end now, not a failure. The schedules section of `iva doctor` works without systemd.
-- 🔎 **A complaint turns into an evidence bundle with no secrets in it**: `iva diagnose` puts versions, OS and node, the `iva doctor` output, the last 200 service log lines, reminder and turn-failure facts and the schedule table into `data/diagnose/<date>.md`, cutting the values of every `.env` key except settings, plus the bot token, owner chat id and e-mail; the `report-problem` skill reads the bundle, explains the failure in two lines and offers a ready issue link or a message for the support group.
-- 🧹 **An interrupted update cleans up after itself and names the reason**: the retiring checkout wears a marker with its own identity, deletes `.git` last and finishes on a repeat; stale shim-refresh claims in `~/.local/bin` are swept by age even under a live pid; a failed optional step now logs its exit code and the last output line (for example `exit 127: uv: command not found`) instead of a silent "… did not run".
-- 🧩 **Your rules live beside the bundled persona and load every turn**: markdown files in `data/custom/agent/instructions/` reach the prompt live without a rebuild, so a behavior rule written into `rules.md` (with `write_file`, after your confirmation) works at once; the old `instructions.md` replacement is obsolete, and `iva doctor` shows the rule count and warns when it overruns the limit.
-- 🧭 **The vault directory is computed by one formula everywhere**: file tools, media, the diary, nightly memory, the CLI, the menu, the build and the installer call a single resolver. An empty value or stray spaces is now a clear error naming the variable instead of a silent directory swap, a relative path resolves against the caller's base, and a bad setting reaches the user as one line, not a stack trace.
-- 🧩 **Iva runs on eve 0.51.1** (0.4.0 shipped 0.47.3): the local patch is ported and rebuilt for the new runtime.
 
 </details>
 
