@@ -670,10 +670,8 @@ if (!remoteUrl) {
         "(scope repo). Ночной brain сам создаст приватный репозиторий iva-vault и включит бэкап.",
     ),
   );
-  console.error("brain: no remote and gh unavailable — push skipped");
-  process.exit(failures.length ? 1 : 0);
 }
-cleared("vault-remote");
+if (remoteUrl) cleared("vault-remote");
 
 // Перед `git add -A`: в .gitignore вольта должны быть шаблоны временных файлов атомарной
 // записи, иначе огрызок убитого писателя уедет в историю памяти как карточка. Идемпотентно
@@ -681,9 +679,16 @@ cleared("vault-remote");
 if (ensureVaultGitignore(VAULT()))
   console.log("brain: added temp-file patterns to the vault .gitignore");
 
+// Локальный коммит есть всегда: без remote отменяется только push. Днём память коммитят
+// сами писатели, а здесь подметальщик забирает то, что осталось незакоммиченным.
 run("git", ["add", "-A"]);
 // commit may return non-zero if there is nothing to commit — that is normal.
 run("git", ["commit", "-m", `chore: memory ${today}`]);
+if (!remoteUrl) {
+  console.error("brain: no remote and gh unavailable — push skipped");
+  console.log("=== brain: vault committed locally, push skipped ===");
+  process.exit(failures.length ? 1 : 0);
+}
 const push = run("git", ["push"]);
 if (push.status !== 0) {
   const error = classifyGitPushError(push.stderr);

@@ -165,4 +165,52 @@ await test("вольт без git: понятный отказ вместо па
   }
 });
 
+// Без remote локальный коммит всё равно есть: отсутствие remote отменяет только push,
+// а память за сутки остаётся в истории vault (иначе у установки без remote нет истории
+// памяти вообще).
+await test("без remote: ночной коммит есть, push не проходит", () => {
+  try {
+    const vault = world("iva-muse4-vault-");
+    const data = world("iva-muse4-data-");
+    gitInit(vault);
+    for (const [key, value] of [
+      ["user.email", "brain@example.com"],
+      ["user.name", "Brain"],
+    ])
+      assert.equal(
+        spawnSync("git", ["-C", vault, "config", key, value]).status,
+        0,
+      );
+    writeFileSync(join(vault, "CORE.md"), "# CORE\n\nФакт дня.\n");
+    const run = runBrain(
+      {
+        ASSISTANT_VAULT_DIR: vault,
+        ASSISTANT_DATA_DIR: data,
+      },
+      fakeBin(0),
+    );
+    const out = run.stdout + run.stderr;
+    assert.match(out, /no remote and gh unavailable — push skipped/);
+    const log = spawnSync("git", ["-C", vault, "log", "--pretty=%s"], {
+      encoding: "utf8",
+    }).stdout;
+    assert.match(log, /chore: memory \d{4}-\d{2}-\d{2}/);
+    assert.equal(
+      spawnSync("git", ["-C", vault, "remote"], {
+        encoding: "utf8",
+      }).stdout.trim(),
+      "",
+      "push никуда не ушёл: remote в vault нет",
+    );
+    assert.equal(
+      spawnSync("git", ["-C", vault, "status", "--porcelain"], {
+        encoding: "utf8",
+      }).stdout,
+      "",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 void BRAIN;
