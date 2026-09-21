@@ -20,6 +20,7 @@ import {
 } from "./authored-paths.ts";
 import { resolveDataDir } from "./data-dir.ts";
 import { gitAt, updaterCompat } from "./update-check.ts";
+import { loadVaultPair } from "./vault-pair.ts";
 import {
   alertResolved,
   PLUGIN_ALERT_KEY,
@@ -719,12 +720,11 @@ function rollbackTo(run: UpdateRun): string | null {
  * Ни один из коммитов не может уронить обновление - как и сам errand. */
 async function cleanVault(run: UpdateRun): Promise<void> {
   const vault = run.store.layout.vault;
-  // Динамический импорт: обновлятор обязан грузиться на установке, где агентское дерево
-  // отсутствует или переписано наполовину (scripts/authored-tree-guard.test.ts), поэтому
-  // агентское достаётся здесь, а не на загрузке модуля.
-  const { vaultWritePair } = await import("../../agent/lib/vault-commit.ts");
-  const pair = vaultWritePair(`update ${run.name}`, vault);
-  await pair.before();
+  // Шов достаётся тем же способом, что и в меню: обновлятор обязан грузиться на установке,
+  // где агентское дерево отсутствует или переписано наполовину
+  // (scripts/authored-tree-guard.test.ts). Нет шва - чистка идёт без коммитов.
+  const pair = await loadVaultPair(`update ${run.name}`, vault);
+  await pair?.before();
   await errand(run.run, run.log, {
     what: "the vault cleanup",
     failure: "the update continues without it",
@@ -737,7 +737,7 @@ async function cleanVault(run: UpdateRun): Promise<void> {
     ],
     cwd: vault,
   });
-  await pair.after();
+  await pair?.after();
 }
 
 /** Переезд: остановка старых писателей, миграции состояния, чистка vault и только потом
@@ -830,7 +830,7 @@ async function goBack(
 
 /** Установка на новой версии: сервис отвечает или возвращается та, что служила. Проба до
  * переезда шла на песочном состоянии и песочном порту, поэтому ломается здесь и только
- * здесь инсталляция, которая цела ровно на своём: стор карточек, который не открыть,
+ * здесь установка, которая цела ровно на своём: стор карточек, который не открыть,
  * занятый порт, окружение юнита. Назад - это переброс симлинка и перезапуск, и это не
  * работа владельца руками через агента, который лежит. */
 async function serveAndFinish(

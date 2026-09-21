@@ -24,10 +24,7 @@ import {
   type ServiceRun,
 } from "./svc-run.ts";
 import { resolveVaultDir } from "../../../packages/vault-dir/index.ts";
-import {
-  vaultWritePair,
-  type VaultWritePair,
-} from "../../../agent/lib/vault-commit.ts";
+import { loadVaultPair, type VaultPair } from "../vault-pair.ts";
 
 type ServiceCommand = "doc" | "cln" | "mem";
 type ServiceStatus = "running" | "failed" | "cancelled" | "timeout" | "done";
@@ -289,12 +286,12 @@ function idleView(
  * Obsidian ложатся рядом с её работой. Без пары коммитов они уехали бы в ночной `add -A`
  * неотличимо от результата чистки, поэтому чистка оформляется тем же швом, что и у
  * обновлятора. `spec.cwd` у неё — это и есть vault; нет каталога — оформлять нечего. */
-function cleanupPair(
+async function cleanupPair(
   cmd: ServiceCommand,
   spec: CommandSpec,
-): VaultWritePair | null {
+): Promise<VaultPair | null> {
   if (cmd !== "cln" || spec.kind !== "proc" || !spec.cwd) return null;
-  return vaultWritePair("menu", spec.cwd);
+  return await loadVaultPair("menu", spec.cwd);
 }
 
 /** Итог команды рисуем, только если юзер всё ещё на экране svc — иначе сводка ждёт в render. */
@@ -316,7 +313,7 @@ function summaryOnFinish(
  * работу раннера в тесте подменяют, а след в истории vault остаётся тем же. */
 function withCleanupCommit(
   opts: RunOptions,
-  pair: VaultWritePair | null,
+  pair: VaultPair | null,
 ): RunOptions {
   if (pair === null) return opts;
   const inner = opts.onFinish;
@@ -359,7 +356,7 @@ async function startCommand(
   }
   const spec = await commandSpec(cmd, ctx);
   const over = ctx.deps.svcRun || {};
-  const pair = cleanupPair(cmd, spec);
+  const pair = await cleanupPair(cmd, spec);
   const opts = withCleanupCommit(
     {
       edit: (markdown) => ctx.flows.screen(st, markdown),
