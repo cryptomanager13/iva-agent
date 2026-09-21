@@ -1,0 +1,781 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Who builds Iva: Majento</title><meta name="description" content="Iva and Majento: meet the team behind the personal AI agent and learn about company implementations."><link rel="canonical" href="https://iva-agent.com/about/"><link rel="alternate" hreflang="en" href="https://iva-agent.com/about/"><link rel="alternate" hreflang="ru" href="https://iva-agent.com/ru/about/"><link rel="alternate" hreflang="x-default" href="https://iva-agent.com/about/"><style>
+      :root {
+        color-scheme: dark;
+        --text: #f2f3f4;
+        --muted: rgba(255, 255, 255, 0.56);
+        --faint: rgba(255, 255, 255, 0.38);
+        --hairline: rgba(255, 255, 255, 0.14);
+        --hairline-soft: rgba(255, 255, 255, 0.08);
+        --green: #86a96f;
+        --teal: #7fd8cc;
+        --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        background: #000;
+        color: var(--text);
+        font-family: "Geologica", system-ui, sans-serif;
+        font-weight: 300;
+        font-size: 17px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--text);
+        text-decoration: none;
+      }
+      img {
+        max-width: 100%;
+        height: auto;
+        display: block;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      ::selection {
+        background: rgba(134, 169, 111, 0.35);
+      }
+
+      .wrap {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 clamp(20px, 4vw, 48px);
+      }
+
+      /* ---------- Liquid glass ---------- */
+      .liquid-glass {
+        background: rgba(255, 255, 255, 0.01);
+        background-blend-mode: luminosity;
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1);
+        position: relative;
+        overflow: hidden;
+        border-radius: 9999px;
+      }
+      .liquid-glass::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: 1.4px;
+        background: linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.45) 0%,
+          rgba(255, 255, 255, 0.15) 20%,
+          rgba(255, 255, 255, 0) 40%,
+          rgba(255, 255, 255, 0) 60%,
+          rgba(255, 255, 255, 0.15) 80%,
+          rgba(255, 255, 255, 0.45) 100%
+        );
+        -webkit-mask:
+          linear-gradient(#fff 0 0) content-box,
+          linear-gradient(#fff 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+        pointer-events: none;
+      }
+
+      /* ---------- Nav ---------- */
+      nav {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 50;
+        white-space: nowrap;
+      }
+      .nav-pill {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        padding: 11px 22px;
+      }
+      .nav-logo {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-family: "Archivo", sans-serif;
+        font-style: italic;
+        font-weight: 900;
+        font-stretch: 125%;
+        letter-spacing: 0.04em;
+        font-size: 15px;
+      }
+      .nav-logo svg {
+        width: 17px;
+        height: 17px;
+        color: var(--green);
+      }
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+      .nav-links a {
+        font-size: 13.5px;
+        font-weight: 300;
+        color: rgba(255, 255, 255, 0.7);
+        transition: color 180ms var(--ease-out);
+      }
+      .nav-links a:hover {
+        color: #fff;
+      }
+      .nav-gh {
+        font-size: 13.5px;
+        font-weight: 500;
+        color: #fff !important;
+        padding: 7px 16px;
+        border-radius: 9999px;
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
+        transition:
+          transform 160ms var(--ease-out),
+          box-shadow 200ms var(--ease-out);
+      }
+      .nav-gh:active {
+        transform: scale(0.96);
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .nav-gh:hover {
+          transform: scale(1.04);
+          box-shadow:
+            inset 0 1px 1px rgba(255, 255, 255, 0.2),
+            0 0 16px 2px rgba(255, 255, 255, 0.12);
+        }
+      }
+      @media (max-width: 760px) {
+        .nav-links a:not(.nav-gh):not(.nav-ru) {
+          display: none;
+        }
+      }
+
+      /* ---------- Hero ---------- */
+      .hero {
+        position: relative;
+        min-height: 100svh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .hero-bg {
+        position: absolute;
+        inset: -7%;
+        z-index: 0;
+        will-change: transform;
+      }
+      .hero-bg img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: center 38%;
+      }
+      .hero-bg::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+          180deg,
+          rgba(0, 0, 0, 0.55) 0%,
+          rgba(0, 0, 0, 0.16) 34%,
+          rgba(0, 0, 0, 0.3) 66%,
+          #000 100%
+        );
+      }
+      .hero-mid {
+        position: relative;
+        z-index: 2;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 120px 20px 0;
+      }
+      .hero h1 {
+        font-family: "Archivo", sans-serif;
+        font-style: italic;
+        font-weight: 900;
+        font-stretch: 125%;
+        font-size: clamp(84px, 16.5vw, 230px);
+        line-height: 0.92;
+        letter-spacing: -0.015em;
+        color: #fff;
+        padding-right: 0.06em;
+      }
+      .hero-sub {
+        margin-top: 26px;
+        font-size: clamp(13px, 1.6vw, 15px);
+        font-weight: 400;
+        letter-spacing: 0.34em;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.82);
+      }
+      .hero-bottom {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 0 clamp(20px, 4vw, 48px) 46px;
+      }
+      .hero-note {
+        font-size: 13.5px;
+        font-weight: 300;
+        color: rgba(255, 255, 255, 0.75);
+        max-width: 230px;
+        line-height: 1.55;
+      }
+      .hero-note.right {
+        text-align: right;
+      }
+      .hero-cta {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: 46px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+      }
+      .cta-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        white-space: nowrap;
+        font-size: 14px;
+        font-weight: 500;
+        border-radius: 9999px;
+        padding: 13px 26px;
+        transition:
+          transform 180ms var(--ease-out),
+          box-shadow 220ms var(--ease-out);
+      }
+      .btn-primary svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+        flex-shrink: 0;
+      }
+      .btn:active {
+        transform: scale(0.97);
+      }
+      .btn-primary {
+        background: #fff;
+        color: #000;
+      }
+      .btn-glass {
+        color: #fff;
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .btn-primary:hover {
+          transform: scale(1.03);
+          box-shadow: 0 0 24px 4px rgba(255, 255, 255, 0.25);
+        }
+        .btn-glass:hover {
+          transform: scale(1.03);
+          box-shadow:
+            inset 0 1px 1px rgba(255, 255, 255, 0.2),
+            0 0 20px 2px rgba(255, 255, 255, 0.07);
+        }
+      }
+      .btn-star {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .btn-star .swap {
+        position: relative;
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+      }
+      .btn-star .swap svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+      }
+      .btn-star .swap > span {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition:
+          transform 260ms var(--ease-spring),
+          opacity 180ms var(--ease-out);
+      }
+      .btn-star .i-star {
+        color: #ffd54a;
+        opacity: 0;
+        transform: translateY(14px) scale(0.8);
+      }
+      .btn-star .sparkle {
+        position: absolute;
+        top: -9px;
+        right: -7px;
+        width: 10px;
+        height: 10px;
+        color: #fff3b0;
+        opacity: 0;
+        transform: translateY(8px) scale(0) rotate(-45deg);
+        transition:
+          transform 280ms var(--ease-spring) 50ms,
+          opacity 180ms var(--ease-out) 50ms;
+      }
+      .btn-star .sparkle svg {
+        width: 10px;
+        height: 10px;
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .btn-star:hover .i-gh {
+          opacity: 0;
+          transform: translateY(-14px) scale(0.8);
+        }
+        .btn-star:hover .i-star {
+          opacity: 1;
+          transform: none;
+        }
+        .btn-star:hover .sparkle {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .btn-star .swap > span,
+        .btn-star .sparkle {
+          transition: none;
+        }
+      }
+      .hero-install {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px 10px 20px;
+        border-radius: 9999px;
+        max-width: min(92vw, 640px);
+      }
+      .hero-install code {
+        font-size: 12.5px;
+        color: rgba(255, 255, 255, 0.85);
+        white-space: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .hero-install button {
+        flex-shrink: 0;
+        background: rgba(255, 255, 255, 0.1);
+        border: 0;
+        border-radius: 9999px;
+        color: rgba(255, 255, 255, 0.85);
+        font:
+          500 12px "Geologica",
+          sans-serif;
+        letter-spacing: 0.06em;
+        padding: 7px 14px;
+        cursor: pointer;
+        min-width: 74px;
+        transition:
+          transform 140ms var(--ease-out),
+          color 180ms var(--ease-out),
+          background 180ms var(--ease-out);
+      }
+      .hero-install button:active {
+        transform: scale(0.95);
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .hero-install button:hover {
+          background: rgba(255, 255, 255, 0.18);
+          color: #fff;
+        }
+      }
+      .hero-install button.done {
+        color: #bfe3b0;
+      }
+      .hero-meta {
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.5);
+      }
+      .hero-meta a {
+        color: rgba(255, 255, 255, 0.7);
+      }
+      .hero-meta a:hover {
+        color: #fff;
+      }
+      @media (max-width: 900px) {
+        .hero-note {
+          display: none;
+        }
+        .hero-cta {
+          position: static;
+          transform: none;
+          margin: 0 auto;
+          padding-bottom: 46px;
+        }
+        .hero-bottom {
+          justify-content: center;
+          padding-bottom: 0;
+        }
+      }
+
+      /* Hero entrance — the one authored moment (CSS-only, no-JS safe) */
+      @media (prefers-reduced-motion: no-preference) {
+        .hero h1,
+        .hero-sub,
+        .hero-cta > *,
+        .hero-note {
+          opacity: 1;
+          transform: none;
+          transition:
+            opacity 900ms var(--ease-out),
+            transform 900ms var(--ease-out);
+        }
+        .hero-sub {
+          transition-delay: 120ms;
+        }
+        .hero-cta > :nth-child(1) {
+          transition-delay: 220ms;
+        }
+        .hero-cta > :nth-child(2) {
+          transition-delay: 300ms;
+        }
+        .hero-cta > :nth-child(3) {
+          transition-delay: 380ms;
+        }
+        .hero-note {
+          transition-delay: 480ms;
+        }
+        @starting-style {
+          .hero h1,
+          .hero-sub,
+          .hero-cta > *,
+          .hero-note {
+            opacity: 0;
+            transform: translateY(18px);
+          }
+        }
+      }
+
+      /* ---------- Sections ---------- */
+      section {
+        padding-block: clamp(84px, 11vw, 150px);
+        scroll-margin-top: 84px;
+      }
+      .sec-label {
+        font-family: "Geologica", system-ui, sans-serif;
+        font-weight: 200;
+        font-size: clamp(34px, 4.8vw, 58px);
+        line-height: 1.08;
+        letter-spacing: -0.01em;
+        color: #fff;
+        text-wrap: balance;
+      }
+      .display {
+        font-size: 13px;
+        font-weight: 500;
+        letter-spacing: 0.3em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-top: 20px;
+        display: flex;
+        align-items: baseline;
+        gap: 18px;
+      }
+      .display::after {
+        content: "";
+        flex: 0 0 44px;
+        border-top: 1px solid var(--hairline);
+        transform: translateY(-4px);
+      }
+      .sec-copy {
+        margin-top: 22px;
+        max-width: 620px;
+        color: var(--muted);
+        font-size: 16.5px;
+      }
+      .sec-copy a,
+      .spec dd a {
+        border-bottom: 1px solid var(--hairline);
+        transition:
+          border-color 180ms var(--ease-out),
+          color 180ms var(--ease-out);
+      }
+      .sec-copy a:hover,
+      .spec dd a:hover {
+        color: var(--teal);
+        border-color: var(--teal);
+      }
+      .plate {
+        margin-top: clamp(40px, 5vw, 64px);
+      }
+      .plate img {
+        width: 100%;
+      }
+      .plate-caption {
+        margin-top: 14px;
+        font-size: 11.5px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--faint);
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .plate-caption a {
+        color: var(--faint);
+        border-bottom: 1px solid var(--hairline-soft);
+      }
+      .plate-caption a:hover {
+        color: var(--teal);
+        border-color: var(--teal);
+      }
+
+      /* Spec sheet rows — museum catalog, not cards */
+      .spec {
+        margin: clamp(36px, 5vw, 56px) 0 0;
+      }
+      .spec > div {
+        display: grid;
+        grid-template-columns: 220px 1fr;
+        gap: 12px 40px;
+        border-top: 1px solid var(--hairline-soft);
+        padding: 20px 0;
+      }
+      .spec dt {
+        font-size: 12.5px;
+        font-weight: 500;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--text);
+        padding-top: 3px;
+      }
+      .spec dd {
+        color: var(--muted);
+        font-size: 16px;
+      }
+      .spec dd b {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .spec dd code {
+        font-size: 0.85em;
+        color: var(--teal);
+      }
+      .spec .path {
+        display: block;
+        margin-top: 4px;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px;
+        color: var(--faint);
+      }
+      @media (max-width: 700px) {
+        .spec > div {
+          grid-template-columns: 1fr;
+          gap: 6px;
+        }
+      }
+
+      /* Quotes — what people ask */
+      .asks {
+        margin-top: clamp(36px, 5vw, 56px);
+      }
+      .asks blockquote {
+        border-top: 1px solid var(--hairline-soft);
+        padding: 26px 0;
+        display: grid;
+        grid-template-columns: 1fr 280px;
+        gap: 10px 40px;
+        align-items: baseline;
+      }
+      .asks p {
+        font-family: "Geologica", system-ui, sans-serif;
+        font-weight: 200;
+        font-size: clamp(20px, 2.4vw, 28px);
+        line-height: 1.3;
+        color: #fff;
+      }
+      .asks cite {
+        font-style: normal;
+        font-size: 12.5px;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--faint);
+        text-align: right;
+      }
+      @media (max-width: 700px) {
+        .asks blockquote {
+          grid-template-columns: 1fr;
+        }
+        .asks cite {
+          text-align: left;
+        }
+      }
+
+      /* Install steps — the sequence carries the numbers */
+      .steps {
+        counter-reset: n;
+        margin-top: clamp(36px, 5vw, 56px);
+        max-width: 720px;
+        padding: 0;
+      }
+      .steps li {
+        list-style: none;
+        border-top: 1px solid var(--hairline-soft);
+        padding: 24px 0 24px 72px;
+        position: relative;
+        color: var(--muted);
+      }
+      .steps li b {
+        color: var(--text);
+        font-weight: 500;
+        display: block;
+        margin-bottom: 4px;
+        letter-spacing: 0.04em;
+      }
+      .steps li::before {
+        counter-increment: n;
+        content: "0" counter(n);
+        position: absolute;
+        left: 0;
+        top: 26px;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 13px;
+        color: var(--green);
+        letter-spacing: 0.1em;
+      }
+      .install-line {
+        margin-top: 40px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px 12px 22px;
+        border-radius: 9999px;
+        max-width: 680px;
+      }
+      .install-line code {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.85);
+        white-space: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+        flex: 1;
+      }
+      .install-line button {
+        flex-shrink: 0;
+        background: #fff;
+        border: 0;
+        border-radius: 9999px;
+        color: #000;
+        font:
+          500 12.5px "Geologica",
+          sans-serif;
+        letter-spacing: 0.06em;
+        padding: 9px 18px;
+        cursor: pointer;
+        min-width: 78px;
+        transition:
+          transform 140ms var(--ease-out),
+          box-shadow 200ms var(--ease-out);
+      }
+      .install-line button:active {
+        transform: scale(0.95);
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .install-line button:hover {
+          transform: scale(1.04);
+          box-shadow: 0 0 18px 2px rgba(255, 255, 255, 0.2);
+        }
+      }
+
+      /* ---------- Footer ---------- */
+      .footer {
+        border-top: 1px solid var(--hairline-soft);
+        padding: 56px clamp(20px, 4vw, 48px) 72px;
+      }
+      .footer-in {
+        max-width: 1200px;
+        margin: 0 auto;
+        display: flex;
+        justify-content: space-between;
+        gap: 32px;
+        flex-wrap: wrap;
+      }
+      .footer .fcol {
+        font-size: 13.5px;
+        color: var(--faint);
+        line-height: 2.1;
+      }
+      .footer .fcol span {
+        display: block;
+        font-size: 11.5px;
+        letter-spacing: 0.26em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 10px;
+      }
+      .footer a {
+        color: var(--muted);
+        transition: color 180ms var(--ease-out);
+      }
+      .footer a:hover {
+        color: #fff;
+      }
+
+      /* ---------- Scroll reveals (JS-gated, no-JS safe) ---------- */
+      .js .plate {
+        transition:
+          opacity 900ms var(--ease-out),
+          filter 900ms var(--ease-out),
+          transform 900ms var(--ease-out);
+      }
+      .js .plate:not(.in) {
+        opacity: 0;
+        filter: blur(10px);
+        transform: translateY(14px);
+      }
+      .js :is(.spec, .asks, .steps) > * {
+        transition:
+          opacity 600ms var(--ease-out),
+          transform 600ms var(--ease-out);
+        transition-delay: calc(var(--i, 0) * 70ms);
+      }
+      .js :is(.spec, .asks, .steps):not(.in) > * {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+        .js .plate,
+        .js :is(.spec, .asks, .steps) > * {
+          transition: opacity 250ms ease;
+        }
+        .js .plate:not(.in) {
+          filter: none;
+          transform: none;
+        }
+        .js :is(.spec, .asks, .steps):not(.in) > * {
+          transform: none;
+        }
+      }
+    </style><style>.company-page{max-width:760px;margin:0 auto;padding:48px 24px;font:18px/1.7 system-ui}.company-page h1{font-size:clamp(32px,6vw,52px);line-height:1.15;margin:36px 0}.company-page h2{font-size:26px;margin:32px 0 16px}.company-page p{margin:16px 0}.company-page a{text-decoration:underline;color:inherit}</style><script type="application/ld+json">{"@context":"https://schema.org","@type":"AboutPage","name":"Who builds Iva: Majento","url":"https://iva-agent.com/about/","inLanguage":"en","about":{"@type":"Organization","name":"Majento","url":"https://majento.ai/"}}</script></head><body><main class="company-page"><nav><a href="/">Iva</a> · <a href="/ru/about/">Русский</a></nav><h1>Who builds Iva: Majento</h1><p>Iva is a personal AI agent built by the Majento team. It helps people work with tasks, context and tools. This website describes the Iva product; custom development for a company is a separate engagement.</p><h2>From a personal agent to a company system</h2><p>A personal assistant and a company agent operate under different conditions. A company needs data access rules, action approvals, logs and integrations with its working systems. Personal product features do not imply a ready-made integration with every CRM or internal service.</p><h2>The Majento team</h2><p>Majento is a software company based in Tashkent, Uzbekistan. We build products and implement AI in business workflows. Serge Shima leads product, AI and research. Batyr Latipov leads strategy and business development.</p><p>Development starts with one workflow and its success criteria. The team then defines a pilot, access permissions, quality checks and handover to employees. IT consulting and systems analysis are available separately.</p><h2>Support and projects</h2><p>Iva documentation and installation are available on the <a href="/">product homepage</a>. For a company agent, <a href="https://majento.ai/ai-implementation/?utm_source=iva-agent.com&amp;utm_medium=referral&amp;utm_campaign=ecosystem">discuss implementation with Majento</a>. Describe your task and systems without personal data or trade secrets.</p><p><a href="https://majento.ai/about/?utm_source=iva-agent.com&amp;utm_medium=referral&amp;utm_campaign=ecosystem">About Majento</a></p></main></body></html>
