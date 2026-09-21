@@ -13,6 +13,10 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  changedVaultPaths,
+  commitVaultWrite,
+} from "../../agent/lib/vault-commit.ts";
+import {
   instructionSlotCollision,
   isAuthoredPath,
   isInstructionSlotPath,
@@ -372,328 +376,495 @@ export async function runVersionUpdate(
  * The half of an update the new version runs about itself, so a fix to any of it
  * ships with the release carrying it. The flip decides what runs, the marker
  * whether the move is finished.
+ *//**
+ * Всё, что фазы обновления читают о ходе: разрешённые опции с дефолтами плюс пути,
+ * пробник и плагины, посчитанные один раз. Одна точка правды: фазы не пересчитывают
+ * ни дефолты, ни пути по-своему.
  */
-export async function finishVersionUpdate({
-  home,
-  name,
-  run,
-  probe,
-  quiesce = async () => {},
-  resumeOldWriters = async () => {},
-  startCandidate = async () => {},
-  serving = (port) => awaitServing({ port }),
-  retireCommittedWriters = async () => {},
-  adopt = () => {},
-  notify = () => {},
-  log = () => {},
-  store = createVersionStore(home),
-  requirePlugins = false,
-  alertPlugins,
-}: FinishOptions): Promise<UpdateOutcome> {
-  const dir = join(store.layout.versions, name);
-  const customDir = join(store.layout.data, "custom");
-  const active = store.currentName();
-  const settledBefore = store.settled(); // Validate state before build or mutation.
-  const env = store.layout.env;
-  const check: Probe =
-    probe ??
-    ((at, port) =>
-      probeVersion({ dir: at, port, env: probeEnvironment(env, port, at) }));
-  const { plugins } = await versionOverlay(store.layout.data, log);
-  const tell =
-    alertPlugins ??
-    ((failures) => Promise.resolve(notify(pluginsOffNotice(failures))));
-  /**
-   * The plugins whose code is in this tree right now - read from the tree, because a
-   * version may have been built by an earlier run, and a rebuild here can take a
-   * plugin back out of one.
-   */
-  let mounted: readonly CodePlugin[] = plugins.filter((plugin) =>
-    existsSync(join(dir, plugin.mount)),
-  );
-  /** Why a plugin is not in the tree, by name; the owner gets told at the end. */
-  const refusals = new Map<string, string>();
-  const refuse = (failures: readonly PluginFailure[]): void => {
-    for (const failure of failures) refusals.set(failure.name, failure.reason);
-  };
-  /**
-   * What a plugin that did not make it into the tree costs. Said once, at the end,
-   * when the tree is final: every path here can drop a plugin - its own build, the
-   * agent build, a start that fails, a rebuild without the customization - and an
-   * owner does not need one message per attempt. The switch comes before the Alert:
-   * being told a plugin is off has to mean finding it off.
-   */
-  const settlePlugins = async (): Promise<void> => {
-    const dropped = plugins.filter(
-      (plugin) => !mounted.some((one) => one.name === plugin.name),
-    );
-    if (dropped.length === 0) {
-      // Every enabled plugin is in: whatever was refused before is over, and a
-      // relapse next week speaks at once instead of waiting out the throttle.
-      if (plugins.length > 0)
-        alertResolved(store.layout.data, PLUGIN_ALERT_KEY);
-      return;
-    }
-    const failures = dropped.map((plugin) => ({
-      name: plugin.name,
-      digest: plugin.digest,
-      reason:
-        refusals.get(plugin.name) ??
-        `${name} was installed without the code of ${plugin.name}`,
-    }));
-    for (const failure of failures) {
-      if (await disableCodePlugin(store.layout.data, failure.name))
-        log(`switched the plugin ${failure.name} off`);
-    }
-    await tell(failures);
-  };
-  let custom = builtWith(dir, name, customDir, plugins);
-  if (active === name && settledBefore === name && store.cleanupPending(name)) {
-    await runPostHealthCleanup({
-      name,
-      run,
-      retireCommittedWriters,
-      adopt,
-      log,
-      store,
-    });
-    return { status: "current", version: name };
-  }
-  /** A version being built is garbage nothing points at: a failure takes it away. */
-  const discard = (error: unknown): never => {
-    rmSync(dir, { recursive: true, force: true });
-    throw error;
-  };
-  const prove = async (): Promise<Health> => {
-    // A real server start, on scratch state: an update about to be thrown away
-    // must not have touched the installation.
-    const scratch = store.sandboxState(name);
-    const selector = new PortSelector(new PortChecker([bindProbe, procProbe]));
-    try {
-      // The pid spreads two updaters apart; the selector steps over what listens.
-      // Nothing holds a port between that check and the start, so the version's own
-      // bind is the only reservation there is: a port a neighbour took inside that
-      // window comes back as busy, and the next candidate gets the same chance.
-      let from = DEFAULT_PORT + 100 + (process.pid % 100);
-      for (let left = PROBE_PORTS; left > 0; left--) {
-        const port = await selector.firstFree(from);
-        if (port === null)
-          return { ok: false, log: "no free port for a probe" };
-        const health = await check(dir, port);
-        if (!health.busy) return health;
-        log(
-          `the probe port ${port} was taken before the version could bind it`,
-        );
-        from = port + 1;
-      }
-      return {
-        ok: false,
-        log: `no probe port stayed free for ${PROBE_PORTS} tries`,
-      };
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
-  };
+interface UpdateRun {
+  readonly active: string | null;
+  readonly adopt: () => void;
+  readonly alertPlugins?: (failures: readonly PluginFailure[]) => Promise<void>;
+  readonly check: Probe;
+  readonly customDir: string;
+  readonly dir: string;
+  readonly env: string;
+  readonly home: string;
+  readonly log: Say;
+  readonly name: string;
+  readonly notify: Say;
+  readonly plugins: readonly CodePlugin[];
+  readonly quiesce: () => Promise<void>;
+  readonly requirePlugins: boolean;
+  readonly resumeOldWriters: (root: string) => Promise<void>;
+  readonly retireCommittedWriters: (root: string) => Promise<void>;
+  readonly run: Runner;
+  readonly serving: (port: number) => Promise<Health>;
+  readonly settledBefore: string | null;
+  readonly startCandidate: (dir: string) => Promise<void>;
+  readonly store: Store;
+}
 
+/** Дерево версии, которое строят и оправдывают: с чем оно собрано, какие плагины в нём
+ * оказались и почему остальные отпали. */
+interface CandidateTree {
+  custom: Custom;
+  mounted: readonly CodePlugin[];
+  readonly refusals: Map<string, string>;
+}
+
+/** Опции хода, которых вызывающий вправе не задавать, получают поведение по умолчанию:
+ * `undefined` в объекте опций значил бы «замени дефолт на пустоту», поэтому у каждой опции
+ * свой ответ, а не общий spread. Разложены по смыслу, чтобы каждая функция осталась
+ * простой. */
+function writerSteps(options: FinishOptions) {
+  return {
+    adopt: options.adopt ?? (() => {}),
+    quiesce: options.quiesce ?? (async () => {}),
+    resumeOldWriters: options.resumeOldWriters ?? (async () => {}),
+  };
+}
+
+function flipSteps(options: FinishOptions) {
+  return {
+    retireCommittedWriters: options.retireCommittedWriters ?? (async () => {}),
+    serving: options.serving ?? ((port: number) => awaitServing({ port })),
+    startCandidate: options.startCandidate ?? (async () => {}),
+  };
+}
+
+function voiceSteps(options: FinishOptions) {
+  return {
+    log: options.log ?? (() => {}),
+    notify: options.notify ?? (() => {}),
+    requirePlugins: options.requirePlugins ?? false,
+  };
+}
+
+/** Опции с дефолтами плюс пути, плагины и пробник, посчитанные один раз: одна точка правды
+ * на весь ход. Состояние читается до `versionOverlay`: сначала проверка, потом правка. */
+async function openUpdate(options: FinishOptions): Promise<UpdateRun> {
+  const { home, name, run, probe, store = createVersionStore(home) } = options;
+  const env = store.layout.env;
+  const active = store.currentName();
+  const settledBefore = store.settled();
+  const { plugins } = await versionOverlay(
+    store.layout.data,
+    voiceSteps(options).log,
+  );
+  return {
+    active,
+    alertPlugins: options.alertPlugins,
+    check:
+      probe ??
+      ((at, port) =>
+        probeVersion({ dir: at, port, env: probeEnvironment(env, port, at) })),
+    customDir: join(store.layout.data, "custom"),
+    dir: join(store.layout.versions, name),
+    env,
+    home,
+    name,
+    plugins,
+    run,
+    settledBefore,
+    store,
+    ...writerSteps(options),
+    ...flipSteps(options),
+    ...voiceSteps(options),
+  };
+}
+
+/** Дерево версии, которую вот-вот выбросят, - мусор, на который никто не указывает. */
+function discardTree(dir: string, error: unknown): never {
+  rmSync(dir, { recursive: true, force: true });
+  throw error;
+}
+
+/**
+ * Плагины, которые не доехали в дерево, называются один раз, когда дерево уже
+ * окончательное: и свой билд, и билд агента, и старт, и пересборка без кастомизации могут
+ * выкинуть плагин - и владельцу не нужна весть на каждую попытку. Выключение идёт до
+ * сообщения: услышать, что плагин выключен, значит найти его выключенным.
+ */
+async function settlePlugins(
+  run: UpdateRun,
+  tree: CandidateTree,
+): Promise<void> {
+  const { store, plugins, name, log, notify, alertPlugins } = run;
+  const dropped = plugins.filter(
+    (plugin) => !tree.mounted.some((one) => one.name === plugin.name),
+  );
+  if (dropped.length === 0) {
+    // Every enabled plugin is in: whatever was refused before is over, and a
+    // relapse next week speaks at once instead of waiting out the throttle.
+    if (plugins.length > 0) alertResolved(store.layout.data, PLUGIN_ALERT_KEY);
+    return;
+  }
+  const failures = dropped.map((plugin) => ({
+    name: plugin.name,
+    digest: plugin.digest,
+    reason:
+      tree.refusals.get(plugin.name) ??
+      `${name} was installed without the code of ${plugin.name}`,
+  }));
+  for (const failure of failures) {
+    if (await disableCodePlugin(store.layout.data, failure.name))
+      log(`switched the plugin ${failure.name} off`);
+  }
+  await (
+    alertPlugins ?? ((list) => Promise.resolve(notify(pluginsOffNotice(list))))
+  )(failures);
+}
+
+/** Живой старт на песочном состоянии: обновление, которое вот-вот выбросят, не должно
+ * успеть тронуть установку. Порт разведён по pid, а между проверкой и стартом порт никто
+ * не держит - сосед, занявший его в этом окне, возвращается как busy, и следующему
+ * кандидату достаётся тот же шанс. */
+async function probeCandidate(run: UpdateRun): Promise<Health> {
+  const { store, name, check, dir, log } = run;
+  const scratch = store.sandboxState(name);
+  const selector = new PortSelector(new PortChecker([bindProbe, procProbe]));
+  try {
+    let from = DEFAULT_PORT + 100 + (process.pid % 100);
+    for (let left = PROBE_PORTS; left > 0; left--) {
+      const port = await selector.firstFree(from);
+      if (port === null) return { ok: false, log: "no free port for a probe" };
+      const health = await check(dir, port);
+      if (!health.busy) return health;
+      log(`the probe port ${port} was taken before the version could bind it`);
+      from = port + 1;
+    }
+    return {
+      ok: false,
+      log: `no probe port stayed free for ${PROBE_PORTS} tries`,
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Чем дерево начинает: достроенная прошлым ходом версия, версия, на которой сервис уже
+ * умирал, или обычная сборка. `prepared` - состояние ДО этой сборки: по нему ниже видно,
+ * был ли путь назад у версии, которую вот-вот перестроят. */
+async function buildTree(
+  run: UpdateRun,
+  tree: CandidateTree,
+  prepared: boolean,
+): Promise<void> {
+  const {
+    store,
+    name,
+    run: command,
+    dir,
+    customDir,
+    plugins,
+    notify,
+    log,
+  } = run;
+  const refuse = (failures: readonly PluginFailure[]): void => {
+    for (const failure of failures)
+      tree.refusals.set(failure.name, failure.reason);
+  };
+  if (prepared) {
+    log(`reusing prepared version ${name}`);
+    return;
+  }
+  if (store.liveFailed(name)) {
+    // This code has been live once and the service died on it. The overlay is
+    // the only part of the tree that is not upstream's, so it is the part that
+    // comes out; without one there is nothing to drop and this is a rebuild.
+    log(
+      "the service died on this version before; building it without data/custom",
+    );
+    await buildStock(store, name, command).catch((error: unknown) =>
+      discardTree(dir, error),
+    );
+    tree.custom = builtWith(dir, name, customDir, plugins);
+    tree.mounted = [];
+    if (tree.custom === "stock") notify(deferredNotice());
+    return;
+  }
+  const built = await buildVersion({
+    store,
+    name,
+    run: command,
+    notify,
+    log,
+    plugins,
+    requirePlugins: run.requirePlugins,
+  }).catch((error: unknown) => discardTree(dir, error));
+  tree.custom = built.custom;
+  // What the build refused is remembered, not announced yet: the start below can
+  // still take another plugin out, and the owner gets one message about the tree
+  // that ends up installed rather than one per attempt.
+  refuse(built.failed);
+  tree.mounted = built.mounted;
+}
+
+/** Плагины выпадают первыми: они та часть дерева, которую релиз не поставляет, и владелец
+ * возвращает их по одному (ADR-0003: один плагин не имеет права держать машину лёгшей). Не
+ * под `requirePlugins` - там плагин и есть смысл сборки, и версия, которая с ним не
+ * стартует, это отказ. Возврат - здоровье дерева после пересборки. */
+async function rebuildWithoutPlugins(
+  run: UpdateRun,
+  tree: CandidateTree,
+  prepared: boolean,
+  health: Health,
+): Promise<Health> {
+  const { name, run: command, dir, customDir, log } = run;
+  if (health.ok || tree.mounted.length === 0 || prepared || run.requirePlugins)
+    return health;
+  log("the version does not start with its plugins; rebuilding without them");
+  const broken = health.log;
+  const refused = tree.mounted;
+  for (const plugin of refused) removePluginFromVersion(dir, plugin);
+  const again = await command("npm", BUILD, dir);
+  if (again.code !== 0) return health;
+  const probed = await probeCandidate(run);
+  if (!probed.ok) return probed;
+  for (const plugin of refused)
+    tree.refusals.set(
+      plugin.name,
+      `this version does not start with the plugin ${plugin.name}:\n${broken.slice(-OUTPUT_TAIL)}`,
+    );
+  tree.custom = builtWith(dir, name, customDir, []);
+  tree.mounted = [];
+  return probed;
+}
+
+/** Зелёная сборка - не старт: сервис компилирует authored-часть сам, когда поднимается, и
+ * релиз - не тот код, ради которого держат ход пользователя. */
+async function rebuildWithoutCustomization(
+  run: UpdateRun,
+  tree: CandidateTree,
+  prepared: boolean,
+  health: Health,
+): Promise<Health> {
+  const { store, name, run: command, dir, notify, log } = run;
+  if (health.ok || tree.custom !== "applied" || prepared) return health;
+  log("the customized version does not start; rebuilding without it");
+  await buildStock(store, name, command).catch((error: unknown) =>
+    discardTree(dir, error),
+  );
+  tree.custom = "stock";
+  tree.mounted = [];
+  const broken = health.log;
+  const probed = await probeCandidate(run);
+  if (probed.ok) notify(stockNotice("start against", broken));
+  return probed;
+}
+
+/** Проба дерева и пересборки того, что не поднялось: плагины, потом кастомизация. */
+async function repairTree(
+  run: UpdateRun,
+  tree: CandidateTree,
+  prepared: boolean,
+): Promise<Health> {
+  const health = await probeCandidate(run);
+  const withoutPlugins = await rebuildWithoutPlugins(
+    run,
+    tree,
+    prepared,
+    health,
+  );
+  return await rebuildWithoutCustomization(run, tree, prepared, withoutPlugins);
+}
+
+/** Сборка, проба и замена плагинов - до первого касания того, что запущено. Возврат:
+ * либо дерево, которое поднялось и оправдано, либо исход unhealthy. */
+async function buildCandidate(
+  run: UpdateRun,
+): Promise<{ tree: CandidateTree } | UpdateOutcome> {
+  const { active, name, store, plugins, dir, customDir, log, notify } = run;
   // Built by a run that never activated it: the tree is there, the rest is owed.
   const prepared = store.list().includes(name);
+  const tree: CandidateTree = {
+    custom: builtWith(dir, name, customDir, plugins),
+    mounted: plugins.filter((plugin) => existsSync(join(dir, plugin.mount))),
+    refusals: new Map(),
+  };
   if (active === name) {
     // The flip happened, the rest did not: pick the update up where it stopped.
     log(`finishing the move onto ${name}`);
-  } else {
-    if (prepared) log(`reusing prepared version ${name}`);
-    else if (store.liveFailed(name)) {
-      // This code has been live once and the service died on it. The overlay is
-      // the only part of the tree that is not upstream's, so it is the part that
-      // comes out; without one there is nothing to drop and this is a rebuild.
-      log(
-        "the service died on this version before; building it without data/custom",
-      );
-      await buildStock(store, name, run).catch(discard);
-      custom = builtWith(dir, name, customDir, plugins);
-      mounted = [];
-      if (custom === "stock") notify(deferredNotice());
-    } else {
-      const built = await buildVersion({
-        store,
-        name,
-        run,
-        notify,
-        log,
-        plugins,
-        requirePlugins,
-      }).catch(discard);
-      custom = built.custom;
-      // What the build refused is remembered, not announced yet: the start below can
-      // still take another plugin out, and the owner gets one message about the tree
-      // that ends up installed rather than one per attempt.
-      refuse(built.failed);
-      mounted = built.mounted;
-    }
-    let health = await prove();
-    // The build was green and the service still did not come up. The plugins are the
-    // part of the tree the release does not ship and the owner can put back one at a
-    // time, so they come out before the user's own files do (ADR-0003: one plugin may
-    // not keep the box down). Not under `requirePlugins`: there the plugin is the
-    // point of the build, and a version that will not start with it is a refusal.
-    if (!health.ok && mounted.length > 0 && !prepared && !requirePlugins) {
-      log(
-        "the version does not start with its plugins; rebuilding without them",
-      );
-      const broken = health.log;
-      for (const plugin of mounted) removePluginFromVersion(dir, plugin);
-      const again = await run("npm", BUILD, dir);
-      if (again.code === 0) {
-        health = await prove();
-        if (health.ok) {
-          refuse(
-            mounted.map((plugin) => ({
-              name: plugin.name,
-              digest: plugin.digest,
-              reason: `this version does not start with the plugin ${plugin.name}:\n${broken.slice(-OUTPUT_TAIL)}`,
-            })),
-          );
-          custom = builtWith(dir, name, customDir, []);
-          mounted = [];
-        }
-      }
-    }
-    // A green build is not a start: the service compiles the authored TypeScript
-    // again when it comes up, and a release is not the user's code to hold up.
-    if (!health.ok && custom === "applied" && !prepared) {
-      log("the customized version does not start; rebuilding without it");
-      await buildStock(store, name, run).catch(discard);
-      custom = "stock";
-      mounted = [];
-      const broken = health.log;
-      health = await prove();
-      if (health.ok) notify(stockNotice("start against", broken));
-    }
-    if (!health.ok) {
-      // Garbage nothing points at - unless an earlier run finished it, and then
-      // it is somebody's way back, which a failed probe never takes.
-      if (!prepared) rmSync(dir, { recursive: true, force: true });
-      notify(
-        `update to ${name} did not start; staying on ${active ?? "the current version"}`,
-      );
-      return { status: "unhealthy", version: name, log: health.log };
-    }
-    // The tree is final and it starts: the state of the plugins is settled against it,
-    // so `plugins.json` can never claim a plugin whose code is not in what runs.
-    await settlePlugins();
-    // Proved and immutable. It remains a candidate until all old writers stop
-    // and every state migration finishes against the old active Version.
-    store.complete(name);
+    return { tree };
   }
+  await buildTree(run, tree, prepared);
+  const health = await repairTree(run, tree, prepared);
+  if (!health.ok) {
+    // Garbage nothing points at - unless an earlier run finished it, and then
+    // it is somebody's way back, which a failed probe never takes.
+    if (!prepared) rmSync(dir, { recursive: true, force: true });
+    notify(
+      `update to ${name} did not start; staying on ${active ?? "the current version"}`,
+    );
+    return { status: "unhealthy", version: name, log: health.log };
+  }
+  // The tree is final and it starts: the state of the plugins is settled against it,
+  // so `plugins.json` can never claim a plugin whose code is not in what runs.
+  await settlePlugins(run, tree);
+  // Proved and immutable. It remains a candidate until all old writers stop
+  // and every state migration finishes against the old active Version.
+  store.complete(name);
+  return { tree };
+}
 
-  let migrations: string[];
+/** Каким было состояние до этого дерева: на него возвращаются, если сервис после переезда
+ * не ответит. */
+function rollbackTo(run: UpdateRun): string | null {
+  const { store, active, name } = run;
   const storedPrevious = store.previousName();
-  const rollback =
-    active !== null && active !== name && store.list().includes(active)
-      ? active
-      : storedPrevious !== name
-        ? storedPrevious
-        : null;
+  if (active !== null && active !== name && store.list().includes(active))
+    return active;
+  return storedPrevious !== name ? storedPrevious : null;
+}
+
+/** Чистка vault правит память пользователя, поэтому оставляет пару коммитов: снимок того,
+ * что было незакоммичено до неё (только если было), и результат чистки, названный версией.
+ * Ни один из коммитов не может уронить обновление - как и сам errand. */
+async function cleanVault(run: UpdateRun): Promise<void> {
+  const vault = run.store.layout.vault;
+  const before = await changedVaultPaths(vault);
+  if (before.length > 0)
+    await commitVaultWrite(`update ${run.name}: vault snapshot`, before, vault);
+  await errand(run.run, run.log, {
+    what: "the vault cleanup",
+    failure: "the update continues without it",
+    command: "uv",
+    args: [
+      "run",
+      join(run.dir, "scripts/autograph/cleanup.py"),
+      ".",
+      "--apply",
+    ],
+    cwd: vault,
+  });
+  const after = await changedVaultPaths(vault);
+  if (after.length > 0)
+    await commitVaultWrite(`update ${run.name}: vault cleanup`, after, vault);
+}
+
+/** Переезд: остановка старых писателей, миграции состояния, чистка vault и только потом
+ * переброс симлинка и старт. Границу задаёт `quiesce`: ни один старый писатель не должен
+ * пересечься с миграцией, меняющей общее состояние. */
+async function migrateAndFlip(
+  run: UpdateRun,
+  rollback: string | null,
+): Promise<string[]> {
+  const { home, name, quiesce, startCandidate, store, log } = run;
   try {
-    // Completion of this callback is the boundary: no old writer can overlap a
-    // present or future migration that changes shared state.
     await quiesce();
-    migrations = await runMigrations({
-      dir: join(dir, "scripts/migrations"),
+    const migrations = await runMigrations({
+      dir: join(run.dir, "scripts/migrations"),
       dataDir: store.layout.data,
-      context: { home, dataDir: store.layout.data, versionDir: dir },
+      context: { home, dataDir: store.layout.data, versionDir: run.dir },
       log,
     });
-    // Before the restart: the cleaner repairs cards an older frontmatter writer
-    // grew to gigabytes. Once the new agent opens them, repair is too late.
-    await errand(run, log, {
-      what: "the vault cleanup",
-      failure: "the update continues without it",
-      command: "uv",
-      args: ["run", join(dir, "scripts/autograph/cleanup.py"), ".", "--apply"],
-      cwd: store.layout.vault,
-    });
+    await cleanVault(run);
     if (store.currentName() !== name) store.activate(name);
     await startCandidate(store.layout.current);
+    return migrations;
   } catch (error) {
     // Every recoverable fault restores the Version that served before this run.
     // The candidate stays complete, so the next update can retry without rebuild.
     if (rollback !== null && rollback !== name && store.currentName() === name)
       store.activate(rollback);
     const recoveryRoot =
-      active === null && store.currentName() === null
+      run.active === null && store.currentName() === null
         ? home
         : store.layout.current;
-    await resumeOldWriters(recoveryRoot).catch((restartError: unknown) =>
-      log(`service recovery failed: ${String(restartError)}`),
-    );
+    await run
+      .resumeOldWriters(recoveryRoot)
+      .catch((restartError: unknown) =>
+        log(`service recovery failed: ${String(restartError)}`),
+      );
     throw error;
   }
+}
 
+/** Порядок важен: провал живого хода записывается до отката, иначе убийство посреди
+ * отката оставит следующий ход в вере, что это дерево годится для возврата. */
+async function goBack(
+  run: UpdateRun,
+  failed: {
+    readonly tree: CandidateTree;
+    readonly rollback: string | null;
+    readonly port: number;
+    readonly log: string;
+  },
+): Promise<UpdateOutcome> {
+  const { tree, rollback, port, log } = failed;
+  const { store, name, notify } = run;
+  let recordFailure: unknown;
+  try {
+    store.recordLive(name, false);
+  } catch (error) {
+    recordFailure = error;
+  }
+  if (rollback) {
+    store.activate(rollback);
+    // A restart that fails here leaves a service the user is without either
+    // way, and the flip is what makes the next start the older version's.
+    await run
+      .resumeOldWriters(store.layout.current)
+      .catch((error: unknown) =>
+        run.log(`the restart onto ${rollback} failed: ${String(error)}`),
+      );
+    store.settle(rollback);
+  }
+  notify(
+    `${name} did not answer on port ${port} after the restart; ` +
+      (rollback
+        ? `going back to ${rollback}`
+        : "there is no earlier version to go back to") +
+      (tree.custom === "applied"
+        ? ". Your files in data/custom are the likeliest cause - they build and" +
+          " they start, and the service still did not come up on them. The next" +
+          " update installs this version without them."
+        : ""),
+  );
+  if (recordFailure !== undefined)
+    throw recordFailure instanceof Error
+      ? recordFailure
+      : new Error("recording live failure threw a non-Error value", {
+          cause: recordFailure,
+        });
+  return { status: "unhealthy", version: name, log };
+}
+
+/** Установка на новой версии: сервис отвечает или возвращается та, что служила. Проба до
+ * переезда шла на песочном состоянии и песочном порту, поэтому ломается здесь и только
+ * здесь инсталляция, которая цела ровно на своём: стор карточек, который не открыть,
+ * занятый порт, окружение юнита. Назад - это переброс симлинка и перезапуск, и это не
+ * работа владельца руками через агента, который лежит. */
+async function serveAndFinish(
+  run: UpdateRun,
+  tree: CandidateTree,
+  migrations: string[],
+  rollback: string | null,
+): Promise<UpdateOutcome> {
+  const { store, name, env, serving, log } = run;
   const port = servicePort(env);
   const live = await serving(port).catch((error: unknown) => ({
     ok: false,
     log: error instanceof Error ? error.message : String(error),
   }));
-  if (!live.ok) {
-    // The probe before the flip ran on scratch state on a scratch port, so an
-    // installation that only breaks on its own - a card store it cannot open, a
-    // port still held, its unit's environment - fails here and nowhere earlier.
-    // Going back is a flip and a restart, and it is not the user's to do by hand
-    // through an agent that is down.
-    const back = rollback;
-    // Written before the rollback: a kill in the middle of one must not leave the
-    // next update believing this tree is a good one to hand back.
-    let recordFailure: unknown;
-    try {
-      store.recordLive(name, false);
-    } catch (error) {
-      recordFailure = error;
-    }
-    if (back) {
-      store.activate(back);
-      // A restart that fails here leaves a service the user is without either
-      // way, and the flip is what makes the next start the older version's.
-      await resumeOldWriters(store.layout.current).catch((error: unknown) =>
-        log(`the restart onto ${back} failed: ${String(error)}`),
-      );
-      store.settle(back);
-    }
-    notify(
-      `${name} did not answer on port ${port} after the restart; ` +
-        (back
-          ? `going back to ${back}`
-          : "there is no earlier version to go back to") +
-        (custom === "applied"
-          ? ". Your files in data/custom are the likeliest cause - they build and" +
-            " they start, and the service still did not come up on them. The next" +
-            " update installs this version without them."
-          : ""),
-    );
-    if (recordFailure !== undefined)
-      throw recordFailure instanceof Error
-        ? recordFailure
-        : new Error("recording live failure threw a non-Error value", {
-            cause: recordFailure,
-          });
-    return { status: "unhealthy", version: name, log: live.log };
-  }
-
+  if (!live.ok)
+    return await goBack(run, { tree, rollback, port, log: live.log });
   // Served: whatever this code did to the installation before, it does not now.
   store.recordLive(name, true);
   // Service state commits before every optional cleanup. A crash or cleanup
   // fault leaves explicit debt, never a healthy update reported as unfinished.
   store.settle(name, {
     cleanupPending: true,
-    previous: active !== name ? active : rollback,
+    previous: run.active !== name ? run.active : rollback,
   });
   // After the service is up: until it runs the new version, the old checkout is
   // what a failed restart falls back to, so it is not ours to remove any earlier.
   const removed = await runPostHealthCleanup({
     name,
-    run,
-    retireCommittedWriters,
-    adopt,
+    run: run.run,
+    retireCommittedWriters: run.retireCommittedWriters,
+    adopt: run.adopt,
     log,
     store,
   });
@@ -701,10 +872,36 @@ export async function finishVersionUpdate({
     status: "updated",
     version: name,
     previous: rollback,
-    custom,
+    custom: tree.custom,
     migrations,
     removed,
   };
+}
+
+export async function finishVersionUpdate(
+  options: FinishOptions,
+): Promise<UpdateOutcome> {
+  const run = await openUpdate(options);
+  if (
+    run.active === run.name &&
+    run.settledBefore === run.name &&
+    run.store.cleanupPending(run.name)
+  ) {
+    await runPostHealthCleanup({
+      name: run.name,
+      run: run.run,
+      retireCommittedWriters: run.retireCommittedWriters,
+      adopt: run.adopt,
+      log: run.log,
+      store: run.store,
+    });
+    return { status: "current", version: run.name };
+  }
+  const built = await buildCandidate(run);
+  if ("status" in built) return built;
+  const rollback = rollbackTo(run);
+  const migrations = await migrateAndFlip(run, rollback);
+  return await serveAndFinish(run, built.tree, migrations, rollback);
 }
 
 /**
