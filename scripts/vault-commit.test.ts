@@ -10,6 +10,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -506,6 +507,13 @@ test("коммит правки в vault из двух тысяч карточе
   assert.ok(delta < 300, `коммит правки занял ${String(delta)} мс`);
 });
 
+/** Чужой процесс в репозитории vault: правки владельца, упавший hook, висящий hook. */
+function hook(vault: string, body: string): void {
+  const path = join(vault, ".git", "hooks", "pre-commit");
+  writeFileSync(path, `#!/bin/sh\n${body}\n`);
+  chmodSync(path, 0o755);
+}
+
 test("чужой staged-файл остаётся staged и в коммит записи не уезжает", async (t) => {
   const vault = makeVault(t);
   const foreign = join(vault, "owner-staged.md");
@@ -543,6 +551,34 @@ test("осиротевшая запись убитого хода не уезж�
 
   assert.deepEqual(touched(vault), ["cards/notes/следующая.md"]);
   assert.match(porcelain(vault), /^A {2}cards\/notes\/сирота\.md$/mu);
+});
+test("упавший pre-commit: запись на диске, коммита нет, карточка не остаётся staged", async (t) => {
+  const vault = makeVault(t);
+  hook(vault, "echo 'hook says no' >&2\nexit 1");
+
+  const { logged, value: result } = await journal(() =>
+    tool.card(card({ operation: "ADD", title: "Падхук" })),
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.match(logged, /hook says no/u);
+  assert.equal(existsSync(join(vault, "cards", "notes", "падхук.md")), true);
+  assert.deepEqual(subjects(vault), []);
+  assert.match(
+    trySh(
+      ["-c", "core.quotePath=false", "status", "--porcelain", "-uall"],
+      vault,
+    ),
+    /^\?\? cards\/notes\/падхук\.md$/mu,
+    "брошенная правка не живёт в чужом индексе до следующего коммита",
+  );
+
+  rmSync(join(vault, ".git", "hooks", "pre-commit"));
+  const later = await tool.card(
+    card({ body: "Следующая карточка.", operation: "ADD", title: "Следующая" }),
+  );
+  assert.equal(later.ok, true, later.error);
+  assert.deepEqual(touched(vault), ["cards/notes/следующая.md"]);
+  assert.deepEqual(subjects(vault), ["card следующая: ADD"]);
 });
 test("vault внутри чужого репозитория: память не уезжает в чужую историю", async (t) => {
   const parent = mkdtempSync(join(tmpdir(), "iva-parent-"));

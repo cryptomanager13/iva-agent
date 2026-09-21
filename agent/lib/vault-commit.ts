@@ -179,6 +179,41 @@ async function checkRepository(vault: string): Promise<RepoCheck> {
   return { kind: "skip", reason: `репозиторий чужой: ${owner}` };
 }
 
+/** Записи индекса по нашим путям до `git add`, или null - индекс прочитать не удалось.
+ * Без снимка лучше не трогать индекс вовсе, чем вернуть его наугад. */
+async function indexEntries(
+  vault: string,
+  paths: readonly string[],
+): Promise<Map<string, string> | null> {
+  const run = await git(["ls-files", "-s", "-z", "--", ...paths], vault);
+  if (run.code !== 0) return null;
+  const entries = new Map<string, string>();
+  for (const line of run.out.split("\0").filter(Boolean)) {
+    const tab = line.indexOf("\t");
+    if (tab > 0) entries.set(line.slice(tab + 1), line.slice(0, tab));
+  }
+  return entries;
+}
+
+/** Вернуть индекс по нашим путям как было: запись из снимка или её отсутствие. Чужой индекс
+ * (другие пути) не трогаем - он не наш. */
+async function restoreIndex(
+  vault: string,
+  paths: readonly string[],
+  before: ReadonlyMap<string, string>,
+): Promise<void> {
+  for (const path of paths) {
+    const entry = before.get(path);
+    const [mode, object, stage] = (entry ?? "").split(" ");
+    await git(
+      stage === "0"
+        ? ["update-index", "--cacheinfo", `${mode},${object},${path}`]
+        : ["update-index", "--force-remove", "--", path],
+      vault,
+    );
+  }
+}
+
 function vaultRoot(root: string): string | null {
   try {
     return realpathSync(root);
@@ -208,6 +243,7 @@ async function commitPaths(
   const repo = await checkRepository(vault);
   if (repo.kind === "skip")
     return { ok: true, committed: false, reason: repo.reason };
+  const before = await indexEntries(vault, paths);
   const staged = await withIndexRetry(vault, () =>
     git(["add", "--", ...paths], vault),
   );
@@ -216,6 +252,9 @@ async function commitPaths(
     commitWith(vault, message, paths),
   );
   if (committed.code === 0) return { ok: true, committed: true };
+  // Коммит не состоялся (hook, отказ git): бросок не должен остаться в индексе, иначе его
+  // подметёт чужой коммит или следующий наш.
+  if (before !== null) await restoreIndex(vault, paths, before);
   // Правка не изменила ни одного байта - коммитить нечего, и это не отказ.
   if (NOTHING_TO_COMMIT.test(detail(committed)))
     return { ok: true, committed: false };
