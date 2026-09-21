@@ -505,3 +505,42 @@ test("коммит правки в vault из двух тысяч карточе
   );
   assert.ok(delta < 300, `коммит правки занял ${String(delta)} мс`);
 });
+
+test("чужой staged-файл остаётся staged и в коммит записи не уезжает", async (t) => {
+  const vault = makeVault(t);
+  const foreign = join(vault, "owner-staged.md");
+  writeFileSync(foreign, "Чужая работа владельца\n");
+  sh(["add", "--", "owner-staged.md"], vault);
+
+  const result = await tool.card(
+    card({ body: "Вторая карточка.", operation: "ADD", title: "Вторая" }),
+  );
+  assert.equal(result.ok, true, result.error);
+
+  assert.deepEqual(touched(vault), ["cards/notes/вторая.md"]);
+  assert.deepEqual(subjects(vault), ["card вторая: ADD"]);
+  assert.match(
+    porcelain(vault),
+    /^A {2}owner-staged\.md$/mu,
+    "работа владельца остаётся в индексе, а не в истории памяти",
+  );
+  assert.equal(readFileSync(foreign, "utf8"), "Чужая работа владельца\n");
+});
+test("осиротевшая запись убитого хода не уезжает в следующий коммит", async (t) => {
+  const vault = makeVault(t);
+  // Так выглядит индекс после SIGKILL посреди коммита: карточка написана и добавлена,
+  // коммита нет. Следующая запись обязана назвать только свои пути.
+  writeFileSync(
+    join(vault, "cards", "notes", "сирота.md"),
+    '---\ntype: "note"\ndescription: "Сирота"\n---\n\n# Сирота\n\nТекст.\n',
+  );
+  sh(["add", "--", "cards/notes/сирота.md"], vault);
+
+  const result = await tool.card(
+    card({ body: "Следующая карточка.", operation: "ADD", title: "Следующая" }),
+  );
+  assert.equal(result.ok, true, result.error);
+
+  assert.deepEqual(touched(vault), ["cards/notes/следующая.md"]);
+  assert.match(porcelain(vault), /^A {2}cards\/notes\/сирота\.md$/mu);
+});

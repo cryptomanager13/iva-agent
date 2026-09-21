@@ -33,8 +33,8 @@ const LOG_PREFIX = "[vault-commit]";
 
 const INDEX_BUSY = /index\.lock/u;
 const IDENTITY_MISSING = /tell me who you are|user\.name|user\.email/iu;
-const NOTHING_TO_COMMIT = /nothing to commit|nothing added to commit/u;
-
+const NOTHING_TO_COMMIT =
+  /nothing to commit|nothing added to commit|no changes added to commit/u;
 export type VaultCommit =
   | { readonly ok: true; readonly committed: boolean }
   | { readonly ok: false; readonly reason: string };
@@ -123,11 +123,22 @@ async function withIndexRetry(
   return result;
 }
 
-/** Коммит от Ивы, если в vault нет identity владельца. */
-async function commitWith(vault: string, message: string): Promise<GitRun> {
-  const plain = await git(["commit", "-q", "-m", message], vault);
+/** Коммит от Ивы, если в vault нет identity владельца. Пути названы и здесь: коммит без
+ * pathspec забирает весь индекс, а индекс в vault общий с владельцем. */
+async function commitWith(
+  vault: string,
+  message: string,
+  paths: readonly string[],
+): Promise<GitRun> {
+  const plain = await git(
+    ["commit", "-q", "-m", message, "--", ...paths],
+    vault,
+  );
   if (plain.code === 0 || !IDENTITY_MISSING.test(detail(plain))) return plain;
-  return git([...IVA_IDENTITY, "commit", "-q", "-m", message], vault);
+  return git(
+    [...IVA_IDENTITY, "commit", "-q", "-m", message, "--", ...paths],
+    vault,
+  );
 }
 
 function realOf(path: string): string | null {
@@ -180,7 +191,7 @@ async function commitPaths(
   );
   if (staged.code !== 0) return { ok: false, reason: reasonOf(staged) };
   const committed = await withIndexRetry(vault, () =>
-    commitWith(vault, message),
+    commitWith(vault, message, paths),
   );
   if (committed.code === 0) return { ok: true, committed: true };
   // Правка не изменила ни одного байта - коммитить нечего, и это не отказ.
