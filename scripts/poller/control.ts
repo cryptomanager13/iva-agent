@@ -5,8 +5,12 @@ import {
 } from "../lib/telegram-reset.ts";
 import { TELEGRAM_STOP_CALLBACK } from "#lib/telegram-status-message.ts";
 import {
+  cancellableSessionId,
   requestTurnCancel,
   stopOutcomeText,
+  STOP_CONFIRM_TIMEOUT_MS,
+  type StopCancelRequest,
+  type StopCancelResult,
   type StopOutcome,
 } from "#lib/telegram-stop.ts";
 import {
@@ -92,12 +96,7 @@ type ControlTransport = (
   body: Record<string, unknown>,
 ) => Promise<TelegramResult>;
 type StatusImpl = (chatKey: string) => Record<string, unknown> | null;
-type CancelImpl = (input: {
-  url: string;
-  secret: string;
-  sessionId: string;
-  turnId?: string;
-}) => Promise<unknown>;
+type CancelImpl = (input: StopCancelRequest) => Promise<StopCancelResult>;
 type PerformResetImpl = typeof performScopedReset;
 // Точки ввода-вывода handleControl, которые подменяются в тестах: ответ в чат,
 // подтверждение нажатия и вызов cancel-роута. Всё остальное остаётся дефолтным.
@@ -108,6 +107,8 @@ export type ControlDeps = {
   ) => Promise<SentMessage | null>;
   ackImpl?: (callbackQueryId: string, text?: string) => Promise<unknown>;
   cancelImpl?: CancelImpl;
+  // Окно ожидания подтверждения отмены: подменяется в тестах, чтобы не ждать его целиком.
+  confirmTimeoutMs?: number;
   performResetImpl?: PerformResetImpl;
   resetRetryPendingImpl?: (chatKey: string) => boolean;
   resetIntentPendingImpl?: (chatKey: string) => boolean;
@@ -295,7 +296,7 @@ async function requestTurnStop(
     keyImpl?: (update: TelegramUpdate) => string | null;
     cancelImpl?: CancelImpl;
     getStatusImpl?: StatusImpl;
-    runningImpl?: (chatKey: string) => boolean;
+    confirmTimeoutMs?: number;
     logImpl?: (...parts: unknown[]) => void;
   } = {},
 ): Promise<StopOutcome> {
@@ -519,6 +520,7 @@ const DEFAULT_CONTROL_IO: Omit<ControlIo, "cancelImpl"> = {
   performResetImpl: performScopedReset,
   resetRetryPendingImpl: isPrivateResetRetryPending,
   resetIntentPendingImpl: hasPrivateResetIntent,
+  confirmTimeoutMs: STOP_CONFIRM_TIMEOUT_MS,
 };
 
 // Переданный undefined значит «по умолчанию» — как у деструктуризации с дефолтами.
@@ -690,11 +692,103 @@ async function handleStopTap({ update, callback, io }: CallbackContext) {
   // Чужой тап в группе: гасим спиннер молча и ничего не отменяем.
   if (!isTrustedSender(callback.from))
     return telegramCallSucceeded(await io.ackImpl(callback.id));
-  const outcome = await requestTurnStop(update, { cancelImpl: io.cancelImpl });
+  const outcome = await requestTurnStop(update, {
+    cancelImpl: io.cancelImpl,
+    confirmTimeoutMs: io.confirmTimeoutMs,
+  });
+  if (outcome === "unresponsive") {
+    // Подсказка колбэка после долгого ожидания может быть уже отвергнута Telegram:
+    // честный текст уйдёт сообщением от самой эскалации, здесь — всплывающий.
+    const restarted = await escalateUnresponsiveStop(
+      update,
+      callbackChat(callback),
+      io,
+    );
+    await io.ackImpl(callback.id, stopOutcomeText(outcome, restarted));
+    return true;
+  }
   const acknowledged = telegramCallSucceeded(
     await io.ackImpl(callback.id, stopOutcomeText(outcome)),
   );
   return outcome === "requested" || acknowledged;
+}
+
+// ── Эскалация «Стопа» ──
+//
+// «Стоп» не дождался остановки: агент не отвечает. Мост лечит тем, что у него уже
+// есть: сброс разговора — тем же performScopedReset, что у /new и /restart, и
+// рестарт юнита — тем же вызовом systemctl, что у /restart (KillMode в юните не
+// задан, поэтому рестарт сносит eve вместе с осиротевшими процессами). Второго пути
+// рестарта нет: restartService один на всех.
+//
+// Только личка владельца: в группе чужой /stop не вправе рестартовать сервис.
+const STOP_ESCALATION_BACKOFF_MS = 60_000;
+
+// chatKey → последняя эскалация: по какому sessionId её делали и когда. Сервис по одному
+// и тому же зависшему ходу поднимаем один раз: повторные «Стоп» подряд не должны
+// складываться в очередь рестартов, а ход, зависший заново (другой sessionId или тот же,
+// но позже), эскалируется снова. Момент пишется ДО работы — иначе одновременные нажатия
+// прошли бы проверку все сразу.
+type EscalatedStop = { readonly sessionId: string | null; readonly at: number };
+const recentStopEscalations = new Map<string, EscalatedStop>();
+
+function stopAlreadyEscalated(
+  key: string,
+  sessionId: string | null,
+  now: number,
+): boolean {
+  const previous = recentStopEscalations.get(key);
+  return (
+    previous !== undefined &&
+    previous.sessionId === sessionId &&
+    now - previous.at < STOP_ESCALATION_BACKOFF_MS
+  );
+}
+
+async function escalateUnresponsiveStop(
+  update: TelegramUpdate,
+  chat: TelegramMessage["chat"],
+  io: ControlIo,
+): Promise<boolean> {
+  if (chat === undefined || !isPrivateTelegramChat(chat)) return false;
+  const key = chatKey(update);
+  const chatId = chat.id;
+  if (key === null || chatId === undefined) return false;
+  const now = Date.now();
+  const sessionId = cancellableSessionId(getChatStatus(key));
+  if (stopAlreadyEscalated(key, sessionId, now)) return false;
+  recentStopEscalations.set(key, { sessionId, at: now });
+  return runStopEscalation(update, key, io, chatId);
+}
+
+// Ровно одно сообщение на попытку эскалации: до доставки текста решает получатель, а не
+// вызывающий, иначе повторные нажатия дали бы дубли. Сброс — best-effort: интент сброса
+// записан ДО запроса к агенту, и восстановление повторит его, а рестарт лечит зависший
+// процесс независимо от того, успел ли ответить сброс.
+async function runStopEscalation(
+  update: TelegramUpdate,
+  key: string,
+  io: ControlIo,
+  chatId: number,
+): Promise<boolean> {
+  try {
+    const target = resetTargetFor(update, key);
+    if (target !== null) {
+      await io.performResetImpl(key, target, {
+        clearQueue: true,
+        discardThroughUpdateId: update.update_id,
+      });
+    }
+  } catch (error) {
+    log("stop escalation reset failed:", errorMessage(error));
+  }
+  const restarted = await restartService();
+  await io
+    .replyImpl(chatId, stopOutcomeText("unresponsive", restarted))
+    .catch((error: unknown) =>
+      log("stop escalation reply failed:", errorMessage(error)),
+    );
+  return restarted;
 }
 
 function tapGroupHint(
@@ -943,10 +1037,18 @@ async function openMenu({ chatId, from }: ControlCommand) {
 // /stop — interrupt the current turn, the same door as the ⏹ Stop button.
 // Out-of-band so it reaches a busy agent (an ordinary message would be queued by
 // the gate below and never processed).
-async function stopCommand({ update, io, chatId }: ControlCommand) {
-  const outcome = await requestTurnStop(update, { cancelImpl: io.cancelImpl });
+async function stopCommand({ update, io, chatId, msg }: ControlCommand) {
+  const outcome = await requestTurnStop(update, {
+    cancelImpl: io.cancelImpl,
+    confirmTimeoutMs: io.confirmTimeoutMs,
+  });
   // Успех виден по статус-сообщению: turn.cancelled перепишет его на «Остановлено».
   if (outcome === "requested") return true;
+  // В личке владельца эскалация сама говорит в чат — ровно одним сообщением.
+  if (outcome === "unresponsive" && isPrivateTelegramChat(msg.chat)) {
+    await escalateUnresponsiveStop(update, msg.chat, io);
+    return true;
+  }
   return replyConfirmed(io, chatId, stopOutcomeText(outcome));
 }
 
@@ -1177,7 +1279,10 @@ async function finishReset(reset: ActiveReset) {
 }
 
 async function restartFailed(cmd: OutOfBandCommand): Promise<boolean> {
-  return cmd === "/restart" && !(await sc("restart", "iva.service"));
+  return cmd === "/restart" && !(await restartService());
 }
+
+// Единственный вызов рестарта сервиса: им пользуются и /restart, и эскалация «Стопа».
+const restartService = () => sc("restart", "iva.service");
 
 export { registerBotCommands, handleControl };

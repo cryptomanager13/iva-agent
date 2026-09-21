@@ -7,12 +7,15 @@ import { handleTelegramCancelRequest } from "#lib/telegram-cancel-route.ts";
 import { cancelEveTurn } from "#lib/eve-cancel.ts";
 
 type FetchCall = { url: string; init: RequestInit };
-type CancelCall = { sessionId: string; options: { turnId?: string } };
+type CancelCall = {
+  sessionId: string;
+  options: { tasks?: boolean; turnId?: string };
+};
 
 function cancelHarness(calls: CancelCall[]): AttachSessionFn {
   return ((sessionId: string) => ({
     id: sessionId,
-    cancel: async (options: { turnId?: string } = {}) => {
+    cancel: async (options: { tasks?: boolean; turnId?: string } = {}) => {
       calls.push({ sessionId, options });
       return { sessionId, status: "accepted" as const };
     },
@@ -109,7 +112,7 @@ test("cancel route authenticates and forwards the exact session and turn", async
     status: "accepted",
   });
   assert.deepEqual(calls, [
-    { sessionId: "session-55", options: { turnId: "turn-9" } },
+    { sessionId: "session-55", options: { tasks: true, turnId: "turn-9" } },
   ]);
 });
 
@@ -172,7 +175,7 @@ test("the whole Stop path reaches eve through the fixed session handle", async (
 
   assert.equal(result.status, "accepted");
   assert.deepEqual(calls, [
-    { sessionId: "session-1", options: { turnId: "turn-1" } },
+    { sessionId: "session-1", options: { tasks: true, turnId: "turn-1" } },
   ]);
 });
 
@@ -183,8 +186,8 @@ test("the cancel adapter omits an absent turn guard", async () => {
   await cancelEveTurn(attach, { sessionId: "session-1", turnId: "turn-2" });
 
   assert.deepEqual(calls, [
-    { sessionId: "session-1", options: {} },
-    { sessionId: "session-1", options: { turnId: "turn-2" } },
+    { sessionId: "session-1", options: { tasks: true } },
+    { sessionId: "session-1", options: { tasks: true, turnId: "turn-2" } },
   ]);
   assert.equal("turnId" in calls[0].options, false);
 });

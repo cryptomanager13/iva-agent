@@ -76,6 +76,8 @@ type FailureAdapter = {
 const apiCalls: ApiCall[] = [];
 const hitlResponses: unknown[][] = [];
 let heldSend: HeldSend | undefined;
+// Ответ cancel-роута для следующего теста: обычно ход действительно отменяется.
+let cancelRouteStatus: "accepted" | "no_active_turn" = "accepted";
 globalThis.fetch = async (url, init = {}) => {
   // eslint-disable-next-line @typescript-eslint/no-base-to-string -- preserve the original mock's exact String coercion.
   const requestUrl = String(url);
@@ -89,7 +91,9 @@ globalThis.fetch = async (url, init = {}) => {
   apiCalls.push({ method, body });
   // Самовызов cancel-роута каналом (кнопка ⏹ Стоп в webhook-режиме) — не Bot API.
   if (requestUrl.endsWith("/eve/v1/telegram/cancel")) {
-    return Response.json({ ok: true, status: "accepted" });
+    const status = cancelRouteStatus;
+    if (status === "accepted") finishCancelledTurn(body?.sessionId);
+    return Response.json({ ok: true, status });
   }
   const hold = heldSend;
   if (method === "sendMessage" && hold?.chatId === String(body?.chat_id)) {
@@ -858,10 +862,37 @@ function backdateStatus(sessionId: string, ageMs: number) {
   throw new Error(`run-status record for ${sessionId} not found`);
 }
 
-test("a crashed turn's stale status is not stoppable in webhook mode either", async () => {
+// Терминальное событие отмены: ровно такую запись оставляет turn.cancelled канала.
+// Без него «Стоп» обязан ждать подтверждения до самого дедлайна.
+function finishCancelledTurn(sessionId: unknown) {
+  if (typeof sessionId !== "string") return;
+  const dir = join(dataDir, "run-status.d");
+  for (const name of readdirSync(dir)) {
+    const file = join(dir, name);
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+      sessionId?: string;
+    };
+    if (parsed.sessionId !== sessionId) continue;
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...parsed,
+        status: "idle",
+        sessionId: null,
+        turnId: null,
+        wasCancelled: true,
+        updatedAt: Date.now(),
+      }),
+    );
+    return;
+  }
+}
+
+test("a crashed turn's stale status still reaches the cancel route in webhook mode", async () => {
   // В webhook-режиме жнеца нет вовсе (он живёт в мосте), поэтому запись «running»
-  // после краша процесса лежит вечно. Политика «живой ход» обязана быть одна на оба
-  // режима — по возрасту updatedAt, иначе кнопка навсегда отвечает «Останавливаю…».
+  // после краша процесса лежит вечно. Свежесть записи — не повод молчать: sessionId
+  // в ней есть, и отмену надо спросить у eve. Мёртвый ход сам себя выдаст ответом
+  // no_active_turn, и только это серверное подтверждение считается «отменять нечего».
   const chatId = "734";
   const key = chatKeyOf(chatId);
   setChatStatus(key, {
@@ -873,9 +904,19 @@ test("a crashed turn's stale status is not stoppable in webhook mode either", as
   assert.equal(getChatStatus(key)!.status, "running"); // запись всё ещё «идёт»
 
   const before = apiCalls.length;
-  await postWebhookUpdate(stopTap(chatId, 9));
+  cancelRouteStatus = "no_active_turn";
+  try {
+    await postWebhookUpdate(stopTap(chatId, 9));
+  } finally {
+    cancelRouteStatus = "accepted";
+  }
 
-  assert.equal(callsSince(before, "cancel").length, 0);
+  const cancels = callsSince(before, "cancel");
+  assert.equal(cancels.length, 1, "нажатие не дошло до cancel-роута");
+  assert.deepEqual(cancels[0].body, {
+    sessionId: "crashed-session",
+    turnId: "turn_9",
+  });
   assert.equal(
     callsSince(before, "answerCallbackQuery")[0].body!.text,
     "Nothing is running right now.",

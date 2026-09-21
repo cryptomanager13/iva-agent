@@ -27,6 +27,9 @@ export function cancelEveTurn(
   { sessionId, turnId }: EveCancelRequest,
 ): Promise<CancelTurnResult> {
   return attachSession(sessionId).cancel({
+    // Гасим не только сам ход, но и задачи, которые он успел породить: без `tasks`
+    // осиротевшая задача сессии продолжает работать после «Стопа» и писать в vault.
+    tasks: true,
     ...(turnId === undefined ? {} : { turnId }),
   });
 }

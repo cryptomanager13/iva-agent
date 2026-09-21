@@ -1,9 +1,17 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node owns test registration; async doubles preserve the I/O boundary. */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { requestTelegramCancel } from "#lib/telegram-cancel-client.ts";
 
 type Event = string | [string, string, number | undefined, string | undefined];
 type CaptureMessage = { message_id?: number };
@@ -34,6 +42,7 @@ type ControlModule = {
       ) => Promise<{ message_id: number } | null>;
       ackImpl?: (id: string, text?: string) => Promise<unknown>;
       cancelImpl?: (input: CancelCall) => Promise<unknown>;
+      confirmTimeoutMs?: number;
       performResetImpl?: (
         chatKey: string,
         target: Record<string, unknown>,
@@ -326,8 +335,11 @@ function recordingDeps() {
     acks,
     replies,
     deps: {
+      // Двойник успешного пути: eve принял отмену, а терминальное turn.cancelled
+      // переписал запись — то есть ход действительно остановился.
       cancelImpl: async (input: CancelCall) => {
         cancels.push(input);
+        stopTurn("7:");
         return { ok: true, status: "accepted" };
       },
       ackImpl: async (id: string, text?: string) => {
@@ -494,12 +506,69 @@ test("an untrusted tap on someone else's Stop button is swallowed", async () => 
   assert.deepEqual(acks, [["cq-5", undefined]]);
 });
 
-test("a failed cancel request is explained instead of pretending it stopped", async () => {
+// Терминальное событие отмены глазами моста: такую запись оставляет turn.cancelled.
+function stopTurn(key: string) {
+  status.setChatStatus(key, {
+    status: "idle",
+    sessionId: null,
+    turnId: null,
+    wasCancelled: true,
+  });
+}
+
+// Состарить запись run-status, не трогая её раскладку: правим ровно одно поле.
+// Иначе тест «Стоп» после краша не отличить от свежего хода.
+function backdateRunStatus(sessionId: string, ageMs: number) {
+  const dir = join(dataDir, "run-status.d");
+  for (const name of readdirSync(dir)) {
+    const file = join(dir, name);
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+      sessionId?: string;
+      updatedAt?: number;
+    };
+    if (parsed.sessionId !== sessionId) continue;
+    writeFileSync(
+      file,
+      JSON.stringify({ ...parsed, updatedAt: Date.now() - ageMs }),
+    );
+    return;
+  }
+  throw new Error(`run-status record for ${sessionId} not found`);
+}
+
+// Двойник молчащего cancel-роута: запрос уходит, ответа нет — так выглядит зависший
+// агент. Таймаут клиента уважаем (сигнал обрывает ожидание), иначе тест повис бы навсегда.
+function silentRouteCancel(timeoutMs: number, calls: CancelCall[] = []) {
+  return async (input: CancelCall) => {
+    calls.push(input);
+    return requestTelegramCancel({
+      ...input,
+      timeoutMs,
+      fetchImpl: (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const abort = () =>
+            reject(
+              init.signal?.reason instanceof Error
+                ? init.signal.reason
+                : new Error("cancel route timed out"),
+            );
+          if (init.signal?.aborted === true) abort();
+          else init.signal?.addEventListener("abort", abort);
+        }),
+    });
+  };
+}
+
+test("a stale run record still reaches the cancel route while it remembers the session", async () => {
   runningTurn();
+  backdateRunStatus("session-1", 31 * 60_000);
+  const cancels: CancelCall[] = [];
   const acks: Array<[string, string | undefined]> = [];
   const consumed = await handleControl(stopButton(), {
-    cancelImpl: async () => {
-      throw new Error("connect ECONNREFUSED");
+    cancelImpl: async (input: CancelCall) => {
+      cancels.push(input);
+      stopTurn("7:");
+      return { ok: true, status: "accepted" };
     },
     ackImpl: async (id: string, text?: string) => {
       acks.push([id, text]);
@@ -508,9 +577,234 @@ test("a failed cancel request is explained instead of pretending it stopped", as
   });
 
   assert.equal(consumed, true);
-  assert.deepEqual(acks, [
-    ["cq-5", "Не вышло — возможно, ход уже завершился."],
+  assert.deepEqual(cancels, [
+    {
+      url: CANCEL_ROUTE,
+      secret: "test-secret",
+      sessionId: "session-1",
+      turnId: "turn-1",
+    },
   ]);
+  assert.deepEqual(acks, [["cq-5", "Останавливаю…"]]);
+});
+
+test("a stale run record whose turn is already gone ends as idle", async () => {
+  runningTurn();
+  backdateRunStatus("session-1", 31 * 60_000);
+  const cancels: CancelCall[] = [];
+  const acks: Array<[string, string | undefined]> = [];
+  const consumed = await handleControl(stopButton(), {
+    cancelImpl: async (input: CancelCall) => {
+      cancels.push(input);
+      return { ok: true, status: "no_active_turn" };
+    },
+    ackImpl: async (id: string, text?: string) => {
+      acks.push([id, text]);
+      return { ok: true, result: true };
+    },
+  });
+
+  assert.equal(consumed, true);
+  assert.equal(cancels.length, 1);
+  assert.deepEqual(acks, [["cq-5", "Сейчас ничего не выполняется."]]);
+});
+
+test("a silent cancel route restarts the service in the owner's private chat", async () => {
+  runningTurn();
+  await withFakeSystemctl(0, async (argsLog) => {
+    const cancels: CancelCall[] = [];
+    const resets: ResetCall[] = [];
+    const acks: Array<[string, string | undefined]> = [];
+    const replies: Array<[number | undefined, string]> = [];
+    const consumed = await handleControl(stopButton(), {
+      cancelImpl: silentRouteCancel(20, cancels),
+      performResetImpl: async (key, target, options) => {
+        resets.push([key, target, options]);
+      },
+      ackImpl: async (id: string, text?: string) => {
+        acks.push([id, text]);
+        return { ok: true, result: true };
+      },
+      replyImpl: async (chatId: number | undefined, text: string) => {
+        replies.push([chatId, text]);
+        return { message_id: 1 };
+      },
+    });
+
+    assert.equal(consumed, true);
+    assert.equal(cancels.length, 1);
+    assert.equal(readFileSync(argsLog, "utf8"), "--user restart iva.service\n");
+    assert.deepEqual(resets, [
+      [
+        "7:",
+        { sessionId: "session-1" },
+        { clearQueue: true, discardThroughUpdateId: 5 },
+      ],
+    ]);
+    assert.deepEqual(replies, [[7, "Ива не отвечала — сервис перезапущен."]]);
+    assert.deepEqual(acks, [["cq-5", "Ива не отвечала — сервис перезапущен."]]);
+  });
+});
+
+test("a silent cancel route in a group never restarts the service", async () => {
+  status.setChatStatus("-100500:", {
+    status: "running",
+    sessionId: "group-session",
+    turnId: "turn-group",
+  });
+  await withFakeSystemctl(0, async (argsLog) => {
+    const resets: ResetCall[] = [];
+    const replies: Array<[number | undefined, string]> = [];
+    const consumed = await handleControl(
+      {
+        update_id: 6,
+        message: {
+          message_id: 6,
+          date: 1,
+          chat: { id: -100500, type: "group" },
+          from: trustedFrom,
+          text: "/stop",
+        },
+      },
+      {
+        cancelImpl: silentRouteCancel(20),
+        performResetImpl: async (key, target, options) => {
+          resets.push([key, target, options]);
+        },
+        replyImpl: async (chatId: number | undefined, text: string) => {
+          replies.push([chatId, text]);
+          return { message_id: 1 };
+        },
+      },
+    );
+
+    assert.equal(consumed, true);
+    assert.equal(systemctlCalls(argsLog), "");
+    assert.deepEqual(resets, []);
+    assert.deepEqual(replies, [
+      [-100500, "Ива не отвечает — остановить ход не удалось."],
+    ]);
+  });
+});
+
+test("an accepted cancel without a terminal event escalates like a silent route", async () => {
+  runningTurn({ sessionId: "session-2" });
+  await withFakeSystemctl(0, async (argsLog) => {
+    const resets: ResetCall[] = [];
+    const replies: Array<[number | undefined, string]> = [];
+    const consumed = await handleControl(stopButton(), {
+      cancelImpl: async () => ({ ok: true, status: "accepted" }),
+      confirmTimeoutMs: 30,
+      performResetImpl: async (key, target, options) => {
+        resets.push([key, target, options]);
+      },
+      replyImpl: async (chatId: number | undefined, text: string) => {
+        replies.push([chatId, text]);
+        return { message_id: 1 };
+      },
+      ackImpl: async () => ({ ok: true, result: true }),
+    });
+
+    assert.equal(consumed, true);
+    assert.equal(readFileSync(argsLog, "utf8"), "--user restart iva.service\n");
+    assert.equal(resets.length, 1);
+    assert.match(replies[0]?.[1] ?? "", /перезапущ/u);
+  });
+});
+
+test("a failed escalation explains itself and never claims a restart", async () => {
+  runningTurn({ sessionId: "session-3" });
+  // Рестарт не удался: текст не имеет права обещать перезапуск.
+  await withFakeSystemctl(1, async (argsLog) => {
+    const replies: Array<[number | undefined, string]> = [];
+    const consumed = await handleControl(stopButton(), {
+      cancelImpl: async () => ({ ok: true, status: "accepted" }),
+      confirmTimeoutMs: 30,
+      performResetImpl: async () => {
+        throw new Error("reset route is down");
+      },
+      replyImpl: async (chatId: number | undefined, text: string) => {
+        replies.push([chatId, text]);
+        return { message_id: 1 };
+      },
+      ackImpl: async () => ({ ok: true, result: true }),
+    });
+
+    assert.equal(consumed, true);
+    // Неудачный сброс не отменяет попытку рестарта: именно он и лечит зависший процесс.
+    assert.equal(systemctlCalls(argsLog), "--user restart iva.service\n");
+    assert.deepEqual(replies, [
+      [7, "Ива не отвечает — остановить ход не удалось."],
+    ]);
+  });
+});
+
+test("a stop right after an escalation does not restart the service twice", async () => {
+  runningTurn({ sessionId: "session-4" });
+  await withFakeSystemctl(0, async (argsLog) => {
+    const resets: ResetCall[] = [];
+    const replies: Array<[number | undefined, string]> = [];
+    const deps = {
+      // Роут принимает отмену, но ход не заканчивается: мост ждёт подтверждения впустую.
+      cancelImpl: async () => ({ ok: true, status: "accepted" }),
+      confirmTimeoutMs: 30,
+      performResetImpl: async (
+        key: string,
+        target: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ) => {
+        resets.push([key, target, options]);
+      },
+      replyImpl: async (chatId: number | undefined, text: string) => {
+        replies.push([chatId, text]);
+        return { message_id: 1 };
+      },
+      ackImpl: async () => ({ ok: true, result: true }),
+    };
+
+    for (let tap = 0; tap < 3; tap++) {
+      assert.equal(await handleControl(stopButton(), deps), true);
+    }
+
+    assert.equal(readFileSync(argsLog, "utf8"), "--user restart iva.service\n");
+    assert.equal(resets.length, 1);
+    assert.equal(replies.length, 1);
+  });
+});
+
+test("repeated Stop taps during one escalation restart the service once", async () => {
+  runningTurn({ sessionId: "session-5" });
+  await withFakeSystemctl(0, async (argsLog) => {
+    const resets: ResetCall[] = [];
+    const replies: Array<[number | undefined, string]> = [];
+    const deps = {
+      cancelImpl: async () => ({ ok: true, status: "accepted" }),
+      confirmTimeoutMs: 30,
+      performResetImpl: async (
+        key: string,
+        target: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ) => {
+        resets.push([key, target, options]);
+      },
+      replyImpl: async (chatId: number | undefined, text: string) => {
+        replies.push([chatId, text]);
+        return { message_id: 1 };
+      },
+      ackImpl: async () => ({ ok: true, result: true }),
+    };
+
+    const outcomes = await Promise.all([
+      handleControl(stopButton(), deps),
+      handleControl(stopButton(), deps),
+      handleControl(stopButton(), deps),
+    ]);
+
+    assert.deepEqual(outcomes, [true, true, true]);
+    assert.equal(readFileSync(argsLog, "utf8"), "--user restart iva.service\n");
+    assert.equal(resets.length, 1);
+    assert.equal(replies.length, 1);
+  });
 });
 
 test("repeated taps after the turn is gone stay harmless", async () => {
@@ -1727,6 +2021,10 @@ const edits = (calls: BotCall[]) =>
   calls
     .filter((call) => call.method === "editMessageText")
     .map((call) => JSON.stringify(call.body));
+
+// Журнал двойника systemctl: пусто — рестарта не было (файла ещё нет).
+const systemctlCalls = (argsLog: string) =>
+  existsSync(argsLog) ? readFileSync(argsLog, "utf8") : "";
 
 // systemctl подменяется скриптом на PATH: тест никогда не трогает настоящий сервис.
 async function withFakeSystemctl<T>(
