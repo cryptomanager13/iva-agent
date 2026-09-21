@@ -32,6 +32,11 @@ const INDEX_LOCK = "index.lock";
  * (замер QA), дальше медиана 275 мс: 12 с - это тот же порядок с запасом больше четырёх раз,
  * чтобы медленный диск не отменял коммит, а висящий хук не держал запись минутами. */
 const GIT_TIMEOUT_MS = 12_000;
+/** Тест висящего git не ждёт боевые двенадцать секунд: потолок читается на каждом вызове. */
+function gitTimeoutMs(): number {
+  const override = Number(process.env.IVA_VAULT_GIT_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : GIT_TIMEOUT_MS;
+}
 /** В vault может не быть identity (headless VPS, свежий образ): коммитим от Ивы через
  * `-c`, конфиг владельца не трогаем. */
 const IVA_IDENTITY = ["-c", "user.name=Iva", "-c", "user.email=iva@localhost"];
@@ -104,7 +109,7 @@ function git(
     const child = execFile(
       "git",
       [...args],
-      { cwd, env: gitEnv(), timeout: GIT_TIMEOUT_MS, windowsHide: true },
+      { cwd, env: gitEnv(), timeout: gitTimeoutMs(), windowsHide: true },
       (error, stdout, stderr) => {
         const failed = error !== null;
         done({
@@ -134,7 +139,7 @@ function exitCode(error: unknown): number {
  * неё, поэтому берём первую строку, которая не подсказка. */
 function reasonOf(run: GitRun): string {
   if (run.timeout)
-    return `git не ответил за ${String(GIT_TIMEOUT_MS / 1000)} с`;
+    return `git не ответил за ${String(gitTimeoutMs() / 1000)} с`;
   if (run.code === 127) return "git не найден в PATH";
   const lines = detail(run)
     .split("\n")

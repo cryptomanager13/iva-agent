@@ -618,6 +618,10 @@ test("vault внутри чужого репозитория: память не 
 test("git не ответил за таймаут: причина - таймаут, а не «нет в PATH»", async (t) => {
   const vault = makeVault(t);
   hook(vault, "sleep 40");
+  process.env.IVA_VAULT_GIT_TIMEOUT_MS = "1500";
+  t.after(() => {
+    delete process.env.IVA_VAULT_GIT_TIMEOUT_MS;
+  });
   const started = Date.now();
   const { logged, value: result } = await journal(() =>
     tool.card(card({ operation: "ADD", title: "Тишина" })),
@@ -627,7 +631,7 @@ test("git не ответил за таймаут: причина - таймау
   assert.equal(existsSync(join(vault, "cards", "notes", "тишина.md")), true);
   assert.match(logged, /не ответил/u);
   assert.doesNotMatch(logged, /PATH/u);
-  assert.ok(elapsed < 20_000, `запись ждала ${String(elapsed)} мс`);
+  assert.ok(elapsed < 8_000, `запись ждала ${String(elapsed)} мс`);
 });
 test("в журнал уходит причина отказа, а не подсказка git", async (t) => {
   const vault = makeVault(t);
