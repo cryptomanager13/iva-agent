@@ -149,6 +149,25 @@ function pidsWithParent(parentPid: number): number[] {
     .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
 }
 
+// Команда не отдала PID — ищем её по уникальному пути из её же командной строки:
+// брошенный ребёнок держал бы тестовый процесс живым до собственного таймаута.
+function killByCommandFragment(fragment: string): void {
+  const found = spawnSync("pgrep", ["-f", fragment], { encoding: "utf8" });
+  for (const line of (found.stdout ?? "").split("\n")) {
+    const pid = Number.parseInt(line.trim(), 10);
+    if (Number.isSafeInteger(pid) && pid > 1) killIfAlive(pid, "SIGKILL", true);
+  }
+}
+
+async function waitForFile(file: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(file)) return;
+    await delay(10);
+  }
+  assert.fail(`file ${file} was never written`);
+}
+
 async function waitForChildren(
   parentPid: number,
   count: number,
@@ -1114,6 +1133,102 @@ test("an aborted turn does not give the command a SIGTERM grace period", async (
   } finally {
     pid ??= readPid(pidFile);
     killIfAlive(pid, "SIGKILL", true);
+    await within(
+      execution.catch(() => {}),
+      1_000,
+      "aborted bash call did not settle after test cleanup",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an abort after the deadline fired leaves the timeout as the outcome", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-after-timeout-"));
+  const pidFile = join(dir, "shell.pid");
+  const termSeen = join(dir, "term-seen");
+  // Команда сама говорит, когда её настиг дедлайн: ловит SIGTERM и остаётся живой,
+  // так что отмена падает в окно чистки, которое сторожит никем не убитый корень.
+  const script =
+    `require("node:fs").writeFileSync(` +
+    `${JSON.stringify(pidFile)}, String(process.pid));` +
+    `process.on("SIGTERM", () => require("node:fs").writeFileSync(` +
+    `${JSON.stringify(termSeen)}, "term"));` +
+    `setTimeout(() => {}, 600000);`;
+  const controller = new AbortController();
+  const execution = executeBash(
+    {
+      command: `${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
+      // Дедлайн заметно длиннее холодного старта node (и под нагрузкой тоже):
+      // иначе SIGTERM придёт раньше, чем команда успеет поймать его.
+      timeoutMs: 2_000,
+    },
+    { abortSignal: controller.signal },
+  );
+  let pid: number | null = null;
+  try {
+    pid = await waitForPid(pidFile, 3_000);
+    // Ждём улику, а не таймер: след от SIGTERM — это и есть сработавший дедлайн.
+    await waitForFile(termSeen, 5_000);
+    assert.equal(isAlive(pid), true, "the root must still be alive");
+    controller.abort();
+    const result = await within(
+      execution,
+      2_000,
+      "abort after the deadline did not settle",
+    );
+    assert.equal(result.cancelled, undefined);
+    assert.equal(result.timedOut, true);
+  } finally {
+    pid ??= readPid(pidFile);
+    if (pid === null) killByCommandFragment(pidFile);
+    else killIfAlive(pid, "SIGKILL", true);
+    await within(
+      execution.catch(() => {}),
+      1_000,
+      "timed-out bash call did not settle after test cleanup",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a cancelled result stays under the output ceiling", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-truncate-"));
+  const pidFile = join(dir, "shell.pid");
+  const script =
+    `require("node:fs").writeFileSync(` +
+    `${JSON.stringify(pidFile)}, String(process.pid));` +
+    `process.stderr.write("e".repeat(30000));` +
+    `setTimeout(() => {}, 600000);`;
+  const controller = new AbortController();
+  const execution = executeBash(
+    {
+      command: `${shellQuote(process.execPath)} -e ${shellQuote(script)}`,
+      timeoutMs: 600_000,
+    },
+    { abortSignal: controller.signal },
+  );
+  let pid: number | null = null;
+  try {
+    pid = await waitForPid(pidFile, 3_000);
+    await delay(200); // потолок потока уже набран до отказа
+    controller.abort();
+    const result = await within(
+      execution,
+      2_000,
+      "abort did not settle a command with full output",
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(
+      result.stderr.length <= 30_000,
+      true,
+      `cancelled stderr is ${result.stderr.length} characters long`,
+    );
+    assert.equal(result.truncated, true);
+    assert.match(result.stderr, /Команда отменена/);
+  } finally {
+    pid ??= readPid(pidFile);
+    if (pid === null) killByCommandFragment(pidFile);
+    else killIfAlive(pid, "SIGKILL", true);
     await within(
       execution.catch(() => {}),
       1_000,

@@ -154,20 +154,18 @@ type BashResult = {
   cancelled?: boolean;
 };
 
-// Отменённый вызов отдаёт то, что успело накопиться, плюс явный признак отмены:
-// timedOut здесь не выставляется никогда, иначе исход не отличить от таймаута.
-function cancelledBashResult(
-  stdout: string,
-  stderr: string,
-  cwd: string,
-  truncated: boolean,
-): BashResult {
+// Отменённый вызов отдаёт то, что успело накопиться, плюс явный признак отмены: timedOut
+// здесь не выставляется никогда, иначе исход не отличить от таймаута. Примечание проходит
+// тот же потолок вывода, что и сток команды: иначе результат пробивает его ровно на длину
+// примечания.
+function cancelledResult(run: CommandRun): BashResult {
+  appendNotice(run, CANCELLED_NOTE);
   return {
-    stdout,
-    stderr: stderr ? `${stderr}\n${CANCELLED_NOTE}` : CANCELLED_NOTE,
+    stdout: run.stdout,
+    stderr: run.stderr,
     exitCode: 1,
-    cwd,
-    truncated: truncated || undefined,
+    cwd: run.runCwd,
+    truncated: run.outputTruncated || undefined,
     cancelled: true,
   };
 }
@@ -177,7 +175,14 @@ function cancelledBeforeStart(
   signal: AbortSignal | undefined,
   cwd: string,
 ): BashResult | null {
-  return signal?.aborted ? cancelledBashResult("", "", cwd, false) : null;
+  if (!signal?.aborted) return null;
+  return {
+    stdout: "",
+    stderr: CANCELLED_NOTE,
+    exitCode: 1,
+    cwd,
+    cancelled: true,
+  };
 }
 
 function truncate(s: string): { text: string; truncated: boolean } {
@@ -305,7 +310,6 @@ export function normalizeCwd(cwd?: string): { cwd?: string; error?: string } {
 type CommandRun = {
   resolve: (result: BashResult) => void;
   runCwd: string;
-  timeout: number;
   abortSignal: AbortSignal | undefined;
   onAbort: () => void;
   childPid: number;
@@ -329,6 +333,12 @@ type CommandRun = {
   workerFailure: string | null;
   initialized: boolean;
 };
+
+// Дедлайн уже сработал — исход остаётся таймаутом: отмена его задним числом не переписывает.
+function deadlineFired(run: CommandRun): boolean {
+  const state = Atomics.load(run.deadlineState, 0);
+  return state === DEADLINE_EXPIRED || state === DEADLINE_PROBE_FAILED;
+}
 
 function spawnFailureResult(error: unknown, cwd: string): BashResult {
   const detail = error instanceof Error ? error.message : String(error);
@@ -376,13 +386,7 @@ function observeDeadlineExpiry(run: CommandRun): void {
 }
 
 function buildRunResult(run: CommandRun): BashResult {
-  if (run.cancelled)
-    return cancelledBashResult(
-      run.stdout,
-      run.stderr,
-      run.runCwd,
-      run.outputTruncated,
-    );
+  if (run.cancelled) return cancelledResult(run);
   const deadlineResult = Atomics.load(run.deadlineState, 0);
   run.timedOut ||= deadlineResult === DEADLINE_EXPIRED;
   if (deadlineResult === DEADLINE_PROBE_FAILED) {
@@ -442,8 +446,10 @@ function startCleanup(run: CommandRun, immediate = false): Promise<void> {
 // Отмена хода: потолок времени команды больше не при чём, группу убивает именно стоп.
 // Корень, который успел выйти сам, задним числом отменённым не считается — иначе
 // обычный результат переписывался бы на "cancelled" после каждого быстрого выхода.
+// Периметр отмены — группа процессов команды: процесс, ушедший через setsid в свою
+// сессию, её переживает, и стоп его не ищет.
 function abortRun(run: CommandRun): void {
-  if (run.commandExited) return;
+  if (run.commandExited || deadlineFired(run)) return;
   run.cancelled = true;
   cancelDeadline(run);
   void startCleanup(run, true).then(() => finishRun(run));
@@ -582,7 +588,6 @@ function createCommandRun(input: {
   const run: CommandRun = {
     resolve,
     runCwd,
-    timeout,
     abortSignal,
     onAbort: () => abortRun(run),
     childPid,
