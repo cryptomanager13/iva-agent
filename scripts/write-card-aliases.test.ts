@@ -30,6 +30,7 @@ type WriteCardResult = {
   action: string;
   error: string;
   file: string;
+  note?: string;
   ok: boolean;
 };
 type ParseSchema<T> = { parse: (value: unknown) => T };
@@ -161,4 +162,80 @@ test("мусор в aliases отклоняется на входе, а не уе
       () => inputSchema.parse({ ...PROJECT, aliases }),
       `aliases=${JSON.stringify(aliases).slice(0, 60)} должен быть отклонён`,
     );
+});
+
+// Ночной rollup добавляет алиасы каждую ночь: без потолка на слиянии колонка meta
+// распухает и выдача соседям размывается. Лежащие написания при этом не выбрасываются —
+// чужая карточка не худеет от нашего вызова, — а непоместившиеся названы в ответе:
+// молча пропавшее написание владелец не найдёт и не починит.
+test("потолок алиасов держится на слиянии, лишние названы в ответе", async () => {
+  const stored = Array.from({ length: 6 }, (_, index) => `Лежащий ${index}`);
+  const added = await call({
+    ...PROJECT,
+    aliases: stored,
+    title: "Потолок",
+    type: "contact",
+  });
+  assert.equal(added.ok, true, added.error);
+
+  const filled = await call({
+    ...PROJECT,
+    aliases: ["Новый 1", "Новый 2", "Новый 3", "Новый 4"],
+    description: PROJECT.description,
+    operation: "UPDATE",
+    title: "Потолок",
+    type: "contact",
+  });
+  assert.equal(filled.ok, true, filled.error);
+  assert.deepEqual(fields(added.file).aliases, [
+    ...stored,
+    "Новый 1",
+    "Новый 2",
+  ]);
+  assert.match(
+    filled.note ?? "",
+    /Новый 3, Новый 4/,
+    "непоместившиеся алиасы должны быть названы в ответе",
+  );
+
+  const overflowed = await call({
+    ...PROJECT,
+    aliases: ["Третий 1", "Третий 2", "Третий 3"],
+    description: PROJECT.description,
+    operation: "UPDATE",
+    title: "Потолок",
+    type: "contact",
+  });
+  assert.equal(overflowed.ok, true, overflowed.error);
+  assert.equal(fields(added.file).aliases.length, 8);
+  assert.match(overflowed.note ?? "", /Третий 1, Третий 2, Третий 3/);
+});
+
+// Одно и то же написание — это одно написание: регистр, ё/е и лишние пробелы не делают его
+// другим, а FTS5 складывает регистр сам, так что вторая строка не даёт ни одного нового
+// попадания. Правило одно на вызов и на слияние, остаётся первое написание.
+test("дедуп алиасов одинаков в вызове и на слиянии", async () => {
+  const added = await call({
+    ...PROJECT,
+    aliases: ["Пепси", "ПЕПСИ", "Сайёра", "Сайера"],
+    title: "Дедуп",
+    type: "contact",
+  });
+  assert.equal(added.ok, true, added.error);
+  assert.deepEqual(fields(added.file).aliases, ["Пепси", "Сайёра"]);
+
+  const updated = await call({
+    ...PROJECT,
+    aliases: ["ПЕПСИ", "Сайера", "  Пепси  ", "Пепси  Геймер", "Пепси Геймер"],
+    description: PROJECT.description,
+    operation: "UPDATE",
+    title: "Дедуп",
+    type: "contact",
+  });
+  assert.equal(updated.ok, true, updated.error);
+  assert.deepEqual(fields(added.file).aliases, [
+    "Пепси",
+    "Сайёра",
+    "Пепси  Геймер",
+  ]);
 });

@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
 // Смена факта не проходит молча: прежнее значение Compiled Truth (frontmatter description)
 // уезжает в append-only ## History датированной строкой. Ночной rollup передаёт description
-// на КАЖДОМ UPDATE и по инструкции его «заостряет», поэтому перефразировка не имеет права
-// ни ронять ход отказом, ни копить архив на перестановку слов, а смена значения не имеет
-// права исчезнуть без следа. Тесты идут через write_card — тот же шов, что у модели.
+// на КАЖДОМ UPDATE и без нужды его не переписывает, поэтому повтор той же формулировки не
+// имеет права ни ронять ход отказом, ни копить History на перестановку слов, а смена
+// значения не имеет права исчезнуть без следа. Тесты идут через write_card — тот же шов,
+// что у модели.
 import "./lib/ts-esm-hooks.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -133,7 +134,7 @@ test("повтор того же UPDATE идемпотентен: файл не 
   assert.equal(card(created.file), afterFirst);
 });
 
-test("тот же description не добавляет ни строки в архив", async () => {
+test("тот же description не добавляет ни строки в History", async () => {
   const created = await add(
     "Стинг Лонч",
     "лонч бренда Стинг",
@@ -149,7 +150,7 @@ test("тот же description не добавляет ни строки в ар�
   assert.equal(card(created.file).includes("## History"), false);
 });
 
-test("перестановка слов — не смена факта: архив не растёт, новая формулировка остаётся", async () => {
+test("перестановка слов — смена факта: обе формулировки остаются в карточке", async () => {
   const created = await add(
     "Медиаплан Q3",
     "ведёт медиаплан Q3",
@@ -163,7 +164,33 @@ test("перестановка слов — не смена факта: архи
   );
   assert.equal(reworded.ok, true, reworded.error);
   assert.equal(description(created.file), "медиаплан Q3 ведёт");
-  assert.equal(card(created.file).includes("## History"), false);
+  assert.deepEqual(historyFactLines(created.file), [
+    `- ${DAY}: ведёт медиаплан Q3`,
+  ]);
+});
+
+// Один и тот же набор слов в другом порядке — другой факт: «с 5 до 9» и «с 9 до 5»
+// описывают противоположный рост, «Anna reports to Boris» и «Boris reports to Anna» —
+// противоположное подчинение. Мультимножество слов такую пару не различает, и прежнее
+// значение пропадало: ни в frontmatter (там новое), ни в History (туда не попало).
+test("смена факта тем же набором слов остаётся в History", async () => {
+  const pairs: [string, string][] = [
+    ["цена выросла с 5 до 9", "цена выросла с 9 до 5"],
+    ["Anna reports to Boris", "Boris reports to Anna"],
+  ];
+  for (const [index, [from, to]] of pairs.entries()) {
+    const title = `Порядок слов ${index}`;
+    const created = await add(title, from, `Факт про «${from}».`);
+    assert.equal(created.ok, true, created.error);
+    const changed = await update(title, to, `Факт про «${to}».`);
+    assert.equal(changed.ok, true, changed.error);
+    assert.equal(description(created.file), to);
+    assert.deepEqual(
+      historyFactLines(created.file),
+      [`- ${DAY}: ${from}`],
+      `прежнее значение «${from}» исчезло без следа`,
+    );
+  }
 });
 
 test("цепочка UPDATE не теряет ни одного прежнего значения", async () => {
@@ -180,7 +207,7 @@ test("цепочка UPDATE не теряет ни одного прежнего
   ]);
 });
 
-test("возврат к прежней формулировке не дублирует архив", async () => {
+test("возврат к прежней формулировке не дублирует History", async () => {
   const created = await add("Pepsi Gamer", "первый вариант описания", "Факт.");
   assert.equal(created.ok, true, created.error);
   const there = await update(
@@ -201,7 +228,7 @@ test("возврат к прежней формулировке не дубли�
   ]);
 });
 
-test("SUPERSEDE не архивирует уже заархивированное описание второй раз", async () => {
+test("SUPERSEDE не записывает уже лежащее в History описание второй раз", async () => {
   const created = await add(
     "Сайёра",
     "ведёт проекты Сайёры",
@@ -223,7 +250,7 @@ test("SUPERSEDE не архивирует уже заархивированно�
   ]);
 });
 
-test("карточка без description не получает выдуманной строки архива", async () => {
+test("карточка без description не получает выдуманной строки History", async () => {
   mkdirSync(join(VAULT, "cards", "projects"), { recursive: true });
   const rel = "cards/projects/legacy.md";
   writeFileSync(
@@ -246,4 +273,166 @@ test("карточка без description не получает выдуманн
   assert.equal(updated.ok, true, updated.error);
   assert.equal(description(rel), "появилось описание");
   assert.equal(card(rel).includes("## History"), false);
+});
+
+// Карточка с двумя ## History: границы такой секции неоднозначны, судить по ней нельзя,
+// поэтому запись не сливает их в одну и не переносит с места — новая строка ложится в
+// последнюю, и одна запись остаётся одной строкой. Чужое не переписано и не переставлено.
+test("две секции History не сливаются: строка ложится в последнюю", async () => {
+  mkdirSync(join(VAULT, "cards", "projects"), { recursive: true });
+  const rel = "cards/projects/two-hist.md";
+  writeFileSync(
+    join(VAULT, rel),
+    [
+      "---",
+      "type: project",
+      "name: Two Hist",
+      'description: "старое значение"',
+      "tags: [work]",
+      "status: active",
+      "---",
+      "",
+      "# Two Hist",
+      "",
+      "Тело.",
+      "",
+      "## History",
+      "",
+      "- 2025-01-01: первый",
+      "",
+      "## Log",
+      "",
+      "- 2025-02-02: лог",
+      "",
+      "## History",
+      "",
+      "- 2025-03-03: второй",
+      "",
+    ].join("\n"),
+  );
+  const updated = await update("Two Hist", "новое значение", "Новый факт.");
+  assert.equal(updated.ok, true, updated.error);
+  const out = card(rel);
+  // ## Log пересобирается в конец — так его ведёт UPDATE и на main; обе History остались
+  // двумя секциями, и ни одна не сдвинулась относительно другой.
+  assert.deepEqual(
+    [...out.matchAll(/^## (.+)$/gm)].map((match) => match[1]),
+    ["History", "History", "Log"],
+  );
+  assert.match(out, /## History\n\n- 2025-01-01: первый\n/);
+  assert.match(
+    out,
+    new RegExp(
+      `## History\\n\\n- 2025-03-03: второй\\n- ${DAY}: старое значение`,
+    ),
+  );
+});
+
+// History датирует только код. Значение, которое выглядит как датированная строка, —
+// данные: модель не выбирает дату записи и не подделывает порядок событий. Модель не
+// пишет ## History своим телом, и то же правило держит ценность строки для человека.
+test("дата в вытесненном описании — данные: строку датирует код", async () => {
+  const created = await add(
+    "ЦРУ",
+    "2020-01-01: работал в ЦРУ",
+    "Работал в ЦРУ.",
+  );
+  assert.equal(created.ok, true, created.error);
+  const changed = await update("ЦРУ", "работает в Majento", "Сменил работу.");
+  assert.equal(changed.ok, true, changed.error);
+  assert.deepEqual(historyFactLines(created.file), [
+    `- ${DAY}: 2020-01-01: работал в ЦРУ`,
+  ]);
+});
+
+// Значение приходит из frontmatter, который мог написать человек: перевод строки и
+// ведущий буллет не имеют права превратиться во вторую строку или в новую секцию.
+test("многострочное описание уезжает в History одной строкой", async () => {
+  mkdirSync(join(VAULT, "cards", "projects"), { recursive: true });
+  const rel = "cards/projects/wrapped.md";
+  writeFileSync(
+    join(VAULT, rel),
+    [
+      "---",
+      "type: project",
+      "name: Wrapped",
+      'description: "- 1999-12-31: подделка\\n## Log\\n\\n- чужая строка"',
+      "tags: [work]",
+      "status: active",
+      "---",
+      "",
+      "# Wrapped",
+      "",
+      "Нынешняя истина.",
+      "",
+    ].join("\n"),
+  );
+  const updated = await update("Wrapped", "вытеснило описание", "Новый факт.");
+  assert.equal(updated.ok, true, updated.error);
+  assert.deepEqual(historyFactLines(rel), [
+    `- ${DAY}: - 1999-12-31: подделка ## Log - чужая строка`,
+  ]);
+  assert.equal(card(rel).match(/^## /gm)?.length, 2);
+});
+
+// UPDATE сам убрал прежнее описание в History, а следующим вызовом модель делает
+// SUPERSEDE и называет ровно тот факт, который вытесняет (он всё ещё стоит в теле).
+// Строка в History уже есть — значит её не пишут второй раз, но и не отказывают: ночной
+// rollup не имеет права упасть на законном вызове, а факт не имеет права потеряться.
+test("SUPERSEDE с уже лежащим в History фактом проходит и не дублирует строку", async () => {
+  const created = await add(
+    "TDI Group Clash",
+    "работает в TDI Group",
+    "Работает в TDI Group.",
+  );
+  assert.equal(created.ok, true, created.error);
+  const moved = await update(
+    "TDI Group Clash",
+    "работает в Majento",
+    "Обсуждали бюджет.",
+  );
+  assert.equal(moved.ok, true, moved.error);
+  const replaced = await call({
+    body: "Работает в Majento с марта.",
+    description: "работает в Majento",
+    history_entry: "работает в TDI Group",
+    operation: "SUPERSEDE",
+    tags: ["work", "promo"],
+    title: "TDI Group Clash",
+    type: "project",
+  });
+  assert.equal(replaced.ok, true, replaced.error);
+  assert.deepEqual(historyFactLines(created.file), [
+    `- ${DAY}: работает в TDI Group`,
+  ]);
+});
+
+// Та же пара, но датированная строка: две даты у одного факта — это не два вытеснения,
+// а один факт, записанный дважды. Строка одна.
+test("датированный history_entry о том же факте не даёт второй строки", async () => {
+  const created = await add(
+    "Сайёра Clash",
+    "ведёт проекты Сайёры",
+    "Ведёт проекты Сайёры.",
+  );
+  assert.equal(created.ok, true, created.error);
+  const moved = await update(
+    "Сайёра Clash",
+    "ведёт проекты Majento",
+    "Ведёт проекты Majento.",
+  );
+  assert.equal(moved.ok, true, moved.error);
+  const replaced = await call({
+    body: "Ведёт только проекты Majento.",
+    description: "ведёт проекты Majento",
+    history_entry: "2026-03-01: ведёт проекты Сайёры.",
+    operation: "SUPERSEDE",
+    tags: ["work", "promo"],
+    title: "Сайёра Clash",
+    type: "project",
+  });
+  assert.equal(replaced.ok, true, replaced.error);
+  assert.deepEqual(historyFactLines(created.file), [
+    `- ${DAY}: ведёт проекты Сайёры`,
+  ]);
 });

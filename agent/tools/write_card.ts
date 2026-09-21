@@ -4,6 +4,8 @@ import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import {
   acquireLock,
+  aliasKey,
+  ALIASES_MAX,
   atomicWrite,
   isLegacyHistoryReplace,
   mergeCard,
@@ -33,9 +35,9 @@ const CARD_TYPE_DIR: Record<string, string> = {
 const DESC_CAP = 500;
 // Другие написания имени — не второй заголовок, а мостик к нему: искать по ним должно
 // хватать, но колонка meta весит как title, и десяток алиасов на карточку размывает
-// выдачу соседям. Потолки держат вход в рамках, а не «чинятся» в execute.
+// выдачу соседям. Потолок числа держит и слияние с лежащими (card-store), здесь — только
+// форма записи.
 const ALIAS_CAP = 80;
-const ALIASES_MAX = 8;
 
 // Статус уже лежащей карточки. Её frontmatter мог сломать владелец руками, и до
 // обёртки такая карточка вылетала исключением из тула: "посмотри карточку"
@@ -65,15 +67,16 @@ const normalizeTags = (tags: string[]): string[] => [
 ];
 
 /**
- * Другое написание того же имени. Регистр и краевые пробелы не различают написания,
- * поэтому дедуп идёт по ним, а в карточке остаётся первое написание как есть.
+ * Другое написание того же имени. Регистр, ё/е и схлопнутые пробелы написания не различают,
+ * поэтому дедуп идёт по общему с карточной слиянием ключу, а в карточке остаётся первое
+ * написание как есть.
  */
 const normalizeAliases = (aliases: string[]): string[] => {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const alias of aliases) {
     const value = alias.trim();
-    const key = value.toLowerCase();
+    const key = aliasKey(value);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(value);
@@ -222,6 +225,8 @@ type CardOutcome =
       action: string;
       file: string;
       matchedBy: string;
+      /** Что записалось не целиком: имена полей и значений, без содержимого карточки. */
+      note?: string;
       status: string;
       type: string;
     };
@@ -308,7 +313,11 @@ function resolveTarget(
  * применим только к SUPERSEDE. null — запрос надо писать. */
 function earlyOutcome(card: CardWrite): CardOutcome | null {
   if (card.operation !== "NOOP") {
-    if (card.replace_body && card.operation !== undefined) {
+    if (
+      card.replace_body &&
+      card.operation !== undefined &&
+      card.operation !== "SUPERSEDE"
+    ) {
       return {
         ok: false,
         error: "replace_body допустим только для SUPERSEDE.",
@@ -505,6 +514,12 @@ function cardFields(
   };
 }
 
+/** Алиасы сверх потолка остаются в ответе инструмента: они не записаны, но и не пропали
+ * молча — вызов не роняем, ночь от этого падать не должна. */
+function droppedAliasesNote(dropped: string[]): string {
+  return `Алиасы не поместились (потолок ${ALIASES_MAX}): ${dropped.join(", ")}.`;
+}
+
 /** Запись под локом: что лежит на диске, какая операция из этого следует, отказы по
  * состоянию, слияние и атомарная запись. */
 function writeLockedCard(card: CardWrite): CardOutcome {
@@ -518,7 +533,7 @@ function writeLockedCard(card: CardWrite): CardOutcome {
   });
   const rejected = requestError(effectiveOperation, { ...card, existing });
   if (rejected !== null) return rejected;
-  const { content, action, ignoredHistoryEntry } = mergeCard({
+  const { content, action, droppedAliases, ignoredHistoryEntry } = mergeCard({
     body: card.body,
     date: today(),
     existing,
@@ -539,6 +554,11 @@ function writeLockedCard(card: CardWrite): CardOutcome {
     action,
     file: card.rel,
     matchedBy: card.id.matchedBy,
+    // Написанное мимо карточки модель обязана увидеть: молча пропавший алиас владелец не
+    // найдёт поиском и не починит.
+    ...(droppedAliases?.length
+      ? { note: droppedAliasesNote(droppedAliases) }
+      : {}),
     ok: true,
     status: storedStatus(content, card.rel, card.status ?? card.allowed[0]),
     type: card.type,

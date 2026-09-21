@@ -438,39 +438,56 @@ function canonicalHistoryEntry(historyEntry: string, date: string): string {
     : `- ${date}: ${entry}`;
 }
 
-/** Тот же факт другими словами: регистр, пунктуация и порядок слов значения не имеют.
- * «работает в TDI Group» и «в TDI Group работает» — одно значение, а не смена факта. */
+/** Строка History для вытесненного описания: дату ставит только код — день записи. Значение
+ * едет данными: перевод строки схлопывается в пробел, а ведущие `-`, `#` и дата в начале
+ * значения ничего не значат и второй строки не рождают. */
+function displacedHistoryEntry(value: string, date: string): string {
+  return `- ${date}: ${value.replace(/\s+/gu, " ").trim()}`;
+}
+
+/** Тот же факт по существу: регистр, ё/е, пробелы и знаки значения не имеют, а порядок слов
+ * имеет («с 5 до 9» и «с 9 до 5» — противоположные факты). */
 function sameFact(left: string, right: string): boolean {
-  const sortedWords = (text: string) =>
-    comparableFact(text).split(" ").filter(Boolean).sort();
-  const a = sortedWords(left);
-  const b = sortedWords(right);
-  return a.length === b.length && a.every((word, index) => word === b[index]);
+  return comparableFact(left) === comparableFact(right);
 }
 
 /** Прежнее значение frontmatter-половины Compiled Truth, если вызов вытесняет его по
- * существу. null — вытеснять нечего: значения нет, факт тот же (в том числе переставленный
- * словами), или такая формулировка уже лежит в архиве. */
+ * существу. null — вытеснять нечего: значения нет, факт тот же, или такая формулировка уже
+ * лежит в History. */
 function displacedDescription(
   previous: FmValue | undefined,
   next: FmValue | undefined,
-  archived: string[],
+  history: string[],
 ): string | null {
   if (typeof previous !== "string" || typeof next !== "string") return null;
   const old = previous.trim();
   if (!old || !next.trim() || sameFact(old, next)) return null;
-  return archived.some((line) => sameFact(historyFact(line), old)) ? null : old;
+  return history.some((line) => sameFact(historyFact(line), old)) ? null : old;
 }
 
-/** Дописать факт в append-only ## History. Один путь записи в архив — поэтому у карточки
- * не бывает двух секций истории. */
+/** Дописать факт в ## History одной строкой. Секцию не пересобираем: чужие строки (ручной
+ * абзац, легаси-буллет) остаются как лежат, а карточка с двумя History не сливается задним
+ * числом — границы такой секции неоднозначны, и решать за человека, где она кончается,
+ * нечем. Дописываем в последнюю из них; пустая секция получает ту же форму, что и раньше:
+ * заголовок, пустая строка, строки. */
 function appendHistory(body: string, fact: string, date: string): string {
-  const entries = sectionContent(body, "History");
-  const withoutHistory = removeH2Sections(body, "History");
-  return replaceH2Sections(withoutHistory, "History", [
-    ...entries,
-    canonicalHistoryEntry(fact, date),
-  ]);
+  const lines = body.split("\n");
+  const sections = h2Sections(lines, "History");
+  const entry = displacedHistoryEntry(fact, date);
+  if (!sections.length) return replaceH2Sections(body, "History", [entry]);
+  const last = sections[sections.length - 1];
+  let at = last.end;
+  while (at > last.start + 1 && !lines[at - 1].trim()) at--;
+  const rest = lines.slice(at);
+  const inserted = [
+    ...(at === last.start + 1 ? [""] : []),
+    entry,
+    ...(rest.length && rest[0].trim() ? [""] : []),
+  ];
+  return [...lines.slice(0, at), ...inserted, ...rest]
+    .join("\n")
+    .replace(/\s*$/, "")
+    .concat("\n");
 }
 
 /** Frontmatter-половина Compiled Truth не меняется молча: прежнее описание уходит в
@@ -481,11 +498,7 @@ function archiveDisplacedDescription(
   next: FmValue | undefined,
   date: string,
 ): string {
-  const displaced = displacedDescription(
-    previous,
-    next,
-    sectionContent(body, "History"),
-  );
+  const displaced = displacedDescription(previous, next, historyEntries(body));
   return displaced ? appendHistory(body, displaced, date) : body;
 }
 
@@ -526,12 +539,13 @@ function compiledTruth(body: string): string {
     .join("\n");
 }
 
-/** Факт в форме, пригодной для сверки: без регистра, пунктуации и лишних пробелов.
- * Модель пересказывает вытесненный факт своими знаками препинания, и побайтовая сверка
- * спотыкалась бы о точку в конце. */
+/** Факт в форме, пригодной для сверки: без регистра, ё/е, пунктуации и лишних пробелов.
+ * Модель пересказывает вытесненный факт своими знаками препинания и буквой ё, и
+ * побайтовая сверка спотыкалась бы о точку в конце. Порядок слов сохраняется. */
 function comparableFact(text: string): string {
   return text
     .toLowerCase()
+    .replace(/ё/g, "е")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 }
@@ -547,22 +561,47 @@ function displacedFact(historyEntry: string): string {
   );
 }
 
-/** То же вытеснение, что уже лежит в архиве. Датированную строку сверяем целиком: две
- * даты у одного факта - два разных вытеснения. Недатированную сверяем по тексту факта,
- * иначе её повтор на следующие сутки уедет в архив второй строкой под новой датой.
- * Сверка идёт по всему архиву, а не по его хвосту: доставленный не по порядку SUPERSEDE
- * вытесняет факт, заархивированный несколько шагов назад, и по одному хвосту он
- * неотличим от нового - карточка откатилась бы на архивную истину, потеряв нынешнюю. */
+/** Ровно та строка History, которую подал бы этот вызов: датированную сверяем целиком,
+ * недатированную — по тексту факта. Так решается, реплей это или новое вытеснение. */
 function repeatsArchivedFact(
   historyEntry: string,
   dated: string,
-  archived: string[],
+  history: string[],
 ): boolean {
   const fact = historyEntry.trim().replace(/^[-*]\s+/, "");
   const undated = !/^\d{4}-\d{2}-\d{2}:/.test(fact);
-  return archived.some(
+  return history.some(
     (entry) =>
       entry.trim() === dated.trim() || (undated && historyFact(entry) === fact),
+  );
+}
+
+/** Строка History уже про этот факт (дата принадлежит записи, а не факту: два разных дня
+ * у одного факта — не два вытеснения, а один факт дважды). Сверяем по всему ## History, а
+ * не по хвосту: доставленный не по порядку SUPERSEDE вытесняет факт, записанный несколько
+ * шагов назад, и по одному хвосту он неотличим от нового. */
+function repeatsHistoryFact(historyEntry: string, history: string[]): boolean {
+  const fact = comparableFact(historyFact(historyEntry));
+  return history.some((entry) => comparableFact(historyFact(entry)) === fact);
+}
+
+/** Ту же запись о факте, но взятую из History: прошлый вызов уже положил её туда сам, и
+ * дата принадлежит той записи, а не этому вызову. Отдаём ровно лежащую строку, чтобы
+ * повтор узнавался одним правилом, а не писался второй раз под новой датой. */
+function archivedHistoryEntry(
+  historyEntry: string | undefined,
+  oldBody: string,
+  operation: CardOperation,
+): string | undefined {
+  if (operation !== "SUPERSEDE" || !historyEntry?.trim()) return historyEntry;
+  if (!displacedFactNames(operation, historyEntry, oldBody))
+    return historyEntry;
+  const history = historyEntries(oldBody);
+  if (!repeatsHistoryFact(historyEntry, history)) return historyEntry;
+  const fact = comparableFact(historyFact(historyEntry));
+  return (
+    history.find((line) => comparableFact(historyFact(line)) === fact) ??
+    historyEntry
   );
 }
 
@@ -804,6 +843,8 @@ export interface MergeResult {
   action: "created" | "updated" | "merged" | "replaced" | "noop";
   /** Model noise discarded because a new card has no displaced truth. */
   ignoredHistoryEntry?: true;
+  /** Алиасы, которым не хватило места в потолке: ответ инструмента их называет. */
+  droppedAliases?: string[];
 }
 
 /** Списковое поле фронтматтера как массив: блочный список, flow-список и легаси-строка
@@ -829,6 +870,45 @@ function unionList(
   return [...new Set([...listField(previous), ...next.map(String)])];
 }
 
+// Потолок алиасов живёт в сторе: слияние — единственный путь, которым поле растёт, а
+// колонка meta весит как title и десяток написаний на карточку размывает выдачу соседям.
+export const ALIASES_MAX = 8;
+
+/** Ключ «то же написание»: регистр, ё/е и схлопнутые пробелы написания не различают,
+ * поэтому один ключ и внутри вызова, и при слиянии с лежащими. FTS5 складывает регистр сам,
+ * а вторая копия только ест место. */
+export function aliasKey(value: string): string {
+  return value.trim().toLowerCase().replace(/ё/g, "е").replace(/\s+/gu, " ");
+}
+
+/** Слияние алиасов: лежащие написания не выбрасываются никогда (карточка с одиннадцатью
+ * алиасами от нашего вызова не худеет), новые добираются до потолка, а остальные
+ * возвращаются вызывающему: он обязан их назвать. */
+function mergeAliases(
+  previous: FmValue | undefined,
+  next: FmValue,
+): { aliases: string[]; dropped: string[] } {
+  const aliases: string[] = [];
+  const seen = new Set<string>();
+  for (const value of listField(previous)) {
+    const name = value.trim();
+    const key = aliasKey(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    aliases.push(name);
+  }
+  const dropped: string[] = [];
+  for (const value of listField(next)) {
+    const name = value.trim();
+    const key = aliasKey(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (aliases.length >= ALIASES_MAX) dropped.push(name);
+    else aliases.push(name);
+  }
+  return { aliases, dropped };
+}
+
 export function mergeCard(input: MergeInput): MergeResult {
   const trimmedBody = input.body.trim();
   const operation = resolveOperation(input);
@@ -846,10 +926,16 @@ export function mergeCard(input: MergeInput): MergeResult {
   const parsed = parseFrontmatter(existing);
   const oldBody = parsed.body;
   assertStoredBody(oldBody, operation);
-  const updates = mergedFields(parsed, input.fields, input.date);
+  const { droppedAliases, fields: updates } = mergedFields(
+    parsed,
+    input.fields,
+    input.date,
+  );
   const assembled = assembleBody({
     date: input.date,
-    historyEntry: input.historyEntry,
+    // Повтор уже лежащей записи идёт тем же путём, что и любой другой дубль — см.
+    // archivedHistoryEntry; дата принадлежит первой записи о факте, а не этому вызову.
+    historyEntry: archivedHistoryEntry(input.historyEntry, oldBody, operation),
     nextDescription: updates.description,
     oldBody,
     operation,
@@ -861,10 +947,27 @@ export function mergeCard(input: MergeInput): MergeResult {
   const render = (stamp: string) =>
     renderCard(updates, parsed, assembled.newBody, stamp);
   const content = render(input.date);
-  if (assembled.suppressedHistoryEntry)
-    return staleOrReplay(content, existing, parsed, render);
+  // Строка про вытесняемый факт уже лежит в History — второй такой не пишем. Если при этом
+  // карточка не меняется, это реплей уже выполненного вызова: писать нечего. Если меняется,
+  // законность вызова решает одно: назван ли факт, который карточка держит СЕЙЧАС. Прежнее
+  // значение того же факта уезжает в History прошлым UPDATE (смена description), поэтому
+  // «строка уже есть» — не отставшая доставка, а её след; а доставка старого факта нынешнюю
+  // истину не называет и отказывает так же, как на main.
+  if (assembled.suppressedHistoryEntry) {
+    if (isReplay(content, existing, parsed, render))
+      return { content: existing, action: "noop" };
+    if (!displacedFactNames(operation, input.historyEntry, oldBody))
+      throw new Error(
+        "historyEntry already appears in ## History but this SUPERSEDE still changes the card; " +
+          "send the fact this call displaces",
+      );
+  }
   assertDisplacedFactNamed(operation, input.historyEntry, oldBody);
-  return { content, action: cardAction(operation, assembled.appended) };
+  return {
+    content,
+    action: cardAction(operation, assembled.appended),
+    ...(droppedAliases.length ? { droppedAliases } : {}),
+  };
 }
 
 // ─── шаги mergeCard ────────────────────────────────────────────────────────
@@ -1042,8 +1145,9 @@ function mergedFields(
   parsed: ReturnType<typeof parseFrontmatter>,
   fields: FmFields,
   date: string,
-): FmFields {
+): { fields: FmFields; droppedAliases: string[] } {
   const updates: FmFields = { ...fields };
+  const droppedAliases: string[] = [];
   delete updates.created;
   if (parsed.fields?.source) delete updates.source;
   if (parsed.fields) {
@@ -1051,11 +1155,14 @@ function mergedFields(
     if (tags) updates.tags = tags;
     // Алиасы — единственный носитель связи «Пепси = Pepsi»: FTS не транслитерирует,
     // не чинит опечатки и не ловит падеж, а слияние не теряет лежащие написания.
-    const aliases = unionList(parsed.fields.aliases, updates.aliases);
-    if (aliases) updates.aliases = aliases;
+    if (Array.isArray(updates.aliases)) {
+      const merged = mergeAliases(parsed.fields.aliases, updates.aliases);
+      updates.aliases = merged.aliases;
+      droppedAliases.push(...merged.dropped);
+    }
   }
   updates.updated = date;
-  return updates;
+  return { droppedAliases, fields: updates };
 }
 
 interface AssemblyInput {
@@ -1138,49 +1245,49 @@ function renderCard(
 
 /** Реплей, перешагнувший полночь, отличается от лежащей карточки только сегодняшним
  * `updated:`. Записать файл ради одной этой строки - выдать за изменение то, что
- * изменением не является, поэтому дату исключаем из сверки. Карточка при этом меняется, а
- * строка архива подавлена как дубль - значит это не реплей, а устаревший historyEntry
- * поверх нового тела: либо модель повторила вчерашний факт, либо это доставленный не по
- * порядку прошлый SUPERSEDE, который откатил бы truth на архивную истину. В обоих случаях
- * нынешний факт не назван и молча пропал бы. Отказ; вызывающий обязан прислать факт,
- * который вытесняет ЭТОТ вызов. */
-function staleOrReplay(
+ * изменением не является, поэтому дату исключаем из сверки. */
+function isReplay(
   content: string,
   existing: string,
   parsed: ReturnType<typeof parseFrontmatter>,
   render: (stamp: string) => string,
-): MergeResult {
+): boolean {
   const previousStamp = parsed.fields?.updated;
-  if (
+  return (
     content === existing ||
     (typeof previousStamp === "string" && render(previousStamp) === existing)
-  )
-    return { content: existing, action: "noop" };
-  throw new Error(
-    "historyEntry already appears in ## History but this SUPERSEDE still changes the card; " +
-      "send the fact this call displaces",
   );
 }
 
-/** Реплей отсеян проверкой выше, значит вызов реально меняет карточку - и вытесняемый факт
- * обязан быть про НЫНЕШНЮЮ истину. Сверка с архивом ловит лишь буквальный повтор
- * строки: тот же древний факт под другой датой проходил бы её насквозь, уложив в архив
- * свой дубль, а нынешнюю истину стерев молча. Хвост истины (пример в фенсе, уточнение
- * следующим абзацем) повторять не обязательно - началом строка совпасть обязана. */
+/** Вызов реально меняет карточку - и вытесняемый факт обязан быть про НЫНЕШНЮЮ истину.
+ * Расхождение с History ловит лишь буквальный повтор строки: тот же древний факт под
+ * другой датой проходил бы её насквозь, уложив в History свой дубль, а нынешнюю истину
+ * стерев молча. Хвост истины (пример в фенсе, уточнение следующим абзацем) повторять не
+ * обязательно - началом строка совпасть обязана. */
+/** Называет ли historyEntry факт, который карточка держит сейчас (хвост истины повторять не
+ * обязательно — началом строка совпасть обязана). */
+function displacedFactNames(
+  operation: CardOperation,
+  historyEntry: string | undefined,
+  oldBody: string,
+): boolean {
+  if (operation !== "SUPERSEDE" || !historyEntry?.trim()) return false;
+  const displaced = displacedFact(historyEntry);
+  const truth = comparableFact(compiledTruth(oldBody));
+  return Boolean(displaced && truth && truth.startsWith(displaced));
+}
+
 function assertDisplacedFactNamed(
   operation: CardOperation,
   historyEntry: string | undefined,
   oldBody: string,
 ): void {
   if (operation !== "SUPERSEDE" || !historyEntry?.trim()) return;
-  const displaced = displacedFact(historyEntry);
-  const truth = comparableFact(compiledTruth(oldBody));
-  if (displaced && truth && !truth.startsWith(displaced)) {
+  if (!displacedFactNames(operation, historyEntry, oldBody))
     throw new Error(
       "historyEntry must state the Compiled Truth this SUPERSEDE displaces; " +
         "send the fact the card holds now",
     );
-  }
 }
 
 function cardAction(

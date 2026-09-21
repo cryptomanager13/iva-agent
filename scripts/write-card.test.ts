@@ -1188,6 +1188,38 @@ test("легаси replace_body не сажает открытый фенс в �
   assert.match(after, /- 2026-08-02: Owner: Mallory\./);
 });
 
+// replace_body — легаси-форма записи: у явного SUPERSEDE он значит «взять тело целиком»,
+// и разбирает это сочетание стор (assertRequestShape). Тул отказывал самому SUPERSEDE,
+// крича «допустим только для SUPERSEDE»: путь со старых установок падал на своём же
+// разрешённом поле.
+test("SUPERSEDE с replace_body проходит: тело заменяется целиком", async () => {
+  const base = {
+    operation: "ADD",
+    type: "note",
+    title: "Замена тела",
+    description: "владелец: Alice",
+    tags: ["note", "fence"],
+    body: "Owner: Alice.",
+  };
+  const created = await call(base);
+  assert.equal(created.ok, true, created.error);
+
+  const replaced = await call({
+    ...base,
+    operation: "SUPERSEDE",
+    replace_body: true,
+    body: "Owner: Carol.",
+    description: "владелец: Carol",
+    history_entry: "2026-08-01: Owner: Alice.",
+  });
+  assert.equal(replaced.ok, true, replaced.error);
+  assert.equal(replaced.action, "replaced");
+  const out = read(created.file);
+  assert.match(out, /^Owner: Carol\.$/m);
+  assert.doesNotMatch(out, /^Owner: Alice\.$/m);
+  assert.match(out, /- 2026-08-01: Owner: Alice\./);
+});
+
 test("Related дедуплицирует target по alias/anchor и не считает ссылку в prose", async () => {
   const base = {
     operation: "ADD",
