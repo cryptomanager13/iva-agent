@@ -552,7 +552,7 @@ if (period === "daily") {
     writeFileAtomicSync(CORE_PATH, coreBeforeTurn);
     // Откат CORE - тоже правка памяти: без коммита ночной подметальщик сделал бы вид,
     // что модель ничего не теряла.
-    await commitVaultWrite("file CORE.md: restore", [CORE_PATH]);
+    await commitVaultWrite("file CORE.md: restore", [CORE_PATH], VAULT());
     core = coreBeforeTurn;
     const damagedHeadings = [
       ...damage.lostHeadings,
@@ -577,7 +577,7 @@ if (period === "daily") {
   const pointed = setLastDayPointer(core, yesterday);
   if (pointed !== core) {
     writeFileAtomicSync(CORE_PATH, pointed);
-    await commitVaultWrite("file CORE.md: pointer", [CORE_PATH]);
+    await commitVaultWrite("file CORE.md: pointer", [CORE_PATH], VAULT());
     core = pointed;
   }
 

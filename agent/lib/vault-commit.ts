@@ -10,12 +10,13 @@
 //
 // Ни один отказ здесь не роняет ход: файл уже записан, причина уходит в журнал одной
 // строкой. Без remote локальные коммиты есть; push остаётся делом ночного Brain.
+//
+// Обновлятор берёт этот модуль динамическим импортом: он обязан грузиться на установке без
+// агентского дерева (scripts/authored-tree-guard.test.ts), а сам шов не ищет vault - его
+// называет вызывающий, который свой vault уже разрешил.
 import { execFile } from "node:child_process";
 import { realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-// Относительный путь, а не @iva/vault-dir: этот модуль ввозит обновлятор, который
-// работает в дереве версии до `npm ci`, то есть без разрешения пакетных алиасов.
-import { resolveVaultDir } from "../../packages/vault-dir/index.ts";
 
 /** Сколько ждать освобождения индекса: сосед коммитит за десятки миллисекунд. */
 const INDEX_WAIT_MS = [60, 120, 240, 480];
@@ -148,9 +149,9 @@ function vaultPath(vault: string, path: string): string | null {
   return rel;
 }
 
-function vaultRoot(explicit?: string): string | null {
+function vaultRoot(root: string): string | null {
   try {
-    return realpathSync(explicit ?? resolveVaultDir(process.cwd()));
+    return realpathSync(root);
   } catch {
     return null;
   }
@@ -191,13 +192,13 @@ async function commitPaths(
 /**
  * Закоммитить правку памяти: сообщение вида `card <slug>: UPDATE`, `file <путь>: write`
  * и пути, которые эта правка затронула. Пути вне vault молча пропускаются, отказ git
- * уходит в журнал одной строкой и никогда не роняет ход. `root` нужен тому, кто правит
- * vault не из рабочего каталога агента (обновлятор).
+ * уходит в журнал одной строкой и никогда не роняет ход. `root` - тот vault, о котором
+ * идёт речь: шов его не угадывает, а получает от вызывающего, который уже знает свой.
  */
 export async function commitVaultWrite(
   message: string,
   paths: readonly string[],
-  root?: string,
+  root: string,
 ): Promise<VaultCommit> {
   const vault = vaultRoot(root);
   const rel =
@@ -212,6 +213,25 @@ export async function commitVaultWrite(
   return outcome;
 }
 
+/** Снимок «до» и результат «после» чужой работы над vault: чистку карточек делает не
+ * агент, а чужой процесс (обновлятор ждёт её, меню узнаёт о конце ходом раннера), поэтому
+ * шов отдаёт две половины пары, а не оборачивает работу. Обе половины называют только
+ * затронутые пути и не роняют вызвавшего; имена коммитов собираются здесь, чтобы у обоих
+ * потребителей они были одной формы. */
+export interface VaultWritePair {
+  readonly after: () => Promise<void>;
+  readonly before: () => Promise<void>;
+}
+
+export function vaultWritePair(label: string, root: string): VaultWritePair {
+  const commit = async (what: string): Promise<void> => {
+    const paths = await changedVaultPaths(root);
+    if (paths.length > 0)
+      await commitVaultWrite(`${label}: vault ${what}`, paths, root);
+  };
+  return { after: () => commit("cleanup"), before: () => commit("snapshot") };
+}
+
 /** Записи-статуса git без кавычек: с `-z` пути идут как есть, переименование несёт два. */
 function statusPaths(output: string): string[] {
   const entries = output.split("\0").filter(Boolean);
@@ -224,9 +244,9 @@ function statusPaths(output: string): string[] {
   return paths;
 }
 
-/** Незакоммиченные пути vault: обновлятору нужен снимок «до» и результат чистки, а
- * `add -A` в шве запрещён - коммит обязан называть свои пути. */
-export async function changedVaultPaths(root: string): Promise<string[]> {
+/** Незакоммиченные пути vault: паре нужен снимок «до» и результат работы, а `add -A` в шве
+ * запрещён - коммит обязан называть свои пути. */
+async function changedVaultPaths(root: string): Promise<string[]> {
   const vault = vaultRoot(root);
   if (vault === null) return [];
   const run = await git(["status", "--porcelain", "-z"], vault);

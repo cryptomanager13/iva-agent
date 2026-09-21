@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node's test runner owns registrations and injected service doubles preserve asynchronous boundaries. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -301,6 +301,68 @@ test("go:cln: сводка парсит финальную строку cleanup"
   assert.ok(final);
   assert.match(final.text, /3 файл/);
   assert.match(final.text, /224(\.0)? МБ/);
+});
+
+// Чистка идёт процессом, пока мост свободен: правки владельца в Obsidian ложатся в vault
+// рядом с её работой, и без пары коммитов они уехали бы в ночной `add -A` неотличимо от
+// результата чистки. Шов тот же, что у обновлятора: снимок «до» и результат после.
+test("go:cln: чистка оставляет в vault пару коммитов — снимок до и результат", async (t) => {
+  resetForTests();
+  t.after(() => {
+    cancelRun();
+    resetForTests();
+  });
+  const vault = mkdtempSync(join(tmpdir(), "iva-vault-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: vault,
+      encoding: "utf8",
+    }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "vault@example.com");
+  git("config", "user.name", "Vault");
+  writeFileSync(join(vault, "CORE.md"), "# CORE\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "vault");
+  // Правка владельца в Obsidian, ещё не в истории: она уезжает в снимок «до».
+  writeFileSync(join(vault, "CORE.md"), "# CORE\n\nправка владельца\n");
+
+  const dataDir = mkdtempSync(join(tmpdir(), "iva-data-"));
+  const h = makeCtx({
+    deps: {
+      dataDir,
+      root: "/nonexistent",
+      envPath: join(dataDir, ".env"),
+      svcRun: fastRun,
+      // Чистка — чужой процесс: правит vault мимо инструментов памяти. cwd процесса и есть
+      // vault, поэтому коммиты ложатся в него.
+      svcSpec: () => ({
+        kind: "proc",
+        cwd: vault,
+        argv: [
+          process.execPath,
+          "-e",
+          "require('node:fs').writeFileSync('карточка.md', '# Починено\\n')",
+        ],
+      }),
+    },
+  });
+  const st = newState();
+  h.st = st;
+  await service.on("go", ["cln"], st, h.ctx);
+  await waitFor(() => currentRun()?.status === "done");
+  await waitFor(() => git("log", "--pretty=%s").split("\n").length >= 3);
+  assert.deepEqual(git("log", "--pretty=%s").split("\n").slice(0, 2), [
+    "menu: vault cleanup",
+    "menu: vault snapshot",
+  ]);
+  // Снимок «до» держит правку владельца, второй коммит - результат чистки.
+  assert.match(git("show", "--name-only", "--pretty=", "HEAD~1"), /CORE\.md/u);
+  assert.match(
+    git("show", "--name-only", "--pretty=", "HEAD"),
+    /карточка\.md/u,
+  );
+  assert.equal(git("status", "--porcelain"), "");
 });
 
 test("go:mem: юнит через systemctl, финал «Цикл памяти пройден»", async () => {

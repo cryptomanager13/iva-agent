@@ -13,10 +13,6 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  changedVaultPaths,
-  commitVaultWrite,
-} from "../../agent/lib/vault-commit.ts";
-import {
   instructionSlotCollision,
   isAuthoredPath,
   isInstructionSlotPath,
@@ -723,9 +719,12 @@ function rollbackTo(run: UpdateRun): string | null {
  * Ни один из коммитов не может уронить обновление - как и сам errand. */
 async function cleanVault(run: UpdateRun): Promise<void> {
   const vault = run.store.layout.vault;
-  const before = await changedVaultPaths(vault);
-  if (before.length > 0)
-    await commitVaultWrite(`update ${run.name}: vault snapshot`, before, vault);
+  // Динамический импорт: обновлятор обязан грузиться на установке, где агентское дерево
+  // отсутствует или переписано наполовину (scripts/authored-tree-guard.test.ts), поэтому
+  // агентское достаётся здесь, а не на загрузке модуля.
+  const { vaultWritePair } = await import("../../agent/lib/vault-commit.ts");
+  const pair = vaultWritePair(`update ${run.name}`, vault);
+  await pair.before();
   await errand(run.run, run.log, {
     what: "the vault cleanup",
     failure: "the update continues without it",
@@ -738,9 +737,7 @@ async function cleanVault(run: UpdateRun): Promise<void> {
     ],
     cwd: vault,
   });
-  const after = await changedVaultPaths(vault);
-  if (after.length > 0)
-    await commitVaultWrite(`update ${run.name}: vault cleanup`, after, vault);
+  await pair.after();
 }
 
 /** Переезд: остановка старых писателей, миграции состояния, чистка vault и только потом

@@ -24,6 +24,10 @@ import {
   type ServiceRun,
 } from "./svc-run.ts";
 import { resolveVaultDir } from "../../../packages/vault-dir/index.ts";
+import {
+  vaultWritePair,
+  type VaultWritePair,
+} from "../../../agent/lib/vault-commit.ts";
 
 type ServiceCommand = "doc" | "cln" | "mem";
 type ServiceStatus = "running" | "failed" | "cancelled" | "timeout" | "done";
@@ -281,6 +285,50 @@ function idleView(
   return { text: lines.join("\n\n") };
 }
 
+/** Чистка трогает vault чужим процессом, а мост в это время свободен: правки владельца в
+ * Obsidian ложатся рядом с её работой. Без пары коммитов они уехали бы в ночной `add -A`
+ * неотличимо от результата чистки, поэтому чистка оформляется тем же швом, что и у
+ * обновлятора. `spec.cwd` у неё — это и есть vault; нет каталога — оформлять нечего. */
+function cleanupPair(
+  cmd: ServiceCommand,
+  spec: CommandSpec,
+): VaultWritePair | null {
+  if (cmd !== "cln" || spec.kind !== "proc" || !spec.cwd) return null;
+  return vaultWritePair("menu", spec.cwd);
+}
+
+/** Итог команды рисуем, только если юзер всё ещё на экране svc — иначе сводка ждёт в render. */
+function summaryOnFinish(
+  st: MenuServiceState,
+  ctx: MenuServiceContext,
+): (run: ServiceRun) => Promise<void> {
+  return async (run) => {
+    if (!(ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc"))
+      return;
+    await ctx.flows.screen(
+      st,
+      [summaryText(run, ctx), backLine(ctx)].join("\n\n"),
+    );
+  };
+}
+
+/** Коммит результата чистки — до сводки, и его не отменяет подменённый в тестах onFinish:
+ * работу раннера в тесте подменяют, а след в истории vault остаётся тем же. */
+function withCleanupCommit(
+  opts: RunOptions,
+  pair: VaultWritePair | null,
+): RunOptions {
+  if (pair === null) return opts;
+  const inner = opts.onFinish;
+  return {
+    ...opts,
+    onFinish: async (run) => {
+      await pair.after();
+      await inner?.(run);
+    },
+  };
+}
+
 async function startCommand(
   cmd: ServiceCommand,
   st: MenuServiceState,
@@ -311,24 +359,23 @@ async function startCommand(
   }
   const spec = await commandSpec(cmd, ctx);
   const over = ctx.deps.svcRun || {};
-  const opts: RunOptions = {
-    edit: (markdown) => ctx.flows.screen(st, markdown),
-    chatId: st.chatId,
-    messageId: st.msgId,
-    attached: () =>
-      ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc",
-    progressView: (run) => progressView(run, ctx),
-    onFinish: async (run: ServiceRun) => {
-      // Итог рисуем, только если юзер всё ещё на экране svc — иначе сводка ждёт в render.
-      if (!(ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc"))
-        return;
-      await ctx.flows.screen(
-        st,
-        [summaryText(run, ctx), backLine(ctx)].join("\n\n"),
-      );
+  const pair = cleanupPair(cmd, spec);
+  const opts = withCleanupCommit(
+    {
+      edit: (markdown) => ctx.flows.screen(st, markdown),
+      chatId: st.chatId,
+      messageId: st.msgId,
+      attached: () =>
+        ctx.flows.get(st.chatId, st.userId) === st && st.screen === "svc",
+      progressView: (run) => progressView(run, ctx),
+      onFinish: summaryOnFinish(st, ctx),
+      ...over,
     },
-    ...over,
-  };
+    pair,
+  );
+  // Снимок «до» — перед процессом: правки владельца, сделанные после старта чистки, остаются
+  // незакоммиченными и уезжают в ночной коммит, а не приписываются чистке.
+  await pair?.before();
   const run =
     spec.kind === "unit"
       ? startUnit(cmd, spec, opts)

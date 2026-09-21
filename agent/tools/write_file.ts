@@ -47,14 +47,14 @@ function cardVerdict(path: string): CardVerdict {
 
   const vault = resolveVaultDir(process.cwd());
   const cardsPath = join(vault, "cards");
-  const root = probe(vault);
-  if (root.kind === "absent")
+  const realVault = probe(vault);
+  if (realVault.kind === "absent")
     return {
       undecidable: `каталога вольта ${vault} нет (ASSISTANT_VAULT_DIR задан относительно рабочего каталога?)`,
     };
-  if (root.kind === "unreadable") return { undecidable: root.reason };
+  if (realVault.kind === "unreadable") return { undecidable: realVault.reason };
 
-  const cards = probe(join(root.path, "cards"));
+  const cards = probe(join(realVault.path, "cards"));
   // Вольт на месте, а cards/ в нём ещё нет — защищать нечего.
   if (cards.kind === "absent") return { card: false };
   if (cards.kind === "unreadable") return { undecidable: cards.reason };
@@ -104,16 +104,30 @@ export default defineTool({
     }
     await writeFileAtomic(path, content);
     // Внутри vault файл - часть памяти, и правка оставляет след в её истории; вне vault
-    // шов молча пропускает путь.
-    await commitVaultWrite(`file ${fileRel(path)}: write`, [path]);
+    // (или когда vault не разрешился) коммитить нечего.
+    const vault = optionalVault();
+    if (vault)
+      await commitVaultWrite(
+        `file ${fileRel(vault, path)}: write`,
+        [path],
+        vault,
+      );
     return { ok: true, path, bytes: Buffer.byteLength(content, "utf8") };
   },
 });
 
+/** Vault для сообщения коммита: нерезолвимый (или вовсе не настроенный) - коммитить
+ * нечего, и запись файла из-за этого не падает. */
+function optionalVault(): string {
+  try {
+    return resolveVaultDir(process.cwd());
+  } catch {
+    return "";
+  }
+}
+
 /** Путь файла для сообщения коммита: от vault, с прямыми слэшами. Вне vault он не попадёт
  * ни в одно сообщение - шов такой путь не коммитит. */
-function fileRel(path: string): string {
-  return relative(resolveVaultDir(process.cwd()), resolve(path))
-    .split(sep)
-    .join("/");
+function fileRel(vault: string, path: string): string {
+  return relative(vault, resolve(path)).split(sep).join("/");
 }

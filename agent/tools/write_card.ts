@@ -252,6 +252,8 @@ interface CardWrite {
   related: string[] | undefined;
   /** Путь карточки относительно vault'а — то, что видит модель. */
   rel: string;
+  /** Тот же vault: коммит называет корень, а не угадывает его. */
+  root: string;
   replace_body: boolean | undefined;
   status: string | undefined;
   tags: string[];
@@ -277,6 +279,8 @@ interface CardTarget {
   file: string;
   id: Identity;
   rel: string;
+  /** Vault, в котором лежит карточка: он же корень её репозитория. */
+  root: string;
 }
 
 /** Каталог типа и файл карточки: точный слаг или та же сущность по H1/name/aliases
@@ -306,6 +310,7 @@ function resolveTarget(
     file,
     id,
     rel: relative(root, file).split(sep).join("/"),
+    root,
   };
 }
 
@@ -463,6 +468,7 @@ function cardWrite(
     description: input.description.trim(),
     domain: input.domain?.trim(),
     file: target.file,
+    root: target.root,
     // Пробельная пустота history_entry (value.trim() === "") ничего не вытесняет и не
     // подделывает History: для UPDATE и NOOP она равна отсутствующему полю — так же, как
     // SUPERSEDE читает его через trim(). Модели, заполняющие все поля схемы, шлют "" и
@@ -560,6 +566,7 @@ async function writeLockedCard(card: CardWrite): Promise<CardOutcome> {
     await commitVaultWrite(
       `card ${cardSlug(card.rel)}: ${effectiveOperation}`,
       [card.file],
+      card.root,
     );
   }
   if (ignoredHistoryEntry) logIgnoredHistoryEntry();
