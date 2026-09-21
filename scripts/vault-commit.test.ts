@@ -658,3 +658,77 @@ test("read-only .git: причина в журнале, без пустого о
   assert.match(outcome.logged, /Permission denied/u);
   assert.ok(elapsed < 700, `запись ждала ${String(elapsed)} мс без причины`);
 });
+
+/** Соседний чужой репозиторий: в него смотрят GIT_*-переменные из окружения. На каталог
+ * vault не влияет — инструменты читают его из ASSISTANT_VAULT_DIR, который уже выставлен. */
+function foreignRepo(t: { after(fn: () => void): void }): string {
+  const dir = mkdtempSync(join(tmpdir(), "iva-foreign-"));
+  t.after(() =>
+    rmSync(dir, {
+      force: true,
+      maxRetries: 3,
+      recursive: true,
+      retryDelay: 50,
+    }),
+  );
+  sh(["init", "-q", "-b", "main"], dir);
+  sh(["config", "user.email", "foreign@example.com"], dir);
+  sh(["config", "user.name", "Foreign"], dir);
+  writeFileSync(join(dir, "FOREIGN.md"), "чужой репозиторий\n");
+  sh(["add", "-A"], dir);
+  sh(["commit", "-q", "-m", "foreign base"], dir);
+  return dir;
+}
+
+/** Отпечаток репозитория целиком: HEAD, индекс, дерево и незакоммиченное состояние. */
+function fingerprint(dir: string): string {
+  return [
+    trySh(["rev-parse", "HEAD"], dir),
+    trySh(["ls-files", "-s", "-z"], dir),
+    trySh(["status", "--porcelain=v2", "-z", "-uall"], dir),
+  ].join("\n");
+}
+
+/** Список незакоммиченного без схлопывания каталогов и без кавычек. */
+function statusAll(vault: string): string {
+  return trySh(
+    ["-c", "core.quotePath=false", "status", "--porcelain", "-uall"],
+    vault,
+  );
+}
+test("чужой GIT_DIR в окружении не уводит коммит из vault", async (t) => {
+  const vault = makeVault(t);
+  const foreign = foreignRepo(t);
+  const before = fingerprint(foreign);
+  process.env.GIT_DIR = join(foreign, ".git");
+  const { logged, value: result } = await journal(() =>
+    tool.card(card({ operation: "ADD", title: "Не-туда" })),
+  );
+  delete process.env.GIT_DIR;
+
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(subjects(vault), ["card не-туда: ADD"]);
+  assert.deepEqual(
+    subjects(foreign),
+    ["foreign base"],
+    "чужая история не растёт",
+  );
+  assert.equal(fingerprint(foreign), before, "чужой репозиторий не тронут");
+  assert.equal(logged, "");
+});
+
+test("имя файла с глобом забирает только свой файл", async (t) => {
+  const vault = makeVault(t);
+  mkdirSync(join(vault, "notes"), { recursive: true });
+  writeFileSync(join(vault, "notes", "отчёт-январь.md"), "ЧУЖОЙ ЯНВАРЬ\n");
+  writeFileSync(join(vault, "notes", "отчёт-февраль.md"), "ЧУЖОЙ ФЕВРАЛЬ\n");
+
+  const result = await tool.file(
+    join(vault, "notes", "отчёт-*.md"),
+    "файл агента\n",
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(touched(vault), ["notes/отчёт-*.md"]);
+  assert.match(statusAll(vault), /^\?\? notes\/отчёт-январь\.md$/mu);
+  assert.match(statusAll(vault), /^\?\? notes\/отчёт-февраль\.md$/mu);
+});

@@ -11,6 +11,10 @@
 // Ни один отказ здесь не роняет ход: файл уже записан, причина уходит в журнал одной
 // строкой. Без remote локальные коммиты есть; push остаётся делом ночного Brain.
 //
+// Git зовётся своим окружением (см. gitEnv) и с литеральными путями: и то и другое - граница
+// репозитория, а не удобство. Чужой GIT_DIR уводит коммит в чужую историю, а имя файла с `*`
+// без литерального пути становится глобом и забирает в коммит файлы владельца.
+//
 // Обновлятор берёт этот модуль динамическим импортом: он обязан грузиться на установке без
 // агентского дерева (scripts/authored-tree-guard.test.ts), а сам шов не ищет vault - его
 // называет вызывающий, который свой vault уже разрешил.
@@ -30,6 +34,23 @@ const GIT_TIMEOUT_MS = 5000;
 const IVA_IDENTITY = ["-c", "user.name=Iva", "-c", "user.email=iva@localhost"];
 const REASON_CAP = 200;
 const LOG_PREFIX = "[vault-commit]";
+
+/** Что наследуется от процесса: git ищет себя и конфиг владельца. Белый список, а не чёрный
+ * список запрещённых GIT_*: чужой `GIT_DIR` (его оставляет после себя git-хук или
+ * `rebase --exec`) увёл бы коммит в другой репозиторий, `GIT_INDEX_FILE` - в чужой индекс,
+ * `GIT_OBJECT_DIRECTORY` - в чужую базу объектов, `GIT_CEILING_DIRECTORIES` - мимо vault. */
+const GIT_ENV_KEEP =
+  /^(?:PATH|HOME|TMPDIR|TMP|TEMP|USERPROFILE|SystemRoot|ComSpec|PATHEXT|LANG|LANGUAGE|TZ|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM)$|^LC_/u;
+
+/** `GIT_LITERAL_PATHSPECS` шов ставит сам: без него имя файла с `*`, `?` или `[` становится
+ * глобом и забирает в коммит соседние файлы владельца. */
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { GIT_LITERAL_PATHSPECS: "1" };
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && GIT_ENV_KEEP.test(name)) env[name] = value;
+  }
+  return env;
+}
 
 /** Занятый индекс - это именно `File exists`; отказ по правам печатает тот же
  * `index.lock` в тексте ошибки, и ждать секунду впустую на нём нечего. */
@@ -62,12 +83,16 @@ function detail(run: GitRun): string {
   return `${run.err}\n${run.out}`.trim();
 }
 
-function git(args: readonly string[], cwd: string): Promise<GitRun> {
+function git(
+  args: readonly string[],
+  cwd: string,
+  input?: string,
+): Promise<GitRun> {
   return new Promise((done) => {
-    execFile(
+    const child = execFile(
       "git",
       [...args],
-      { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true },
+      { cwd, env: gitEnv(), timeout: GIT_TIMEOUT_MS, windowsHide: true },
       (error, stdout, stderr) => {
         const failed = error !== null;
         done({
@@ -78,6 +103,7 @@ function git(args: readonly string[], cwd: string): Promise<GitRun> {
         });
       },
     );
+    if (input !== undefined) child.stdin?.end(input);
   });
 }
 
@@ -185,14 +211,24 @@ function vaultPath(vault: string, path: string): string | null {
 type RepoCheck =
   { readonly kind: "own" } | { readonly kind: "skip"; readonly reason: string };
 
+/** Положительный ответ про свой репозиторий не меняется: он уже есть вокруг vault. Кэш снимает
+ * спавн `rev-parse` с каждой записи. Отрицательный ответ не кэшируется - репозиторий вокруг
+ * каталога может появиться позже (`git init` в vault, `init-vault`). */
+const ownRepositories = new Set<string>();
+
 /** Свой ли это репозиторий: шов коммитит только в vault, иначе память легла бы в историю
- * репозитория кода, который двигает обновлятор. Отказ git называет себя сам. */
+ * репозитория кода, который двигает обновлятор. Отказ git называет себя сам, а найденный
+ * корень выше vault называем как есть: он не обязательно чужой, но коммитить в него нельзя. */
 async function checkRepository(vault: string): Promise<RepoCheck> {
+  if (ownRepositories.has(vault)) return { kind: "own" };
   const run = await git(["rev-parse", "--show-toplevel"], vault);
   if (run.code !== 0) return { kind: "skip", reason: reasonOf(run) };
   const root = run.out.trim();
   const owner = realOf(root) ?? root;
-  if (owner === vault) return { kind: "own" };
+  if (owner === vault) {
+    ownRepositories.add(vault);
+    return { kind: "own" };
+  }
   return { kind: "skip", reason: `репозиторий чужой: ${owner}` };
 }
 
