@@ -193,6 +193,56 @@ test("смена факта тем же набором слов остаётся
   }
 });
 
+// Знак — носитель смысла: «+12» и «-12» — противоположные факты, «> 5» и «< 5» —
+// противоположные пороги, «$5» и «5» — разные величины, «✅» и «❌» — разные статусы,
+// «5-9» и «59» — разные числа. Выкусывать их значило бы терять смену факта без следа.
+test("знак как единственный носитель смысла — смена факта", async () => {
+  const pairs: [string, string][] = [
+    ["рост +12 процентов", "рост -12 процентов"],
+    ["маржа > 5 процентов", "маржа < 5 процентов"],
+    ["бюджет $5", "бюджет 5"],
+    ["релиз готов ✅", "релиз готов ❌"],
+    ["смена 5-9", "смена 59"],
+  ];
+  for (const [index, [from, to]] of pairs.entries()) {
+    const title = `Знак ${index}`;
+    const created = await add(title, from, `Факт про «${from}».`);
+    assert.equal(created.ok, true, created.error);
+    const changed = await update(title, to, `Факт про «${to}».`);
+    assert.equal(changed.ok, true, changed.error);
+    assert.equal(description(created.file), to);
+    assert.deepEqual(
+      historyFactLines(created.file),
+      [`- ${DAY}: ${from}`],
+      `прежнее значение «${from}» исчезло без следа`,
+    );
+  }
+});
+
+// Прощается только то, что смысла не несёт: регистр, ё/е, лишние пробелы и пунктуация по
+// краям слова. Такая пара — тот же факт, и History от неё не растёт.
+test("регистр, ё/е, пробелы и обрамляющая пунктуация сменой факта не считаются", async () => {
+  const pairs: [string, string][] = [
+    ["ведёт проект Pepsi", "Ведёт проект Pepsi!"],
+    ["работает в TDI Group", "«Работает в TDI Group»"],
+    ["он потратил все", "он потратил всё"],
+    ["выручка 1 000 сум", "выручка 1\u00a0000 сум"],
+  ];
+  for (const [index, [from, to]] of pairs.entries()) {
+    const title = `Мелочь ${index}`;
+    const created = await add(title, from, `Факт про «${from}».`);
+    assert.equal(created.ok, true, created.error);
+    const reworded = await update(title, to, `Факт про «${to}».`);
+    assert.equal(reworded.ok, true, reworded.error);
+    assert.equal(description(created.file), to);
+    assert.deepEqual(
+      historyFactLines(created.file),
+      [],
+      `«${from}» и «${to}» — один факт, History расти не должна`,
+    );
+  }
+});
+
 test("цепочка UPDATE не теряет ни одного прежнего значения", async () => {
   const created = await add("Сплендор", "ведёт сплендор", "Ведёт сплендор.");
   assert.equal(created.ok, true, created.error);
