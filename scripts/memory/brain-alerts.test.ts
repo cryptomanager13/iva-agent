@@ -596,6 +596,8 @@ function runBrainWithoutTree(
     "notification-chat.ts",
     "timezone.ts",
     "vault-boundary.ts",
+    // brain зовёт шов коммита через него, и острову он нужен так же, как сам brain.
+    "vault-pair.ts",
   ])
     copyFileSync(
       join(ROOT, "scripts/lib", name),
