@@ -7,6 +7,7 @@ import {
   aliasKey,
   ALIASES_MAX,
   atomicWrite,
+  droppedAliases,
   isLegacyHistoryReplace,
   mergeCard,
   resolveCard,
@@ -343,16 +344,20 @@ function earlyOutcome(card: CardWrite): CardOutcome | null {
       error: `NOOP требует существующую карточку ${card.rel}.`,
     };
   }
+  const existing = readFileSync(card.file, "utf8");
+  // Написание, которому не хватит места, называется и здесь: `noop` без этого читается как
+  // «записал», а в карточке его нет.
+  const dropped = droppedAliases(
+    parseFrontmatterOrSkip(existing, card.rel)?.fields?.aliases,
+    card.aliases,
+  );
   return {
     action: "noop",
     file: card.rel,
     matchedBy: card.id.matchedBy,
+    ...(dropped.length ? { note: droppedAliasesNote(dropped) } : {}),
     ok: true,
-    status: storedStatus(
-      readFileSync(card.file, "utf8"),
-      card.rel,
-      card.status ?? card.allowed[0],
-    ),
+    status: storedStatus(existing, card.rel, card.status ?? card.allowed[0]),
     type: card.type,
   };
 }

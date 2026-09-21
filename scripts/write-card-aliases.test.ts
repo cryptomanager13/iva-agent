@@ -24,6 +24,7 @@ process.on("exit", () => rmSync(VAULT, { recursive: true, force: true }));
 
 const writeCard = (await import("../agent/tools/write_card.ts")).default;
 const { searchMemory } = await import("../agent/tools/memory_search.ts");
+const { mergeCard } = await import("../agent/lib/card-store.ts");
 
 type WriteCardInput = Parameters<typeof writeCard.execute>[0];
 type WriteCardResult = {
@@ -238,6 +239,78 @@ test("ё и е — разные написания: оба лежат в кар�
         .join(", ")}`,
     );
   }
+});
+
+test("непоместившийся алиас назван в note и на пути без изменений", async () => {
+  const full = Array.from({ length: 8 }, (_, index) => `Стоящий ${index}`);
+  const created = await call({
+    ...PROJECT,
+    aliases: full,
+    body: "Факт.",
+    description: "Полная карточка",
+    title: "Полный",
+    type: "contact",
+  });
+  assert.equal(created.ok, true, created.error);
+
+  const noop = await call({
+    ...PROJECT,
+    body: "Факт.",
+    description: "Полная карточка",
+    operation: "NOOP",
+    title: "Полный",
+    type: "contact",
+    aliases: ["Непустивший"],
+  });
+  assert.equal(noop.ok, true, noop.error);
+  assert.equal(noop.action, "noop");
+  assert.match(
+    noop.note ?? "",
+    /Непустивший/,
+    "noop обязан назвать алиас, которому не хватило места",
+  );
+
+  // Реплей SUPERSEDE — тоже noop: алиас из него в карточку не попал и обязан быть назван.
+  const replaced = await call({
+    ...PROJECT,
+    aliases: full,
+    body: "Новое тело.",
+    description: "новое описание",
+    operation: "SUPERSEDE",
+    history_entry: "2020-01-01: Факт.",
+    title: "Полный",
+    type: "contact",
+  });
+  assert.equal(replaced.ok, true, replaced.error);
+  const replay = await call({
+    ...PROJECT,
+    aliases: ["Ещё Один"],
+    body: "Новое тело.",
+    description: "новое описание",
+    operation: "SUPERSEDE",
+    history_entry: "2020-01-01: Факт.",
+    title: "Полный",
+    type: "contact",
+  });
+  assert.equal(replay.ok, true, replay.error);
+  assert.equal(replay.action, "noop");
+  assert.match(replay.note ?? "", /Ещё Один/);
+
+  // Тот же ответ у самого слияния: NOOP, поданный прямо в mergeCard, называет то же самое.
+  const merged = mergeCard({
+    body: "Факт.",
+    date: "2026-09-21",
+    existing: readFileSync(join(VAULT, created.file), "utf8"),
+    fields: {
+      aliases: ["Непустивший"],
+      description: "Полная карточка",
+      tags: ["network"],
+      type: "contact",
+    },
+    operation: "NOOP",
+    title: "Полный",
+  });
+  assert.deepEqual(merged.droppedAliases, ["Непустивший"]);
 });
 
 // Одно и то же написание — это одно написание: регистр и лишние пробелы не делают его другим,

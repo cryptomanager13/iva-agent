@@ -890,6 +890,16 @@ export function aliasKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/gu, " ");
 }
 
+/** Алиасы, которым не хватит места: тот же ключ и тот же потолок, что у слияния. Нужен
+ * вызывающему, который решает про запись до слияния: NOOP в write_card ничего не пишет, но
+ * обязан назвать написание, которого владелец в карточке не найдёт. */
+export function droppedAliases(
+  previous: FmValue | undefined,
+  next: readonly string[],
+): string[] {
+  return mergeAliases(previous, [...next]).dropped;
+}
+
 /** Слияние алиасов: лежащие написания не выбрасываются никогда (карточка с одиннадцатью
  * алиасами от нашего вызова не худеет), новые добираются до потолка, а остальные
  * возвращаются вызывающему: он обязан их назвать. */
@@ -925,7 +935,7 @@ export function mergeCard(input: MergeInput): MergeResult {
   assertRelatedSectionAbsent(trimmedBody);
   assertRequestShape(input, operation);
   assertBodyShape(trimmedBody, operation, input.date);
-  if (operation === "NOOP") return noopResult(input.existing);
+  if (operation === "NOOP") return noopResult(input);
   assertCardAvailability(operation, input.existing);
   assertSupersedeSource(input, operation, trimmedBody);
 
@@ -964,7 +974,11 @@ export function mergeCard(input: MergeInput): MergeResult {
   // истину не называет и отказывает так же, как на main.
   if (assembled.suppressedHistoryEntry) {
     if (isReplay(content, existing, parsed, render))
-      return { content: existing, action: "noop" };
+      return {
+        content: existing,
+        action: "noop",
+        ...(droppedAliases.length ? { droppedAliases } : {}),
+      };
     if (!displacedFactNames(operation, input.historyEntry, oldBody))
       throw new Error(
         "historyEntry already appears in ## History but this SUPERSEDE still changes the card; " +
@@ -1059,9 +1073,20 @@ function assertLogEntryShape(trimmedBody: string, date: string): void {
     );
 }
 
-function noopResult(existing: string | undefined): MergeResult {
-  if (existing === undefined) throw new Error("NOOP requires an existing card");
-  return { content: existing, action: "noop" };
+function noopResult(input: MergeInput): MergeResult {
+  if (input.existing === undefined)
+    throw new Error("NOOP requires an existing card");
+  // Лишние алиасы считаются и здесь: `noop` без этой оговорки читается как «написание
+  // записано», а в карточке его нет.
+  const next = input.fields.aliases;
+  const dropped = Array.isArray(next)
+    ? droppedAliases(parseFrontmatter(input.existing).fields?.aliases, next)
+    : [];
+  return {
+    content: input.existing,
+    action: "noop",
+    ...(dropped.length ? { droppedAliases: dropped } : {}),
+  };
 }
 
 /** ADD не перезаписывает карточку, UPDATE и SUPERSEDE не заводят её заново. */
