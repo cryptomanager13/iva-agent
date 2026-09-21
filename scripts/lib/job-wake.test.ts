@@ -263,31 +263,25 @@ test("успешное расписание не открывает модель
 });
 
 test("успешное расписание сообщает failed, когда запись результата недоступна", async () => {
-  const root = mkdtempSync(join(tmpdir(), "iva-wake-ok-ro-"));
-  const facts = join(root, "jobs.json");
+  const facts = file();
   await recordFact(
     facts,
     fact({ ok: true, error: null, exitCode: 0 }),
     NOW,
   );
-  chmodSync(root, 0o555);
-  try {
-    let calls = 0;
-    const status = await runJobWake("memory-daily", NOW - 1000, {
-      factsFile: facts,
-      tr,
-      runTurn: () => {
-        calls += 1;
-        return Promise.resolve({ status: "completed", message: "" });
-      },
-      send: () => Promise.resolve(true),
-      now: () => NOW + 5,
-      log: () => {},
-    });
-    assert.equal(status, "failed");
-    assert.equal(calls, 0);
-  } finally {
-    chmodSync(root, 0o755);
-    rmSync(root, { recursive: true, force: true });
-  }
+  let calls = 0;
+  const status = await runJobWake("memory-daily", NOW - 1000, {
+    factsFile: facts,
+    tr,
+    runTurn: () => {
+      calls += 1;
+      return Promise.resolve({ status: "completed", message: "" });
+    },
+    send: () => Promise.resolve(true),
+    recordWake: () => Promise.reject(new Error("durable write rejected")),
+    now: () => NOW + 5,
+    log: () => {},
+  });
+  assert.equal(status, "failed");
+  assert.equal(calls, 0);
 });

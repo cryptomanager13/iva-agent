@@ -24,6 +24,8 @@ export interface JobWakeDeps {
   readonly tr: Translate;
   readonly runTurn: (prompt: string) => Promise<WakeTurnResult>;
   readonly send: (text: string) => Promise<boolean>;
+  /** Test seam for the durable wake record; production uses recordWake. */
+  readonly recordWake?: typeof recordWake;
   readonly now?: () => number;
   readonly log?: (...args: unknown[]) => void;
 }
@@ -134,6 +136,7 @@ export async function runJobWake(
   return sendError === null ? "answered" : "failed";
 }
 
+/** Persists a wake outcome and makes failed persistence visible to the caller. */
 async function recordOutcome(
   deps: JobWakeDeps,
   name: string,
@@ -141,7 +144,7 @@ async function recordOutcome(
   wake: JobWake,
 ): Promise<boolean> {
   try {
-    await recordWake(deps.factsFile, name, startedAt, wake);
+    await (deps.recordWake ?? recordWake)(deps.factsFile, name, startedAt, wake);
     return true;
   } catch (error) {
     // Запись исхода не сдалась: для сторожа хода не было, поэтому вызывающий обязан
