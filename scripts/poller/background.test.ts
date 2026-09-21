@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node owns test registration; async doubles preserve the I/O boundary. */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { scheduleBridgeTask } from "./background.ts";
+import { noteDroppedBridgeTasks, scheduleBridgeTask } from "./background.ts";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -73,4 +73,28 @@ test("a background task never lets its failure reach the caller", async () => {
     logged.map((parts) => String(parts[0])).sort(),
     ["bridge task throws-sync threw:", "bridge task throws failed:"].sort(),
   );
+});
+
+test("a stopping bridge counts the background tasks it drops", async () => {
+  const logged: unknown[][] = [];
+  const logImpl = (...parts: unknown[]) => logged.push(parts);
+  // Ничего в полёте — молчим: строка нужна только про брошенную работу.
+  assert.equal(noteDroppedBridgeTasks({ logImpl }), 0);
+  assert.deepEqual(logged, []);
+
+  let finish: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  scheduleBridgeTask("dropped", async () => {
+    await gate;
+  });
+
+  assert.equal(noteDroppedBridgeTasks({ logImpl }), 1);
+  assert.deepEqual(logged, [
+    ["bridge is stopping: 1 background task(s) dropped"],
+  ]);
+  finish?.();
+  await tick();
+  await tick();
 });

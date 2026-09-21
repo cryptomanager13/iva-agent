@@ -12,6 +12,17 @@ const tasksInFlight = new Map<string, Promise<void>>();
 
 type LogFn = (...parts: unknown[]) => void;
 
+// Остановка моста рвёт фоновые задачи вместе с процессом: одна строка в журнале говорит,
+// сколько их было, чтобы пропавшее ожидание стопа не выглядело молчанием.
+export function noteDroppedBridgeTasks({
+  logImpl = console.error as LogFn,
+}: { logImpl?: LogFn } = {}): number {
+  const dropped = tasksInFlight.size;
+  if (dropped > 0)
+    logImpl(`bridge is stopping: ${dropped} background task(s) dropped`);
+  return dropped;
+}
+
 export function scheduleBridgeTask(
   key: string,
   task: () => Promise<void>,

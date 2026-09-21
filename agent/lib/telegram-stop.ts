@@ -97,6 +97,10 @@ export function stopRestartingText(): string {
   return tr("♻️ Restarting Iva", "♻️ Перезапускаю Iva");
 }
 
+export function stopRestartAlreadyText(): string {
+  return tr("♻️ Iva is restarting already", "♻️ Перезапуск Iva уже идёт");
+}
+
 export function stopRestartedText(): string {
   return tr("♻️ Iva restarted", "♻️ Iva перезапущена");
 }
@@ -114,8 +118,13 @@ export const STOP_CONFIRM_TIMEOUT_MS = 60_000;
 // Как часто фон перечитывает запись: шаг опроса — деталь ожидания, наружу не выходит.
 const STOP_CONFIRM_POLL_MS = 500;
 
-export function stopConfirmSeconds(): number {
-  return Math.round(STOP_CONFIRM_TIMEOUT_MS / 1000);
+// Сколько секунд называет текст «ход не остановился»: число берётся из того же окна, которое
+// реально отработало. Меньше секунды окна не бывает нигде, кроме тестов, а ноль в тексте
+// читался бы как ошибка.
+export function stopConfirmSeconds(
+  timeoutMs = STOP_CONFIRM_TIMEOUT_MS,
+): number {
+  return Math.max(1, Math.round(timeoutMs / 1000));
 }
 
 // Ход жив, пока запись держит ЕГО sessionId в статусе running. Любое другое
@@ -415,7 +424,7 @@ async function notifyIfTurnNotStopped(
   if (await waitForTurnStop(chatKey, sessionId, { getStatusImpl, timeoutMs }))
     return;
   try {
-    await notifyImpl(stopNotStoppedText(stopConfirmSeconds()));
+    await notifyImpl(stopNotStoppedText(stopConfirmSeconds(timeoutMs)));
   } catch (error) {
     logImpl("stop notice failed:", error);
   }

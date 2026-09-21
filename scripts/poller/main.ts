@@ -20,7 +20,7 @@ import {
   sleep,
 } from "./config.ts";
 import { tg } from "./transport.ts";
-import { scheduleBridgeTask } from "./background.ts";
+import { noteDroppedBridgeTasks, scheduleBridgeTask } from "./background.ts";
 import { fastForwardOffset, saveOffset } from "./offset.ts";
 import {
   admitTelegramUpdate,
@@ -436,6 +436,13 @@ export function runEntrypoint(
   executedPath: string | undefined = process.argv[1],
 ): void {
   if (fileURLToPath(moduleUrl) !== executedPath) return;
+  // У остановки моста нет своего пути завершения: задачи в полёте умирают вместе с процессом.
+  // Скажем об этом в журнал и пропустим сигнал дальше — обработчик снят, и повторный SIGTERM
+  // убивает процесс как раньше, иначе systemd ждал бы нас до SIGKILL.
+  process.once("SIGTERM", () => {
+    noteDroppedBridgeTasks({ logImpl: log });
+    process.kill(process.pid, "SIGTERM");
+  });
   void main().catch((error: unknown) => {
     console.error("telegram-poll fatal:", error);
     process.exit(1);

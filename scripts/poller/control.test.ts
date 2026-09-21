@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node owns test registration; async doubles preserve the I/O boundary. */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -11,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { requestTelegramCancel } from "#lib/telegram-cancel-client.ts";
 
 type Event = string | [string, string, number | undefined, string | undefined];
 type CaptureMessage = { message_id?: number };
@@ -62,6 +64,7 @@ type RunStatusModule = {
   getChatStatus: (chatKey: string) => Record<string, unknown> | undefined;
 };
 type QueueModule = {
+  reapStaleRuns: (options?: Record<string, unknown>) => Promise<number>;
   clearPrivateResetIntent: (chatKey: string) => Promise<void>;
   loadPrivateResetIntents: () => Promise<
     Array<{ chatKey: string; discardThroughUpdateId?: number }>
@@ -670,6 +673,82 @@ function restartTap(
 // Принятая отмена без подтверждения: роут отвечает, ход не заканчивается.
 const acceptedCancel = async () => ({ ok: true, status: "accepted" }) as const;
 
+// Двойник молчащего cancel-роута: запрос уходит, ответа нет — так выглядит зависший агент.
+// Таймаут клиента уважаем (сигнал обрывает ожидание), иначе тест повис бы навсегда.
+function silentRouteCancel(
+  timeoutMs: number,
+): (input: CancelCall) => Promise<unknown> {
+  return (input) =>
+    requestTelegramCancel({
+      ...input,
+      timeoutMs,
+      fetchImpl: (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const abort = () =>
+            reject(
+              init.signal?.reason instanceof Error
+                ? init.signal.reason
+                : new Error("cancel route timed out"),
+            );
+          if (init.signal?.aborted === true) abort();
+          else init.signal?.addEventListener("abort", abort);
+        }),
+    });
+}
+
+// Отпечаток тот же, что мост кладёт в data кнопки: так выглядит нажатие, пришедшее из
+// прошлой жизни моста — от кнопки остались только её байты да запись хода на диске.
+function previousLifeRestartData(sessionId: string): string {
+  return `iva_stoprestart:${createHash("sha256")
+    .update(sessionId)
+    .digest("hex")
+    .slice(0, 12)}`;
+}
+
+// Нажатие кнопки рестарта и общая обвязка её обработки: акки, сбросы и ответы в чат.
+function restartDeps(scheduler: ReturnType<typeof recordingScheduler>) {
+  const acks: Array<[string, string | undefined]> = [];
+  const resets: ResetCall[] = [];
+  const replies: string[] = [];
+  return {
+    acks,
+    resets,
+    replies,
+    deps: {
+      cancelImpl: acceptedCancel,
+      confirmTimeoutMs: 20,
+      watchTimeoutMs: 20,
+      scheduleImpl: scheduler.scheduleImpl,
+      performResetImpl: async (
+        key: string,
+        target: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ) => {
+        resets.push([key, target, options]);
+      },
+      replyImpl: async (_chatId: number | undefined, text: string) => {
+        replies.push(text);
+        return { message_id: 1 };
+      },
+      ackImpl: async (id: string, text?: string) => {
+        acks.push([id, text]);
+        return { ok: true, result: true };
+      },
+    },
+  };
+}
+
+// Кнопка из сообщения, которое мост отправил на прошлой серии нажатий ⏹.
+async function restartButtonOf(
+  scheduler: ReturnType<typeof recordingScheduler>,
+  calls: BotCall[],
+  deps: Record<string, unknown>,
+): Promise<string> {
+  assert.equal(await handleControl(stopButton(), deps), true);
+  await scheduler.run(scheduler.keys()[0]);
+  return restartButtonData(calls);
+}
+
 test("the Stop handler hands the wait to the background and never blocks the bridge", async () => {
   runningTurn({ sessionId: "session-slow" });
   const scheduler = recordingScheduler();
@@ -739,7 +818,8 @@ test("an unstopped turn offers the owner a restart button, and only the button r
         (call) =>
           call.method === "sendMessage" && inlineKeyboard(call) !== null,
       );
-      assert.match(String(notice.body.text), /Ход не остановился за 60 с/u);
+      // Окно теста — 20 мс, в тексте — округлённое окно (меньше секунды не называем).
+      assert.match(String(notice.body.text), /Ход не остановился за 1 с\./u);
       assert.match(String(notice.body.text), /оборвёт работу во всех чатах/u);
       assert.equal(
         inlineKeyboard(notice)?.[0]?.[0]?.text,
@@ -866,7 +946,7 @@ test("a group gets the honest text about the unstopped turn and no restart butto
       await scheduler.run(scheduler.keys()[0]);
 
       // Текст честный, кнопки нет: рестарт из группы не предлагается.
-      assert.deepEqual(replies, [[groupId, "Ход не остановился за 60 с."]]);
+      assert.deepEqual(replies, [[groupId, "Ход не остановился за 1 с."]]);
       assert.equal(restartButtonMessage(calls), undefined);
       assert.equal(systemctlCalls(argsLog), "");
       assert.deepEqual(resets, []);
@@ -1062,6 +1142,156 @@ test("a restart that systemd refuses is reported and the reset still happens", a
       // Сброс сделан независимо от исхода рестарта: он лечит зависший ход сам.
       assert.equal(resets.length, 1);
       assert.deepEqual(replies, ["⚠️ Не удалось перезапустить Iva"]);
+    });
+  });
+});
+
+test("the honest text names the window it actually waited", async () => {
+  runningTurn({ sessionId: "session-window" });
+  const scheduler = recordingScheduler();
+  await withBotApi(botOk, async (calls) => {
+    const { deps } = restartDeps(scheduler);
+    // Ждём две секунды, а не дефолтные шестьдесят: число в тексте — то же окно, что отработало.
+    const waiting = { ...deps, confirmTimeoutMs: 2000 };
+
+    assert.equal(await handleControl(stopButton(), waiting), true);
+    await scheduler.run(scheduler.keys()[0]);
+
+    const notice = await waitForBotCall(
+      calls,
+      (call) => call.method === "sendMessage" && inlineKeyboard(call) !== null,
+    );
+    assert.match(String(notice.body.text), /Ход не остановился за 2 с\./u);
+    assert.doesNotMatch(String(notice.body.text), /60/u);
+  });
+  stopTurn("7:");
+});
+
+test("the first restart press says the restart has started, the second says it is running", async () => {
+  runningTurn({ sessionId: "session-ack" });
+  const scheduler = recordingScheduler();
+  await withBotApi(botOk, async (calls) => {
+    const { acks, deps } = restartDeps(scheduler);
+    const data = await restartButtonOf(scheduler, calls, deps);
+    acks.length = 0;
+
+    assert.equal(await handleControl(restartTap(80, data), deps), true);
+    assert.equal(await handleControl(restartTap(81, data), deps), true);
+
+    // Молчаливого ответа нет: первое нажатие слышит «начал», повтор — «уже идёт».
+    assert.deepEqual(acks, [
+      ["cq-80", "♻️ Перезапускаю Iva"],
+      ["cq-81", "♻️ Перезапуск Iva уже идёт"],
+    ]);
+    // Рестарт ровно один: второй тап остался той же задачей.
+    assert.equal(scheduler.keys().length, 1);
+  });
+  stopTurn("7:");
+});
+
+test("a restart tap that lands after the turn stopped never restarts", async () => {
+  runningTurn({ sessionId: "session-race" });
+  const scheduler = recordingScheduler();
+  await withFakeSystemctl(0, async (argsLog) => {
+    await withBotApi(botOk, async (calls) => {
+      const { resets, replies, deps } = restartDeps(scheduler);
+      const data = await restartButtonOf(scheduler, calls, deps);
+
+      // Тап ушёл в фон, а ход успел подтвердить остановку до старта задачи.
+      assert.equal(await handleControl(restartTap(70, data), deps), true);
+      stopTurn("7:");
+      await scheduler.run(scheduler.keys()[0]);
+
+      assert.deepEqual(replies, ["Этот ход уже завершился."]);
+      assert.equal(systemctlCalls(argsLog), "");
+      assert.deepEqual(resets, []);
+    });
+  });
+});
+
+test("a silent cancel route ends with one honest message and no restart", async () => {
+  runningTurn({ sessionId: "session-silent" });
+  const scheduler = recordingScheduler();
+  await withFakeSystemctl(0, async (argsLog) => {
+    await withBotApi(botOk, async (calls) => {
+      const { resets, deps } = restartDeps(scheduler);
+      const deps2 = { ...deps, cancelImpl: silentRouteCancel(20) };
+
+      // Роут молчит дольше таймаута: серия нажатий — одна задача, одно сообщение.
+      for (let tap = 0; tap < 3; tap++)
+        assert.equal(await handleControl(stopButton(), deps2), true);
+      assert.equal(scheduler.keys().length, 1);
+      await scheduler.run(scheduler.keys()[0]);
+
+      assert.equal(
+        calls.filter(
+          (call) =>
+            call.method === "sendMessage" && inlineKeyboard(call) !== null,
+        ).length,
+        1,
+      );
+      assert.equal(systemctlCalls(argsLog), "");
+      assert.deepEqual(resets, []);
+    });
+  });
+  stopTurn("7:");
+});
+
+test("a restart button from a previous bridge life still restarts a live turn", async () => {
+  // Кнопку сняли до перезапуска моста: в памяти процесса о ней ничего нет — решение
+  // принимают отпечаток sessionId в callback_data и запись хода на диске.
+  runningTurn({ sessionId: "session-old-bridge" });
+  const scheduler = recordingScheduler();
+  await withFakeSystemctl(0, async (argsLog) => {
+    await withBotApi(botOk, async () => {
+      const { resets, replies, acks, deps } = restartDeps(scheduler);
+
+      assert.equal(
+        await handleControl(
+          restartTap(90, previousLifeRestartData("session-old-bridge")),
+          deps,
+        ),
+        true,
+      );
+      await scheduler.run(scheduler.keys()[0]);
+
+      assert.deepEqual(acks, [["cq-90", "♻️ Перезапускаю Iva"]]);
+      assert.equal(systemctlCalls(argsLog), "--user restart iva.service\n");
+      assert.deepEqual(resets, [
+        [
+          "7:",
+          { sessionId: "session-old-bridge" },
+          { clearQueue: true, discardThroughUpdateId: 90 },
+        ],
+      ]);
+      assert.deepEqual(replies, ["♻️ Iva перезапущена"]);
+    });
+  });
+});
+
+test("a restart button on a record the reaper cleared never restarts", async () => {
+  runningTurn({ sessionId: "session-reaped" });
+  backdateRunStatus("session-reaped", 31 * 60_000);
+  const scheduler = recordingScheduler();
+  await withFakeSystemctl(0, async (argsLog) => {
+    await withBotApi(botOk, async () => {
+      // Жнец гоняется каждой итерацией цикла моста: он и снимает зависшую запись.
+      assert.ok((await queue.reapStaleRuns()) >= 1);
+      assert.equal(status.getChatStatus("7:")?.status, "idle");
+
+      const { resets, acks, deps } = restartDeps(scheduler);
+      assert.equal(
+        await handleControl(
+          restartTap(91, previousLifeRestartData("session-reaped")),
+          deps,
+        ),
+        true,
+      );
+
+      assert.deepEqual(acks, [["cq-91", "Этот ход уже завершился."]]);
+      assert.equal(scheduler.keys().length, 0);
+      assert.equal(systemctlCalls(argsLog), "");
+      assert.deepEqual(resets, []);
     });
   });
 });

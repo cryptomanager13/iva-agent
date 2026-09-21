@@ -17,6 +17,7 @@ import {
   stopConfirmSeconds,
   stopNotStoppedText,
   stopOutcomeText,
+  stopRestartAlreadyText,
   stopRestartButtonText,
   stopRestartFailedText,
   stopRestartingText,
@@ -790,7 +791,8 @@ async function sendStopNotStopped({
   sessionId: string;
   io: ControlIo;
 }): Promise<number | null> {
-  const text = stopNotStoppedText(stopConfirmSeconds());
+  // Число в тексте — то же окно, которое фон только что отработал.
+  const text = stopNotStoppedText(stopConfirmSeconds(io.confirmTimeoutMs));
   if (!isPrivateTelegramChat(chat)) {
     await io
       .replyImpl(chatId, text)
@@ -899,9 +901,12 @@ async function handleStopRestartTap({ update, callback, io }: CallbackContext) {
     return true;
   }
   const scheduled = io.scheduleImpl(`stop-restart:${key}`, () =>
-    restartStoppedTurn({ update, key, chatId, messageId, io }),
+    restartStoppedTurn({ update, key, chatId, messageId, token, io }),
   );
-  await io.ackImpl(callback.id, scheduled ? undefined : stopRestartingText());
+  await io.ackImpl(
+    callback.id,
+    scheduled ? stopRestartingText() : stopRestartAlreadyText(),
+  );
   return true;
 }
 
@@ -925,15 +930,29 @@ async function restartStoppedTurn({
   key,
   chatId,
   messageId,
+  token,
   io,
 }: {
   update: TelegramUpdate;
   key: string;
   chatId: number;
   messageId: number | undefined;
+  token: string;
   io: ControlIo;
 }): Promise<void> {
   if (typeof messageId === "number") await deleteStopMessage(chatId, messageId);
+  // Пока убирали кнопку, подтверждение могло прийти: ход уже остановлен, и рестарт зря оборвал
+  // бы работу в остальных чатах. Решение принимает та же запись, что и в обработчике тапа, и
+  // спрашиваем её именно до сброса: после сброса запись обнуляет он сам, и «остановлен» в ней
+  // перестало бы что-либо значить.
+  if (!stopTurnStillWaiting(key, token)) {
+    await io
+      .replyImpl(chatId, stopAlreadyStoppedText())
+      .catch((error: unknown) =>
+        log("stop restart reply failed:", errorMessage(error)),
+      );
+    return;
+  }
   try {
     const target = resetTargetFor(update, key);
     if (target !== null) {

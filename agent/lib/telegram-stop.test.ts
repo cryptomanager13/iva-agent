@@ -101,7 +101,8 @@ test("an accepted stop that never confirms tells the chat honestly", async () =>
   // «Принято» — ещё не остановка: ответ на колбэк про отмену, честный текст — про факт.
   assert.equal(outcome, "requested");
   assert.deepEqual(acks, ["Останавливаю…"]);
-  assert.deepEqual(notices, ["Ход не остановился за 60 с."]);
+  // Окно теста — 20 мс: текст называет округлённое окно, а не константу по умолчанию.
+  assert.deepEqual(notices, ["Ход не остановился за 1 с."]);
 });
 
 test("a silent cancel route is answered like a slow one and still waits", async () => {
@@ -117,7 +118,7 @@ test("a silent cancel route is answered like a slow one and still waits", async 
 
   assert.equal(outcome, "unresponsive");
   assert.deepEqual(acks, ["Останавливаю…"]);
-  assert.deepEqual(notices, ["Ход не остановился за 60 с."]);
+  assert.deepEqual(notices, ["Ход не остановился за 1 с."]);
 });
 
 test("a turn that stops inside the window needs no honest text", async () => {
