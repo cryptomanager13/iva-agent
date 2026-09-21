@@ -858,3 +858,35 @@ test("нечего коммитить: коммита нет, журнал мо�
   assert.match(statusAll(vault), /^A {2}owner-staged\.md$/mu);
   assert.equal(readFileSync(file, "utf8"), "текст\n");
 });
+
+// Git на VPS с русской локалью отвечает по-русски, а шов узнаёт «нечего коммитить» и занятый
+// индекс по английскому тексту: язык сообщений у вызовов шва свой, какой бы ни был у процесса.
+test("окружение git: свой язык сообщений, буквальные пути и ни одной чужой GIT_*", async () => {
+  const seam = (await import(
+    join(REPO, "agent", "lib", "vault-commit.ts")
+  )) as typeof import("../agent/lib/vault-commit.ts");
+  const env = seam.gitEnv({
+    PATH: "/usr/bin",
+    HOME: "/home/iva",
+    LANG: "ru_RU.UTF-8",
+    LANGUAGE: "ru",
+    LC_ALL: "ru_RU.UTF-8",
+    LC_MESSAGES: "ru_RU.UTF-8",
+    GIT_DIR: "/чужой/.git",
+    GIT_INDEX_FILE: "/чужой/.git/index",
+    GIT_LITERAL_PATHSPECS: "0",
+    SECRET_TOKEN: "x",
+  });
+  assert.equal(env.LC_ALL, "C");
+  assert.equal(env.LANGUAGE, "C");
+  assert.equal(env.GIT_LITERAL_PATHSPECS, "1");
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.HOME, "/home/iva");
+  assert.deepEqual(
+    Object.keys(env).filter(
+      (name) => name.startsWith("GIT_") && name !== "GIT_LITERAL_PATHSPECS",
+    ),
+    [],
+  );
+  assert.equal("SECRET_TOKEN" in env, false);
+});

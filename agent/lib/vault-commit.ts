@@ -51,13 +51,17 @@ const GIT_ENV_KEEP =
   /^(?:PATH|HOME|TMPDIR|TMP|TEMP|USERPROFILE|SystemRoot|ComSpec|PATHEXT|LANG|LANGUAGE|TZ|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM)$|^LC_/u;
 
 /** `GIT_LITERAL_PATHSPECS` шов ставит сам: без него имя файла с `*`, `?` или `[` становится
- * глобом и забирает в коммит соседние файлы владельца. */
-function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { GIT_LITERAL_PATHSPECS: "1" };
-  for (const [name, value] of Object.entries(process.env)) {
+ * глобом и забирает в коммит соседние файлы владельца. Язык сообщений git - тоже свой: шов
+ * узнаёт занятый индекс и «нечего коммитить» по английскому тексту, а на VPS с русской
+ * локалью git отвечает по-русски. */
+export function gitEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(source)) {
     if (value !== undefined && GIT_ENV_KEEP.test(name)) env[name] = value;
   }
-  return env;
+  return { ...env, GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C", LANGUAGE: "C" };
 }
 
 /** Занятый индекс - это именно `File exists`; отказ по правам печатает тот же
