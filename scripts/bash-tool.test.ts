@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { getEventListeners } from "node:events";
 import { z } from "zod";
 
 const {
@@ -29,12 +30,21 @@ type BashResult = {
   cwd?: string;
   truncated?: boolean;
   timedOut?: boolean;
+  cancelled?: boolean;
 };
 
-async function executeBash(input: BashInput): Promise<BashResult> {
+type BashTurnContext = { abortSignal: AbortSignal };
+
+async function executeBash(
+  input: BashInput,
+  ctx?: BashTurnContext,
+): Promise<BashResult> {
   return await (
-    bash.execute as unknown as (input: BashInput) => Promise<BashResult>
-  )(input);
+    bash.execute as unknown as (
+      input: BashInput,
+      ctx?: BashTurnContext,
+    ) => Promise<BashResult>
+  )(input, ctx);
 }
 
 const inputSchema = bash.inputSchema;
@@ -107,6 +117,50 @@ async function waitForPid(file: string, timeoutMs = 500): Promise<number> {
     await delay(10);
   }
   assert.fail(`child did not write its PID to ${file}`);
+}
+
+// Собственная группа команды проверяется отрицательным PID: так тест видит
+// именно тот периметр, который обязан умереть, а не один корневой процесс.
+function isGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error: unknown) {
+    if (
+      error !== null &&
+      (typeof error === "object" || typeof error === "function") &&
+      "code" in error &&
+      error.code === "ESRCH"
+    )
+      return false;
+    throw error;
+  }
+}
+
+// Дети корневого shell нужны ДО убийства группы: после её смерти они
+// переподчиняются init, и найти их по родителю уже нечем.
+function pidsWithParent(parentPid: number): number[] {
+  const result = spawnSync("pgrep", ["-P", String(parentPid)], {
+    encoding: "utf8",
+  });
+  return (result.stdout ?? "")
+    .split("\n")
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+}
+
+async function waitForChildren(
+  parentPid: number,
+  count: number,
+  timeoutMs = 2_000,
+): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pids = pidsWithParent(parentPid);
+    if (pids.length >= count) return pids;
+    await delay(10);
+  }
+  assert.fail(`root shell ${parentPid} did not start ${count} children`);
 }
 
 async function waitUntilGone(pid: number, timeoutMs: number): Promise<boolean> {
@@ -369,6 +423,11 @@ test("worker initialization failure falls back without orphaning the child group
       "main-thread deadline fallback did not settle after Worker init failure",
     );
     assert.equal(result.timedOut, true);
+    // Причина снятого Worker доходит до исхода, а не теряется в catch.
+    assert.match(
+      result.stderr,
+      /deadline worker не поднялся: injected Worker initialization failure/,
+    );
     assert.equal(await waitUntilGone(pid, 1_500), true);
   } finally {
     pid ??= readPid(pidFile);
@@ -788,6 +847,278 @@ test("a fake-manager process outside the PGID remains outside bash cleanup", asy
     stopManager();
     pid ??= readPid(pidFile);
     killIfAlive(pid, "SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── отмена хода (ctx.abortSignal) ────────────────────────────────────────────
+// Стоп и steer обрывают запрос к модели, а группа процессов команды жила до
+// собственного timeoutMs. Эти тесты держат обратное: abort убивает группу сразу
+// и отличим от таймаута.
+
+test("an aborted turn kills the whole process group within two seconds", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-group-"));
+  const pidFile = join(dir, "shell.pid");
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const execution = executeBash(
+    {
+      command: `printf '%s\\n' "$$" > ${shellQuote(pidFile)}; sleep 300`,
+      // Десять минут: без подписки на abort вызов висел бы ровно столько.
+      timeoutMs: 600_000,
+    },
+    { abortSignal: signal },
+  );
+  let pid: number | null = null;
+  try {
+    pid = await waitForPid(pidFile);
+    controller.abort();
+    const result = await within(
+      execution,
+      2_000,
+      "abort did not settle the bash call within two seconds",
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(result.timedOut, undefined);
+    assert.equal(isAlive(pid), false, `shell PID ${pid} survived the abort`);
+    assert.equal(
+      isGroupAlive(pid),
+      false,
+      `process group ${pid} survived the abort`,
+    );
+    assert.equal(
+      getEventListeners(signal, "abort").length,
+      0,
+      "bash leaked an abort listener after an aborted call",
+    );
+  } finally {
+    pid ??= readPid(pidFile);
+    killIfAlive(pid, "SIGKILL", true);
+    await within(
+      execution.catch(() => {}),
+      1_000,
+      "aborted bash call did not settle after test cleanup",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an aborted turn kills a child that ignores SIGTERM", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-term-"));
+  const pidFile = join(dir, "child.pid");
+  const controller = new AbortController();
+  const execution = executeBash(
+    { command: termResistantCommand(pidFile), timeoutMs: 600_000 },
+    { abortSignal: controller.signal },
+  );
+  let pid: number | null = null;
+  try {
+    pid = await waitForPid(pidFile);
+    controller.abort();
+    const result = await within(
+      execution,
+      2_000,
+      "abort did not settle a TERM-resistant command",
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(result.timedOut, undefined);
+    assert.equal(
+      await waitUntilGone(pid, 1_500),
+      true,
+      `TERM-resistant PID ${pid} survived the abort`,
+    );
+    assert.equal(isGroupAlive(pid), false);
+  } finally {
+    pid ??= readPid(pidFile);
+    killIfAlive(pid, "SIGKILL", true);
+    await within(
+      execution.catch(() => {}),
+      1_000,
+      "aborted bash call did not settle after test cleanup",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an aborted turn kills the shell's grandchildren", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-grandchildren-"));
+  const pidFile = join(dir, "shell.pid");
+  // Форма из спеки: два фоновых сна и wait. Она же проходит гвард T2 -
+  // длинный sleep судится только тогда, когда за ним идёт полезная команда.
+  const inner =
+    `printf '%s\\n' "$$" > ${shellQuote(pidFile)}; ` +
+    "sleep 300 & sleep 300 & wait";
+  const controller = new AbortController();
+  const execution = executeBash(
+    { command: `sh -c ${shellQuote(inner)}`, timeoutMs: 600_000 },
+    { abortSignal: controller.signal },
+  );
+  let rootPid: number | null = null;
+  let children: number[] = [];
+  try {
+    rootPid = await waitForPid(pidFile);
+    children = await waitForChildren(rootPid, 2);
+    controller.abort();
+    const result = await within(
+      execution,
+      2_000,
+      "abort did not settle a command with grandchildren",
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(result.timedOut, undefined);
+    for (const pid of children) {
+      assert.equal(
+        await waitUntilGone(pid, 1_500),
+        true,
+        `grandchild PID ${pid} survived the abort`,
+      );
+    }
+    assert.equal(isGroupAlive(rootPid), false);
+  } finally {
+    rootPid ??= readPid(pidFile);
+    for (const pid of children) killIfAlive(pid, "SIGKILL");
+    killIfAlive(rootPid, "SIGKILL", true);
+    await within(
+      execution.catch(() => {}),
+      1_000,
+      "aborted bash call did not settle after test cleanup",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an already aborted turn does not start the command at all", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-before-start-"));
+  const marker = join(dir, "spawned");
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await executeBash(
+      { command: `: > ${shellQuote(marker)}`, timeoutMs: 1_000 },
+      { abortSignal: controller.signal },
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(result.timedOut, undefined);
+    assert.equal(result.exitCode, 1);
+    assert.equal(
+      existsSync(marker),
+      false,
+      "an aborted turn still spawned the command",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a finished command keeps its result and leaves no abort listener behind", async () => {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const result = await executeBash(
+    { command: "printf done", timeoutMs: 1_000 },
+    { abortSignal: signal },
+  );
+  assert.equal(result.stdout, "done");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.cancelled, undefined);
+  assert.equal(result.timedOut, undefined);
+  assert.equal(
+    getEventListeners(signal, "abort").length,
+    0,
+    "bash leaked an abort listener after a normal exit",
+  );
+  // Отмена после естественного завершения не переписывает уже отданный результат.
+  controller.abort();
+  assert.equal(result.cancelled, undefined);
+  assert.equal(getEventListeners(signal, "abort").length, 0);
+});
+
+test("one shared abort signal cancels concurrent calls without leaking listeners", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-shared-"));
+  const pidFiles = [join(dir, "first.pid"), join(dir, "second.pid")];
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const executions = pidFiles.map((pidFile) =>
+    executeBash(
+      {
+        command: `printf '%s\\n' "$$" > ${shellQuote(pidFile)}; sleep 300`,
+        timeoutMs: 600_000,
+      },
+      { abortSignal: signal },
+    ),
+  );
+  let pids: number[] = [];
+  try {
+    pids = await Promise.all(pidFiles.map((file) => waitForPid(file)));
+    // Ход один, значит сигнал один: обе команды подписаны на него.
+    assert.equal(getEventListeners(signal, "abort").length, 2);
+    controller.abort();
+    const results = await within(
+      Promise.all(executions),
+      2_000,
+      "a shared abort did not settle every concurrent call",
+    );
+    for (const result of results) {
+      assert.equal(result.cancelled, true);
+      assert.equal(result.timedOut, undefined);
+    }
+    for (const pid of pids) {
+      assert.equal(isGroupAlive(pid), false);
+    }
+    assert.equal(
+      getEventListeners(signal, "abort").length,
+      0,
+      "concurrent calls leaked abort listeners",
+    );
+  } finally {
+    for (const pid of pids) killIfAlive(pid, "SIGKILL", true);
+    await within(
+      Promise.all(executions.map((execution) => execution.catch(() => {}))),
+      1_000,
+      "concurrent aborted bash calls did not settle after test cleanup",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an aborted turn does not give the command a SIGTERM grace period", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iva-bash-abort-nograce-"));
+  const pidFile = join(dir, "shell.pid");
+  const termSeen = join(dir, "term-seen");
+  // Команда, которая на вежливый SIGTERM успела бы оставить след: отмена такого
+  // шанса не даёт — первым в группу уходит SIGKILL.
+  const command =
+    `trap 'printf term > ${shellQuote(termSeen)}' TERM; ` +
+    `printf '%s\\n' "$$" > ${shellQuote(pidFile)}; ` +
+    "sleep 300 & wait";
+  const controller = new AbortController();
+  const execution = executeBash(
+    { command, timeoutMs: 600_000 },
+    { abortSignal: controller.signal },
+  );
+  let pid: number | null = null;
+  try {
+    pid = await waitForPid(pidFile);
+    controller.abort();
+    const result = await within(
+      execution,
+      2_000,
+      "abort did not settle a command that traps SIGTERM",
+    );
+    assert.equal(result.cancelled, true);
+    assert.equal(
+      existsSync(termSeen),
+      false,
+      "abort sent SIGTERM before SIGKILL",
+    );
+    assert.equal(isGroupAlive(pid), false);
+  } finally {
+    pid ??= readPid(pidFile);
+    killIfAlive(pid, "SIGKILL", true);
+    await within(
+      execution.catch(() => {}),
+      1_000,
+      "aborted bash call did not settle after test cleanup",
+    );
     rmSync(dir, { recursive: true, force: true });
   }
 });

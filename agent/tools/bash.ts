@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { Worker } from "node:worker_threads";
 import { selfRestartViolation } from "../lib/self-restart-guard.ts";
 import { schedulerBypassViolation } from "../lib/scheduler-bypass-guard.ts";
@@ -13,6 +14,8 @@ import { schedulerBypassViolation } from "../lib/scheduler-bypass-guard.ts";
 // Самодостаточно: импортирует только eve/tools, zod и node-builtins.
 
 const MAX_OUTPUT = 30_000; // оставляем последние ~30k символов каждого потока
+// Отмена хода и таймаут — разные исходы: модель и журнал обязаны видеть какой именно.
+const CANCELLED_NOTE = "Команда отменена: ход прерван.";
 const TERM_GRACE_MS = 400;
 const KILL_GRACE_MS = 400;
 const REAP_POLL_MS = 20;
@@ -141,6 +144,42 @@ export const deadlineWorkerRuntime = {
   },
 };
 
+type BashResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  cwd: string;
+  truncated?: boolean;
+  timedOut?: boolean;
+  cancelled?: boolean;
+};
+
+// Отменённый вызов отдаёт то, что успело накопиться, плюс явный признак отмены:
+// timedOut здесь не выставляется никогда, иначе исход не отличить от таймаута.
+function cancelledBashResult(
+  stdout: string,
+  stderr: string,
+  cwd: string,
+  truncated: boolean,
+): BashResult {
+  return {
+    stdout,
+    stderr: stderr ? `${stderr}\n${CANCELLED_NOTE}` : CANCELLED_NOTE,
+    exitCode: 1,
+    cwd,
+    truncated: truncated || undefined,
+    cancelled: true,
+  };
+}
+
+// Ход, отменённый до запуска, не спавнит процесс вовсе: явный результат вместо спавна.
+function cancelledBeforeStart(
+  signal: AbortSignal | undefined,
+  cwd: string,
+): BashResult | null {
+  return signal?.aborted ? cancelledBashResult("", "", cwd, false) : null;
+}
+
 function truncate(s: string): { text: string; truncated: boolean } {
   if (s.length <= MAX_OUTPUT) return { text: s, truncated: false };
   return { text: s.slice(s.length - MAX_OUTPUT), truncated: true };
@@ -222,9 +261,18 @@ async function waitForGroupExit(
   return !processGroupExists(groupPid);
 }
 
-async function reapProcessGroup(groupPid: number): Promise<void> {
-  if (!signalProcessGroup(groupPid, "SIGTERM")) return;
-  if (await waitForGroupExit(groupPid, TERM_GRACE_MS)) return;
+async function reapProcessGroup(
+  groupPid: number,
+  { immediate = false }: { immediate?: boolean } = {},
+): Promise<void> {
+  // Отмена хода не уговаривает: первый сигнал группе — сразу SIGKILL, без паузы на SIGTERM.
+  // У таймаута первым идёт терпеливый SIGTERM: обычной команде дают убраться самой.
+  const first = immediate ? "SIGKILL" : "SIGTERM";
+  const firstGrace = immediate ? KILL_GRACE_MS : TERM_GRACE_MS;
+  if (!signalProcessGroup(groupPid, first)) return;
+  if (await waitForGroupExit(groupPid, firstGrace)) return;
+  // Одна рассылка — не гарантия: процесс мог появиться в группе уже во время неё
+  // (fork ровно в момент сигнала). Повторный SIGKILL ловит такого, когда форкать уже некому.
   signalProcessGroup(groupPid, "SIGKILL");
   await waitForGroupExit(groupPid, KILL_GRACE_MS);
 }
@@ -250,6 +298,321 @@ export function normalizeCwd(cwd?: string): { cwd?: string; error?: string } {
     };
   }
   return { cwd: resolved };
+}
+
+// Состояние одного запуска команды. Фазы жизни ниже — обычные функции над ним:
+// раньше это были замыкания одного Promise, и каждая тянула весь вызов целиком.
+type CommandRun = {
+  resolve: (result: BashResult) => void;
+  runCwd: string;
+  timeout: number;
+  abortSignal: AbortSignal | undefined;
+  onAbort: () => void;
+  childPid: number;
+  childStdout: Readable;
+  childStderr: Readable;
+  deadlineNs: bigint;
+  deadlineState: Int32Array;
+  stdout: string;
+  stderr: string;
+  outputTruncated: boolean;
+  exitCode: number;
+  timedOut: boolean;
+  cancelled: boolean;
+  commandExited: boolean;
+  pipesDone: boolean;
+  cleanupDone: boolean;
+  settled: boolean;
+  cleanup: Promise<void> | null;
+  pipeDrainTimer: ReturnType<typeof setTimeout> | undefined;
+  timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  workerFailure: string | null;
+  initialized: boolean;
+};
+
+function spawnFailureResult(error: unknown, cwd: string): BashResult {
+  const detail = error instanceof Error ? error.message : String(error);
+  const failure = truncate(`Не удалось запустить shell: ${detail}`);
+  return {
+    stdout: "",
+    stderr: failure.text,
+    exitCode: 1,
+    cwd,
+    truncated: failure.truncated || undefined,
+  };
+}
+
+function appendChunk(
+  run: CommandRun,
+  chunk: string,
+  stream: "stdout" | "stderr",
+): void {
+  const next = truncate(run[stream] + chunk);
+  if (next.truncated) run.outputTruncated = true;
+  run[stream] = next.text;
+}
+
+function appendNotice(run: CommandRun, text: string): void {
+  appendChunk(run, `${run.stderr ? "\n" : ""}${text}`, "stderr");
+}
+
+function cancelDeadline(run: CommandRun): void {
+  if (
+    Atomics.compareExchange(
+      run.deadlineState,
+      0,
+      DEADLINE_ARMED,
+      DEADLINE_CANCELLED,
+    ) === DEADLINE_ARMED
+  ) {
+    Atomics.notify(run.deadlineState, 0);
+  }
+}
+
+// Дедлайн снят вместе с наблюдением за ним: дальше исход решает только сама команда.
+function observeDeadlineExpiry(run: CommandRun): void {
+  cancelDeadline(run);
+  run.timedOut ||= Atomics.load(run.deadlineState, 0) === DEADLINE_EXPIRED;
+}
+
+function buildRunResult(run: CommandRun): BashResult {
+  if (run.cancelled)
+    return cancelledBashResult(
+      run.stdout,
+      run.stderr,
+      run.runCwd,
+      run.outputTruncated,
+    );
+  const deadlineResult = Atomics.load(run.deadlineState, 0);
+  run.timedOut ||= deadlineResult === DEADLINE_EXPIRED;
+  if (deadlineResult === DEADLINE_PROBE_FAILED) {
+    appendNotice(
+      run,
+      "Не удалось проверить состояние shell на дедлайне; группа процессов остановлена.",
+    );
+    run.exitCode = 1;
+  }
+  // Worker не поднялся — дедлайн держал таймер главного потока. Если он всё-таки
+  // сработал, причину видит тот, кто читает исход: тихо проглотить её нельзя.
+  if (
+    run.workerFailure &&
+    (run.timedOut || deadlineResult === DEADLINE_PROBE_FAILED)
+  )
+    appendNotice(run, `deadline worker не поднялся: ${run.workerFailure}`);
+  return {
+    stdout: run.stdout,
+    stderr: run.stderr,
+    exitCode: run.exitCode,
+    cwd: run.runCwd,
+    truncated: run.outputTruncated || undefined,
+    timedOut: run.timedOut || undefined,
+  };
+}
+
+function finishRun(run: CommandRun): void {
+  if (run.settled || !run.commandExited || !run.pipesDone || !run.cleanupDone)
+    return;
+  run.settled = true;
+  // Слушатель живёт ровно столько, сколько живёт вызов.
+  run.abortSignal?.removeEventListener("abort", run.onAbort);
+  if (run.timeoutTimer) clearTimeout(run.timeoutTimer);
+  if (run.pipeDrainTimer) clearTimeout(run.pipeDrainTimer);
+  run.resolve(buildRunResult(run));
+}
+
+function startCleanup(run: CommandRun, immediate = false): Promise<void> {
+  if (run.cleanup) return run.cleanup;
+  run.cleanup = reapProcessGroup(run.childPid, { immediate })
+    .catch(() => {})
+    .finally(() => {
+      run.cleanupDone = true;
+      if (!run.pipesDone) {
+        run.pipeDrainTimer = setTimeout(() => {
+          run.childStdout.destroy();
+          run.childStderr.destroy();
+          run.pipesDone = true;
+          finishRun(run);
+        }, PIPE_DRAIN_GRACE_MS);
+      }
+      finishRun(run);
+    });
+  return run.cleanup;
+}
+
+// Отмена хода: потолок времени команды больше не при чём, группу убивает именно стоп.
+// Корень, который успел выйти сам, задним числом отменённым не считается — иначе
+// обычный результат переписывался бы на "cancelled" после каждого быстрого выхода.
+function abortRun(run: CommandRun): void {
+  if (run.commandExited) return;
+  run.cancelled = true;
+  cancelDeadline(run);
+  void startCleanup(run, true).then(() => finishRun(run));
+}
+
+function settleOnExit(run: CommandRun, code: number | null): void {
+  run.commandExited = true;
+  run.exitCode = typeof code === "number" ? code : 1;
+  observeDeadlineExpiry(run);
+  void startCleanup(run).then(() => finishRun(run));
+}
+
+function settleOnClose(run: CommandRun): void {
+  run.pipesDone = true;
+  if (run.pipeDrainTimer) clearTimeout(run.pipeDrainTimer);
+  observeDeadlineExpiry(run);
+  void startCleanup(run);
+  finishRun(run);
+}
+
+function handleChildError(run: CommandRun, error: Error): void {
+  if (!run.initialized) {
+    run.resolve(spawnFailureResult(error, run.runCwd));
+    return;
+  }
+  appendChunk(run, error.message, "stderr");
+  run.commandExited = true;
+  run.cleanupDone = true;
+  run.pipesDone = true;
+  cancelDeadline(run);
+  finishRun(run);
+}
+
+function markDeadlineProbeFailed(run: CommandRun): void {
+  if (
+    Atomics.compareExchange(
+      run.deadlineState,
+      0,
+      DEADLINE_ARMED,
+      DEADLINE_PROBE_FAILED,
+    ) === DEADLINE_ARMED
+  ) {
+    Atomics.notify(run.deadlineState, 0);
+  }
+}
+
+function markDeadlineExpired(run: CommandRun): boolean {
+  if (
+    Atomics.compareExchange(
+      run.deadlineState,
+      0,
+      DEADLINE_ARMED,
+      DEADLINE_EXPIRED,
+    ) !== DEADLINE_ARMED
+  )
+    return false;
+  Atomics.notify(run.deadlineState, 0);
+  return true;
+}
+
+function enforceDeadline(run: CommandRun): void {
+  const remainingNs = run.deadlineNs - process.hrtime.bigint();
+  if (remainingNs > 0n) {
+    run.timeoutTimer = setTimeout(
+      () => enforceDeadline(run),
+      Number((remainingNs + 999_999n) / 1_000_000n),
+    );
+    return;
+  }
+  if (run.commandExited) return;
+  const deadlineResult = Atomics.load(run.deadlineState, 0);
+  if (deadlineResult === DEADLINE_EXPIRED) {
+    run.timedOut = true;
+    void startCleanup(run);
+    return;
+  }
+  if (deadlineResult === DEADLINE_PROBE_FAILED) {
+    void startCleanup(run);
+    return;
+  }
+  const observedRootState = rootProcessState(run.childPid);
+  if (observedRootState === "exited") {
+    cancelDeadline(run);
+    void startCleanup(run);
+    return;
+  }
+  if (observedRootState === "unknown") {
+    markDeadlineProbeFailed(run);
+    void startCleanup(run);
+    return;
+  }
+  if (markDeadlineExpired(run)) {
+    run.timedOut = true;
+    void startCleanup(run);
+  }
+}
+
+// A per-call Worker owns the deadline signal: setTimeout shares the agent's event loop,
+// and a synchronous tool or native call can block that loop past the deadline.
+function startDeadlineWorker(run: CommandRun): void {
+  try {
+    const deadlineWorker = deadlineWorkerRuntime.create({
+      eval: true,
+      workerData: {
+        state: run.deadlineState.buffer,
+        pid: run.childPid,
+        deadlineNs: run.deadlineNs,
+        termGraceMs: TERM_GRACE_MS,
+        killGraceMs: KILL_GRACE_MS,
+        pollMs: REAP_POLL_MS,
+      },
+    });
+    // An asynchronous Worker failure leaves the already-armed main-thread
+    // deadline and process lifecycle handlers in charge.
+    deadlineWorker.on("error", () => {});
+    deadlineWorker.unref();
+  } catch (error) {
+    // Исчерпание ресурсов: вместо Worker дедлайн держит таймер главного потока,
+    // пока тот отвечает. Причина не теряется — её получает исход вызова.
+    run.workerFailure = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function createCommandRun(input: {
+  resolve: (result: BashResult) => void;
+  child: ReturnType<typeof spawn>;
+  runCwd: string;
+  timeout: number;
+  abortSignal: AbortSignal | undefined;
+}): CommandRun | null {
+  const { resolve, child, runCwd, timeout, abortSignal } = input;
+  const childPid = child.pid;
+  const childStdout = child.stdout;
+  const childStderr = child.stderr;
+  if (childPid === undefined || !childStdout || !childStderr) return null;
+  const run: CommandRun = {
+    resolve,
+    runCwd,
+    timeout,
+    abortSignal,
+    onAbort: () => abortRun(run),
+    childPid,
+    childStdout,
+    childStderr,
+    deadlineNs: process.hrtime.bigint() + BigInt(timeout) * 1_000_000n,
+    deadlineState: new Int32Array(
+      new SharedArrayBuffer(2 * Int32Array.BYTES_PER_ELEMENT),
+    ),
+    stdout: "",
+    stderr: "",
+    outputTruncated: false,
+    exitCode: 1,
+    timedOut: false,
+    cancelled: false,
+    commandExited: false,
+    pipesDone: false,
+    cleanupDone: false,
+    settled: false,
+    cleanup: null,
+    pipeDrainTimer: undefined,
+    timeoutTimer: undefined,
+    workerFailure: null,
+    initialized: false,
+  };
+  childStdout.setEncoding("utf8");
+  childStderr.setEncoding("utf8");
+  childStdout.on("data", (chunk: string) => appendChunk(run, chunk, "stdout"));
+  childStderr.on("data", (chunk: string) => appendChunk(run, chunk, "stderr"));
+  return run;
 }
 
 export default defineTool({
@@ -280,7 +643,7 @@ export default defineTool({
         `Таймаут, мс: ${MIN_TIMEOUT_MS}…${MAX_TIMEOUT_MS} (по умолчанию 120000)`,
       ),
   }),
-  async execute({ command, cwd, timeoutMs }) {
+  async execute({ command, cwd, timeoutMs }, ctx) {
     // Самоубийственные команды режем ДО запуска: рестарт собственного сервиса посреди
     // хода оставляет ход в running навсегда, сервис уходит в цикл переигрываний, а бот
     // немеет с HookConflictError (issue #68). Промпт-запрета мало — модели его игнорируют.
@@ -308,25 +671,15 @@ export default defineTool({
     const norm = normalizeCwd(cwd);
     if (norm.error) return { stdout: "", stderr: norm.error, exitCode: 1 };
     const runCwd = norm.cwd ?? process.cwd();
-    return await new Promise<{
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-      cwd: string;
-      truncated?: boolean;
-      timedOut?: boolean;
-    }>((resolve) => {
-      const resolveSpawnFailure = (error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error);
-        const failure = truncate(`Не удалось запустить shell: ${detail}`);
-        resolve({
-          stdout: "",
-          stderr: failure.text,
-          exitCode: 1,
-          cwd: runCwd,
-          truncated: failure.truncated || undefined,
-        });
-      };
+    return await new Promise<BashResult>((resolve) => {
+      const abortSignal = ctx?.abortSignal;
+      // Ход может быть отменён и до этой команды: тогда процесс не запускаем вовсе,
+      // а не убиваем уже стартовавший.
+      const preAborted = cancelledBeforeStart(abortSignal, runCwd);
+      if (preAborted) {
+        resolve(preAborted);
+        return;
+      }
       let child: ReturnType<typeof spawn>;
       try {
         child = spawn(command, {
@@ -336,206 +689,36 @@ export default defineTool({
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (error) {
-        resolveSpawnFailure(error);
+        resolve(spawnFailureResult(error, runCwd));
         return;
       }
-      let stdout = "";
-      let stderr = "";
-      let outputTruncated = false;
-      let exitCode = 1;
-      let timedOut = false;
-      let commandExited = false;
-      let pipesDone = false;
-      let cleanupDone = false;
-      let settled = false;
-      let cleanup: Promise<void> | null = null;
-      let pipeDrainTimer: ReturnType<typeof setTimeout> | undefined;
-      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-      let initialized = false;
-
-      child.once("error", (error) => {
-        if (!initialized) {
-          resolveSpawnFailure(error);
-          return;
-        }
-        stderr = append(stderr, error.message);
-        commandExited = true;
-        cleanupDone = true;
-        pipesDone = true;
-        cancelDeadline();
-        finish();
+      const run = createCommandRun({
+        resolve,
+        child,
+        runCwd,
+        timeout,
+        abortSignal,
       });
-
-      const childPid = child.pid;
-      const childStdout = child.stdout;
-      const childStderr = child.stderr;
-      if (childPid === undefined || !childStdout || !childStderr) return;
-
-      const deadlineNs = process.hrtime.bigint() + BigInt(timeout) * 1_000_000n;
-      const deadlineState = new Int32Array(
-        new SharedArrayBuffer(2 * Int32Array.BYTES_PER_ELEMENT),
-      );
-
-      const append = (current: string, chunk: string): string => {
-        const next = truncate(current + chunk);
-        if (next.truncated) outputTruncated = true;
-        return next.text;
-      };
-      childStdout.setEncoding("utf8");
-      childStderr.setEncoding("utf8");
-      childStdout.on("data", (chunk: string) => {
-        stdout = append(stdout, chunk);
-      });
-      childStderr.on("data", (chunk: string) => {
-        stderr = append(stderr, chunk);
-      });
-
-      const finish = () => {
-        if (settled || !commandExited || !pipesDone || !cleanupDone) return;
-        settled = true;
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-        if (pipeDrainTimer) clearTimeout(pipeDrainTimer);
-        const deadlineResult = Atomics.load(deadlineState, 0);
-        timedOut ||= deadlineResult === DEADLINE_EXPIRED;
-        if (deadlineResult === DEADLINE_PROBE_FAILED) {
-          stderr = append(
-            stderr,
-            `${stderr ? "\n" : ""}Не удалось проверить состояние shell на дедлайне; ` +
-              "группа процессов остановлена.",
-          );
-          exitCode = 1;
-        }
-        resolve({
-          stdout,
-          stderr,
-          exitCode,
-          cwd: runCwd,
-          truncated: outputTruncated || undefined,
-          timedOut: timedOut || undefined,
-        });
-      };
-      const startCleanup = () => {
-        if (cleanup) return cleanup;
-        cleanup = reapProcessGroup(childPid)
-          .catch(() => {})
-          .finally(() => {
-            cleanupDone = true;
-            if (!pipesDone) {
-              pipeDrainTimer = setTimeout(() => {
-                childStdout.destroy();
-                childStderr.destroy();
-                pipesDone = true;
-                finish();
-              }, PIPE_DRAIN_GRACE_MS);
-            }
-            finish();
-          });
-        return cleanup;
-      };
-      const cancelDeadline = () => {
-        if (
-          Atomics.compareExchange(
-            deadlineState,
-            0,
-            DEADLINE_ARMED,
-            DEADLINE_CANCELLED,
-          ) === DEADLINE_ARMED
-        ) {
-          Atomics.notify(deadlineState, 0);
-        }
-      };
-
-      child.once("exit", (code) => {
-        commandExited = true;
-        exitCode = typeof code === "number" ? code : 1;
-        cancelDeadline();
-        timedOut ||= Atomics.load(deadlineState, 0) === DEADLINE_EXPIRED;
-        void startCleanup().then(finish);
-      });
-      child.once("close", () => {
-        pipesDone = true;
-        if (pipeDrainTimer) clearTimeout(pipeDrainTimer);
-        cancelDeadline();
-        timedOut ||= Atomics.load(deadlineState, 0) === DEADLINE_EXPIRED;
-        void startCleanup();
-        finish();
-      });
-
-      const enforceDeadline = () => {
-        const remainingNs = deadlineNs - process.hrtime.bigint();
-        if (remainingNs > 0n) {
-          timeoutTimer = setTimeout(
-            enforceDeadline,
-            Number((remainingNs + 999_999n) / 1_000_000n),
-          );
-          return;
-        }
-        if (commandExited) return;
-        const deadlineResult = Atomics.load(deadlineState, 0);
-        if (deadlineResult === DEADLINE_EXPIRED) {
-          timedOut = true;
-          void startCleanup();
-          return;
-        }
-        if (deadlineResult === DEADLINE_PROBE_FAILED) {
-          void startCleanup();
-          return;
-        }
-        const observedRootState = rootProcessState(childPid);
-        if (observedRootState === "exited") {
-          cancelDeadline();
-          void startCleanup();
-          return;
-        }
-        if (observedRootState === "unknown") {
-          if (
-            Atomics.compareExchange(
-              deadlineState,
-              0,
-              DEADLINE_ARMED,
-              DEADLINE_PROBE_FAILED,
-            ) === DEADLINE_ARMED
-          ) {
-            Atomics.notify(deadlineState, 0);
-          }
-          void startCleanup();
-          return;
-        }
-        if (
-          Atomics.compareExchange(
-            deadlineState,
-            0,
-            DEADLINE_ARMED,
-            DEADLINE_EXPIRED,
-          ) === DEADLINE_ARMED
-        ) {
-          Atomics.notify(deadlineState, 0);
-          timedOut = true;
-          void startCleanup();
-        }
-      };
-      initialized = true;
-      timeoutTimer = setTimeout(enforceDeadline, timeout);
-      try {
-        const deadlineWorker = deadlineWorkerRuntime.create({
-          eval: true,
-          workerData: {
-            state: deadlineState.buffer,
-            pid: childPid,
-            deadlineNs,
-            termGraceMs: TERM_GRACE_MS,
-            killGraceMs: KILL_GRACE_MS,
-            pollMs: REAP_POLL_MS,
-          },
-        });
-        // An asynchronous Worker failure leaves the already-armed main-thread
-        // deadline and process lifecycle handlers in charge.
-        deadlineWorker.on("error", () => {});
-        deadlineWorker.unref();
-      } catch {
-        // Resource exhaustion can make Worker construction throw synchronously.
-        // The main-thread timer remains a bounded fallback while its loop is responsive.
+      if (!run) {
+        // Спавн не отдал ни PID, ни потоков (EMFILE и родственное): о сбое сообщает
+        // асинхронное событие error, и его обязан кто-то слушать.
+        child.once("error", (error) =>
+          resolve(spawnFailureResult(error, runCwd)),
+        );
+        return;
       }
+      child.once("error", (error) => handleChildError(run, error));
+      child.once("exit", (code) => settleOnExit(run, code));
+      child.once("close", () => settleOnClose(run));
+      run.initialized = true;
+      run.timeoutTimer = setTimeout(() => enforceDeadline(run), timeout);
+      if (abortSignal) {
+        // Ход мог быть отменён между проверкой выше и этой подпиской:
+        // addEventListener на уже отменённом сигнале не сработает.
+        abortSignal.addEventListener("abort", run.onAbort, { once: true });
+        if (abortSignal.aborted) run.onAbort();
+      }
+      startDeadlineWorker(run);
     });
   },
 });
