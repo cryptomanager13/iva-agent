@@ -315,35 +315,39 @@ function resolveTarget(
   };
 }
 
-/** Запросы, которые тул решает до лока и без чтения карточки: NOOP ничего не пишет (и
- * отказывает, когда его просят заодно стереть карточку чужим полем), replace_body
- * применим только к SUPERSEDE. null — запрос надо писать. */
-function earlyOutcome(card: CardWrite): CardOutcome | null {
-  if (card.operation !== "NOOP") {
-    if (
-      card.replace_body &&
-      card.operation !== undefined &&
-      card.operation !== "SUPERSEDE"
-    ) {
-      return {
-        ok: false,
-        error: "replace_body допустим только для SUPERSEDE.",
-      };
-    }
+/** Стирание чужой карточки: replace_body называет новое тело вместо старого и потому
+ * применим только к SUPERSEDE. */
+function replaceBodyRefusal(card: CardWrite): CardOutcome | null {
+  if (!card.replace_body) return null;
+  if (card.operation === undefined || card.operation === "SUPERSEDE")
     return null;
-  }
+  return { ok: false, error: "replace_body допустим только для SUPERSEDE." };
+}
+
+/** NOOP ничего не пишет: он принимает только существующую карточку и не принимает полей,
+ * которыми её правят. */
+function noopRefusal(card: CardWrite): CardOutcome | null {
   if (card.replace_body || card.historyEntry !== undefined) {
     return {
       ok: false,
       error: "NOOP не принимает replace_body или history_entry.",
     };
   }
-  if (!existsSync(card.file)) {
-    return {
-      ok: false,
-      error: `NOOP требует существующую карточку ${card.rel}.`,
-    };
-  }
+  if (existsSync(card.file)) return null;
+  return {
+    ok: false,
+    error: `NOOP требует существующую карточку ${card.rel}.`,
+  };
+}
+
+/** Запросы, которые тул решает до лока и без чтения карточки: NOOP ничего не пишет (и
+ * отказывает, когда его просят заодно стереть карточку чужим полем), replace_body
+ * применим только к SUPERSEDE. null — запрос надо писать. */
+function earlyOutcome(card: CardWrite): CardOutcome | null {
+  const noop = card.operation === "NOOP";
+  const refusal = noop ? noopRefusal(card) : replaceBodyRefusal(card);
+  if (refusal !== null) return refusal;
+  if (!noop) return null;
   const existing = readFileSync(card.file, "utf8");
   // Написание, которому не хватит места, называется и здесь: `noop` без этого читается как
   // «записал», а в карточке его нет.
