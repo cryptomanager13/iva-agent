@@ -31,7 +31,10 @@ const IVA_IDENTITY = ["-c", "user.name=Iva", "-c", "user.email=iva@localhost"];
 const REASON_CAP = 200;
 const LOG_PREFIX = "[vault-commit]";
 
-const INDEX_BUSY = /index\.lock/u;
+/** Занятый индекс - это именно `File exists`; отказ по правам печатает тот же
+ * `index.lock` в тексте ошибки, и ждать секунду впустую на нём нечего. */
+const INDEX_BUSY =
+  /index\.lock[^\n]*File exists|Another git process seems to be running/u;
 const IDENTITY_MISSING = /tell me who you are|user\.name|user\.email/iu;
 const NOTHING_TO_COMMIT =
   /nothing to commit|nothing added to commit|no changes added to commit/u;

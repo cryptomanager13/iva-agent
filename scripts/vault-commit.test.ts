@@ -642,3 +642,19 @@ test("в журнал уходит причина отказа, а не подс
   assert.match(logged, /ignored by one of your \.gitignore files/u);
   assert.doesNotMatch(logged, /hint:/u);
 });
+test("read-only .git: причина в журнале, без пустого ожидания", async (t) => {
+  const vault = makeVault(t);
+  chmodSync(join(vault, ".git"), 0o500);
+  const started = Date.now();
+  const outcome = await journal(async () => {
+    try {
+      return await tool.card(card({ operation: "ADD", title: "Закрытый" }));
+    } finally {
+      chmodSync(join(vault, ".git"), 0o700);
+    }
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(outcome.value.ok, true, outcome.value.error);
+  assert.match(outcome.logged, /Permission denied/u);
+  assert.ok(elapsed < 700, `запись ждала ${String(elapsed)} мс без причины`);
+});
