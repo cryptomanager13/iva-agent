@@ -35,6 +35,9 @@ const INDEX_BUSY = /index\.lock/u;
 const IDENTITY_MISSING = /tell me who you are|user\.name|user\.email/iu;
 const NOTHING_TO_COMMIT =
   /nothing to commit|nothing added to commit|no changes added to commit/u;
+/** Строка-подсказка git: она идёт после причины, и в журнал уезжала именно она. */
+const HINT_LINE = /^hint:/u;
+
 export type VaultCommit =
   | {
       readonly ok: true;
@@ -48,6 +51,8 @@ type GitRun = {
   readonly code: number;
   readonly err: string;
   readonly out: string;
+  /** Убит по таймауту: `code` при этом пуст, и без флага причина выходила ложной. */
+  readonly timeout: boolean;
 };
 
 function detail(run: GitRun): string {
@@ -66,10 +71,16 @@ function git(args: readonly string[], cwd: string): Promise<GitRun> {
           code: failed ? exitCode(error) : 0,
           err: failed ? `${stderr}${error.message}` : stderr,
           out: stdout,
+          timeout: killed(error),
         });
       },
     );
   });
+}
+
+/** Убитый по таймауту процесс приходит с пустым кодом и `killed`. */
+function killed(error: unknown): boolean {
+  return (error as { killed?: unknown } | null)?.killed === true;
 }
 
 /** 127 у отсутствующего в PATH git: код выхода и «команды нет» - разные причины. */
@@ -78,14 +89,17 @@ function exitCode(error: unknown): number {
   return typeof code === "number" ? code : 127;
 }
 
-/** Причина отказа одной строкой: хвост вывода git обрезан по потолку журнала. */
+/** Причина отказа одной строкой: git печатает причину первой, а подсказку (`hint:`) после
+ * неё, поэтому берём первую строку, которая не подсказка. */
 function reasonOf(run: GitRun): string {
+  if (run.timeout)
+    return `git не ответил за ${String(GIT_TIMEOUT_MS / 1000)} с`;
   if (run.code === 127) return "git не найден в PATH";
   const lines = detail(run)
     .split("\n")
     .map((line) => line.trim())
-    .filter(Boolean);
-  return (lines.at(-1) ?? `git вышел с кодом ${String(run.code)}`).slice(
+    .filter((line) => line && !HINT_LINE.test(line));
+  return (lines[0] ?? `git вышел с кодом ${String(run.code)}`).slice(
     0,
     REASON_CAP,
   );

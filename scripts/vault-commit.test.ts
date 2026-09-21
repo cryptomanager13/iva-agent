@@ -615,3 +615,30 @@ test("vault внутри чужого репозитория: память не 
   assert.match(logged, /^\[vault-commit\] card внутри: ADD: /u);
   assert.equal(logged.split("\n").length, 1, "причина отказа - одна строка");
 });
+test("git не ответил за таймаут: причина - таймаут, а не «нет в PATH»", async (t) => {
+  const vault = makeVault(t);
+  hook(vault, "sleep 40");
+  const started = Date.now();
+  const { logged, value: result } = await journal(() =>
+    tool.card(card({ operation: "ADD", title: "Тишина" })),
+  );
+  const elapsed = Date.now() - started;
+  assert.equal(result.ok, true, result.error);
+  assert.equal(existsSync(join(vault, "cards", "notes", "тишина.md")), true);
+  assert.match(logged, /не ответил/u);
+  assert.doesNotMatch(logged, /PATH/u);
+  assert.ok(elapsed < 20_000, `запись ждала ${String(elapsed)} мс`);
+});
+test("в журнал уходит причина отказа, а не подсказка git", async (t) => {
+  const vault = makeVault(t);
+  writeFileSync(join(vault, ".gitignore"), "cards/notes/*\n");
+  sh(["add", "--", ".gitignore"], vault);
+  sh(["commit", "-q", "-m", "ignore cards"], vault);
+
+  const { logged, value: result } = await journal(() =>
+    tool.card(card({ operation: "ADD", title: "Скрытая" })),
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.match(logged, /ignored by one of your \.gitignore files/u);
+  assert.doesNotMatch(logged, /hint:/u);
+});
