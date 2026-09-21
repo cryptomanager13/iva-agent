@@ -243,6 +243,30 @@ test("регистр, ё/е, пробелы и обрамляющая пункт
   }
 });
 
+// Пример из инструкции ролловера (classification.md, SUPERSEDE) обязан проходить вызовом:
+// модель учится по примеру, а не по описанию, и пример, который тул отвергает, учит отказу.
+// Строка называет нынешнюю Compiled Truth карточки — иначе вытеснять нечего.
+test("пример history_entry из инструкции проходит вызовом", async () => {
+  const created = await add(
+    "Пример инструкции",
+    "работает в TDI Group QA",
+    "Работает в TDI Group QA.",
+  );
+  assert.equal(created.ok, true, created.error);
+  const replaced = await call({
+    body: "Ушёл из TDI Group QA.",
+    description: "ушёл из TDI Group QA",
+    history_entry: "2026-07-31: Работает в TDI Group QA",
+    operation: "SUPERSEDE",
+    tags: ["work", "promo"],
+    title: "Пример инструкции",
+    type: "project",
+  });
+  assert.equal(replaced.ok, true, replaced.error);
+  assert.equal(replaced.action, "replaced");
+  assert.match(card(created.file), /- 2026-07-31: Работает в TDI Group QA/);
+});
+
 test("цепочка UPDATE не теряет ни одного прежнего значения", async () => {
   const created = await add("Сплендор", "ведёт сплендор", "Ведёт сплендор.");
   assert.equal(created.ok, true, created.error);

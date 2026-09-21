@@ -58,8 +58,11 @@ For every fact, pick one operation:
   moved city, status flipped). Do NOT just append: **rewrite** the card's Compiled Truth
   (frontmatter field + top of the description) to the new fact — Compiled Truth is the
   living snapshot of what is true _now_ — and pass the OLD value to `write_card` through
-  `history_entry` as a single dated line, `YYYY-MM-DD: fact` (for example
-  `2026-07-31: TDI Group (held 2026-03→06)`), dated by the fact itself, not by today.
+  `history_entry` as a single dated line, `YYYY-MM-DD: fact`. The fact has to be the one
+  the card holds _now_ — `write_card` matches it against the card's body, so a card whose
+  body reads `Работает в TDI Group.` gets `2026-07-31: Работает в TDI Group`; a summary, a
+  paraphrase or extra detail in brackets is refused. The line is dated by the fact itself,
+  not by today.
   `write_card` owns the `## History` section: never write that heading into `body` yourself.
   Never pass `history_entry` with ADD, UPDATE, or NOOP. History is append-only and never edited.
   **Never leave two contradictory Compiled Truths on the same subject.**

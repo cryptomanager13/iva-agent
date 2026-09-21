@@ -84,6 +84,7 @@ const INSTRUCTIONS = resolve(
 // daily/weekly may carry a Report to Telegram; monthly/yearly are silent by design (vault
 // only). Whether the Report actually goes out is the owner's switch, read at the end of the
 // run — a toggle flipped tonight applies tonight, with no restart (ADR-0007).
+
 const REPORTS_TO_TELEGRAM: Record<Period, boolean> = {
   daily: true,
   weekly: true,
@@ -139,9 +140,10 @@ function buildPrompt(p: Period, now: string): string {
         `UPDATE (existing subject, compatible new fact), SUPERSEDE (contradicts the Compiled Truth), ` +
         `or NOOP (already known). Pass history_entry only for SUPERSEDE, never for ADD, UPDATE, or NOOP. ` +
         `On SUPERSEDE: REWRITE the card's Compiled Truth (frontmatter + top description) to the new fact ` +
-        `and pass the OLD value through history_entry as a single dated line ` +
-        `'YYYY-MM-DD: fact' (e.g. '2026-07-31: TDI Group (held 2026-03→06)') — the fact's own date, ` +
-        `not today's; write_card owns the '## History' section. ` +
+        `and pass the OLD value through history_entry as a single dated line 'YYYY-MM-DD: fact' — ` +
+        `the fact the card holds now, matched against the card's body ('Owner: Alice.' becomes ` +
+        `'2026-07-31: Owner: Alice'; a summary is refused) — the fact's own date, not today's; ` +
+        `write_card owns the '## History' section. ` +
         `A card 'body' is facts only, with no H1/H2 headings: write_card builds the card ` +
         `structure itself (the title, '## Log', '## Related', '## History') and refuses a body ` +
         `that carries a heading of its own. ` +

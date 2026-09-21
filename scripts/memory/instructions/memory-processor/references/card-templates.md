@@ -3,10 +3,14 @@
 Frontmatter per type. `type` and `status` MUST exist in
 `schema.json` → `node_types`. `description` is a search snippet
 (what/why), never a title repeat. `tags`: 2–5, lowercase, kebab-case.
-`aliases` (contact, project): the other spellings of the same name — Russian and Latin,
-transliteration, the colloquial name, a spelling the owner keeps mistyping. They are a
-search column, not a body line: a card titled `Pepsi Gamer` that the owner calls «Пепси»
-is found only through `aliases`, and the field merges across updates instead of replacing.
+`aliases` (any type; the natural fit is contact and project): the other spellings of the
+same name — Russian and Latin, transliteration, the colloquial name, a spelling the owner
+keeps mistyping. They are a search column, not a body line: a card titled `Pepsi Gamer`
+that the owner calls «Пепси» is found only through `aliases`. The field merges across
+updates instead of replacing — up to 8 names of up to 80 characters each; a name that no
+longer fits is left out and named in the tool's answer, so nothing disappears quietly.
+Spellings that differ only in case or spacing are one spelling; `е` and `ё` are two, the
+search index tells them apart.
 
 The canonical generic templates live in
 `scripts/autograph/docs/references/card-templates.md` — these are the memory-processor-specific
@@ -14,9 +18,10 @@ shapes. Nightly cards are written by `write_card`, so its contract wins over any
 hand-editing recipe you read there: the `body` you pass is plain facts with
 no H1/H2 headings — the tool builds the card's `#` title, its `## Log` and
 `## Related`, and `write_card` owns the `## History` section. Pass
-a displaced fact through `history_entry` as a single dated line, `YYYY-MM-DD: fact`
-(for example `2026-07-31: TDI Group (held 2026-03→06)`), and never write that heading
-into `body`. Never pass `history_entry` with ADD, UPDATE, or NOOP.
+a displaced fact through `history_entry` as a single dated line, `YYYY-MM-DD: fact` — the
+fact the card holds now, matched against its body (a card that reads `Работает в TDI
+Group.` gets `2026-07-31: Работает в TDI Group`) — and never write that heading into
+`body`. Never pass `history_entry` with ADD, UPDATE, or NOOP.
 
 ## note — `cards/notes/<slug>.md`
 
