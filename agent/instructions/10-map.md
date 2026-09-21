@@ -31,8 +31,11 @@ Creating a fact card (contact/project/decision/idea/note) — write it with the
 
 1. **`memory_search "<free-form query>"`** — the FIRST tool for any "what do
    I know about X / what was the name / when did we decide". It ranks cards
-   and summaries (BM25 + graph proximity), so there is no need to guess exact
-   words; it catches word forms. Read the top 1–3 hits with `read_file`.
+   and summaries (BM25 + graph proximity). Every word is matched by its
+   beginning, so a shorter stem finds longer forms while a different spelling,
+   a typo or a longer inflected form finds nothing: put every spelling of the
+   name into ONE query — Russian and Latin, transliteration, the colloquial
+   name, the base form. Read the top 1–3 hits with `read_file`.
 2. "Last week / in May" → summaries for those dates
    (`ls vault/summaries/daily/2026-06-*.md`).
 3. Not enough → follow the top hit's `[[...]]` wiki links one step (graph

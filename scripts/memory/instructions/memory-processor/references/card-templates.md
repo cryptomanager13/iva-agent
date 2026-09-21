@@ -3,6 +3,10 @@
 Frontmatter per type. `type` and `status` MUST exist in
 `schema.json` → `node_types`. `description` is a search snippet
 (what/why), never a title repeat. `tags`: 2–5, lowercase, kebab-case.
+`aliases` (contact, project): the other spellings of the same name — Russian and Latin,
+transliteration, the colloquial name, a spelling the owner keeps mistyping. They are a
+search column, not a body line: a card titled `Pepsi Gamer` that the owner calls «Пепси»
+is found only through `aliases`, and the field merges across updates instead of replacing.
 
 The canonical generic templates live in
 `scripts/autograph/docs/references/card-templates.md` — these are the memory-processor-specific
@@ -35,6 +39,7 @@ source: daily/YYYY-MM-DD.md
 type: contact
 description: >-
   [Who they are + relationship context]
+aliases: [Сайера, Splendor]
 tags: [network, role]
 status: active
 created: YYYY-MM-DD
@@ -49,6 +54,7 @@ source: daily/YYYY-MM-DD.md
 type: project
 description: >-
   [What it delivers, for whom]
+aliases: [Пепси, Pepsi Gamer]
 tags: [area, kind]
 status: active
 created: YYYY-MM-DD
@@ -92,5 +98,7 @@ headings, `write_card` refuses a body that carries any.
 - `description: "Contact"` — useless for search; write a real snippet.
 - `status: "interested"` — not in any enum; use what the schema defines.
 - `tags: []` — pick 2–5 relevant kebab-case tags.
+- `aliases: ["The Same Title"]` — repeating the title adds nothing: keep only the
+  spellings the title does not already contain (or drop the field).
 - No `## Related` — every card must link (see `linking.md`).
 - New card when an existing one covers the subject — update instead.

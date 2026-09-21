@@ -9,6 +9,8 @@ import {
   mergeCard,
   resolveCard,
   resolveOperation,
+  type CardOperation,
+  type Identity,
 } from "../lib/card-store.js";
 import { parseFrontmatterOrSkip } from "../lib/frontmatter.js";
 import { resolveTimeZone } from "../lib/timezone.js";
@@ -29,6 +31,11 @@ const CARD_TYPE_DIR: Record<string, string> = {
   note: "notes",
 };
 const DESC_CAP = 500;
+// Другие написания имени — не второй заголовок, а мостик к нему: искать по ним должно
+// хватать, но колонка meta весит как title, и десяток алиасов на карточку размывает
+// выдачу соседям. Потолки держат вход в рамках, а не «чинятся» в execute.
+const ALIAS_CAP = 80;
+const ALIASES_MAX = 8;
 
 // Статус уже лежащей карточки. Её frontmatter мог сломать владелец руками, и до
 // обёртки такая карточка вылетала исключением из тула: "посмотри карточку"
@@ -56,6 +63,23 @@ const singleLine = (label: string) =>
 const normalizeTags = (tags: string[]): string[] => [
   ...new Set(tags.map((t) => t.trim().toLowerCase().replace(/\s+/g, "-"))),
 ];
+
+/**
+ * Другое написание того же имени. Регистр и краевые пробелы не различают написания,
+ * поэтому дедуп идёт по ним, а в карточке остаётся первое написание как есть.
+ */
+const normalizeAliases = (aliases: string[]): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const alias of aliases) {
+    const value = alias.trim();
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+};
 
 /**
  * След отброшенного входа: только имена полей, без содержимого карточки — журнал не место
@@ -189,6 +213,338 @@ function today(): string {
   }).format(new Date());
 }
 
+// Результат тула: отказ с внятным текстом или записанная карточка. Один тип на все
+// ветки, чтобы execute оставался последовательностью решённых вопросов.
+type CardOutcome =
+  | { ok: false; error: string; candidates?: string[] }
+  | {
+      ok: true;
+      action: string;
+      file: string;
+      matchedBy: string;
+      status: string;
+      type: string;
+    };
+
+/** Всё, что вызов принёс в запись: разложено один раз в execute, чтобы шаги ниже брали
+ * готовое и не пересчитывали его по-своему. */
+interface CardWrite {
+  allowed: string[];
+  aliases: string[];
+  body: string;
+  confidence: "EXTRACTED" | "INFERRED" | "AMBIGUOUS" | undefined;
+  description: string;
+  domain: string | undefined;
+  /** Файл карточки на диске (абсолютный путь). */
+  file: string;
+  /** Отжатый history_entry: пробельная пустота равна отсутствующему полю. */
+  historyEntry: string | undefined;
+  /** Сырое поле схемы: ADD отбрасывает его сам и фиксирует это в журнале. */
+  history_entry: string | undefined;
+  id: Identity;
+  operation: CardOperation | undefined;
+  related: string[] | undefined;
+  /** Путь карточки относительно vault'а — то, что видит модель. */
+  rel: string;
+  replace_body: boolean | undefined;
+  status: string | undefined;
+  tags: string[];
+  title: string;
+  type: string;
+}
+
+/** Статус валидируется по схеме типа жёстко — иначе модель придумает статус, которого
+ * у типа нет. */
+function statusError(
+  type: string,
+  status: string | undefined,
+  allowed: string[],
+): string | null {
+  if (status && !allowed.includes(status)) {
+    return `Недопустимый status "${status}" для type "${type}". Разрешены: ${allowed.join(", ")}.`;
+  }
+  return null;
+}
+
+interface CardTarget {
+  dir: string;
+  file: string;
+  id: Identity;
+  rel: string;
+}
+
+/** Каталог типа и файл карточки: точный слаг или та же сущность по H1/name/aliases
+ * (легаси-файлы с латинским слагом и кириллическим заголовком). Несколько кандидатов —
+ * писать нельзя, нужен выбор человека/модели. */
+function resolveTarget(
+  type: string,
+  title: string,
+): CardTarget | { error: string; candidates: string[] } {
+  const root = resolveVaultDir(process.cwd());
+  const dir = join(root, "cards", CARD_TYPE_DIR[type]);
+  const id = resolveCard(dir, title);
+  const candidates = (id.candidates ?? []).map((f) =>
+    relative(root, f).split(sep).join("/"),
+  );
+  if (candidates.length > 1) {
+    return {
+      candidates,
+      error:
+        `Неоднозначная карточка для "${title}": подходят ${candidates.length} файлов. ` +
+        "Уточни заголовок или обнови нужный файл явно — ничего не записано.",
+    };
+  }
+  const file = id.file;
+  return {
+    dir,
+    file,
+    id,
+    rel: relative(root, file).split(sep).join("/"),
+  };
+}
+
+/** Запросы, которые тул решает до лока и без чтения карточки: NOOP ничего не пишет (и
+ * отказывает, когда его просят заодно стереть карточку чужим полем), replace_body
+ * применим только к SUPERSEDE. null — запрос надо писать. */
+function earlyOutcome(card: CardWrite): CardOutcome | null {
+  if (card.operation !== "NOOP") {
+    if (card.replace_body && card.operation !== undefined) {
+      return {
+        ok: false,
+        error: "replace_body допустим только для SUPERSEDE.",
+      };
+    }
+    return null;
+  }
+  if (card.replace_body || card.historyEntry !== undefined) {
+    return {
+      ok: false,
+      error: "NOOP не принимает replace_body или history_entry.",
+    };
+  }
+  if (!existsSync(card.file)) {
+    return {
+      ok: false,
+      error: `NOOP требует существующую карточку ${card.rel}.`,
+    };
+  }
+  return {
+    action: "noop",
+    file: card.rel,
+    matchedBy: card.id.matchedBy,
+    ok: true,
+    status: storedStatus(
+      readFileSync(card.file, "utf8"),
+      card.rel,
+      card.status ?? card.allowed[0],
+    ),
+    type: card.type,
+  };
+}
+
+/** Лок вокруг карточки: занятую карточку модель должна увидеть как внятную ошибку, а не
+ * как тихую перезапись чужой правки, а сбой записи — как «не записалось», а не как
+ * уроненный ход. Освобождение лока — в finally: его требует даже выброшенный сбой. */
+function withCardLock(
+  file: string,
+  rel: string,
+  write: () => CardOutcome,
+): CardOutcome {
+  let release: (() => void) | null = null;
+  try {
+    release = acquireLock(file);
+    return write();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: `Не удалось записать карточку ${rel}: ${detail}`,
+    };
+  } finally {
+    release?.();
+  }
+}
+
+/** history_entry там, где вытеснять нельзя или нечего (UPDATE подделывал бы append-only
+ * архив, у ADD вытесненной истины ещё нет), и карточка, которой нет. */
+function requestStateError(
+  effectiveOperation: CardOperation,
+  request: CardWrite & { existing?: string },
+): { ok: false; error: string } | null {
+  if (request.historyEntry !== undefined && effectiveOperation === "UPDATE") {
+    return { ok: false, error: "history_entry допустим только для SUPERSEDE." };
+  }
+  if (effectiveOperation === "ADD" && request.existing !== undefined) {
+    return {
+      ok: false,
+      error: `ADD отказан: карточка ${request.rel} уже существует.`,
+    };
+  }
+  if (effectiveOperation !== "ADD" && request.existing === undefined) {
+    return {
+      ok: false,
+      error: `${effectiveOperation} требует существующую карточку ${request.rel}.`,
+    };
+  }
+  return null;
+}
+
+/** SUPERSEDE обязан принести вытесненный факт - либо полем, либо (в легаси-пути
+ * replace_body без operation) секцией ## History в теле. */
+function supersedeSourceError(
+  effectiveOperation: CardOperation,
+  request: CardWrite,
+): { ok: false; error: string } | null {
+  if (
+    effectiveOperation === "SUPERSEDE" &&
+    !request.history_entry?.trim() &&
+    !isLegacyHistoryReplace(
+      request.operation,
+      request.replace_body === true,
+      request.body,
+    )
+  ) {
+    return {
+      ok: false,
+      error:
+        "SUPERSEDE требует history_entry; legacy replace_body должен содержать ## History.",
+    };
+  }
+  return null;
+}
+
+/** Отказы, которые не зависят от содержимого карточки. */
+function requestError(
+  effectiveOperation: CardOperation,
+  request: CardWrite & { existing?: string },
+): { ok: false; error: string } | null {
+  return (
+    requestStateError(effectiveOperation, request) ??
+    supersedeSourceError(effectiveOperation, request)
+  );
+}
+
+/** Запрос тула в том виде, в каком с ним работают шаги: обрезанные поля, отжатый
+ * history_entry, разрешённые статусы типа. */
+function cardWrite(
+  input: {
+    aliases?: string[];
+    body: string;
+    confidence?: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+    description: string;
+    domain?: string;
+    history_entry?: string;
+    operation?: CardOperation;
+    related?: string[];
+    replace_body?: boolean;
+    status?: string;
+    tags: string[];
+    title: string;
+    type: string;
+  },
+  target: CardTarget,
+  allowed: string[],
+): CardWrite {
+  return {
+    allowed,
+    aliases: normalizeAliases(input.aliases ?? []),
+    body: input.body,
+    confidence: input.confidence,
+    description: input.description.trim(),
+    domain: input.domain?.trim(),
+    file: target.file,
+    // Пробельная пустота history_entry (value.trim() === "") ничего не вытесняет и не
+    // подделывает History: для UPDATE и NOOP она равна отсутствующему полю — так же, как
+    // SUPERSEDE читает его через trim(). Модели, заполняющие все поля схемы, шлют "" и
+    // без этого зацикливаются на одном отказе.
+    historyEntry: input.history_entry?.trim() ? input.history_entry : undefined,
+    history_entry: input.history_entry,
+    id: target.id,
+    operation: input.operation,
+    related: input.related,
+    rel: target.rel,
+    replace_body: input.replace_body,
+    status: input.status?.trim(),
+    tags: normalizeTags(input.tags),
+    title: input.title.trim(),
+    type: input.type,
+  };
+}
+
+/** Поля, которые тул реально знает: на ADD к ним добавляется стартовый статус и
+ * confidence, на UPDATE — только названные явно, иначе лежащее значение сотрётся. */
+function cardFields(
+  card: CardWrite,
+  effectiveOperation: CardOperation,
+): {
+  type: string;
+  description: string;
+  tags: string[];
+  aliases?: string[];
+  status?: string;
+  confidence?: "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
+  domain?: string;
+} {
+  return {
+    type: card.type,
+    description: card.description,
+    tags: card.tags,
+    ...(card.aliases.length ? { aliases: card.aliases } : {}),
+    ...(effectiveOperation === "ADD"
+      ? {
+          status: card.status ?? card.allowed[0],
+          confidence: card.confidence ?? "EXTRACTED",
+        }
+      : {
+          ...(card.status !== undefined ? { status: card.status } : {}),
+          ...(card.confidence !== undefined
+            ? { confidence: card.confidence }
+            : {}),
+        }),
+    ...(card.domain ? { domain: card.domain } : {}),
+  };
+}
+
+/** Запись под локом: что лежит на диске, какая операция из этого следует, отказы по
+ * состоянию, слияние и атомарная запись. */
+function writeLockedCard(card: CardWrite): CardOutcome {
+  const existing = existsSync(card.file)
+    ? readFileSync(card.file, "utf8")
+    : undefined;
+  const effectiveOperation = resolveOperation({
+    operation: card.operation,
+    replaceBody: card.replace_body,
+    existing,
+  });
+  const rejected = requestError(effectiveOperation, { ...card, existing });
+  if (rejected !== null) return rejected;
+  const { content, action, ignoredHistoryEntry } = mergeCard({
+    body: card.body,
+    date: today(),
+    existing,
+    fields: cardFields(card, effectiveOperation),
+    initialFields: { created: today(), source: `daily/${today()}.md` },
+    // ADD получает сырое поле: пустую строку он отбрасывает сам и фиксирует это в журнале.
+    historyEntry:
+      effectiveOperation === "ADD" ? card.history_entry : card.historyEntry,
+    // Сырая operation: по её отсутствию mergeCard узнаёт легаси-путь replace_body.
+    operation: card.operation,
+    related: card.related,
+    replaceBody: card.replace_body === true,
+    title: card.title,
+  });
+  if (action !== "noop") atomicWrite(card.file, content);
+  if (ignoredHistoryEntry) logIgnoredHistoryEntry();
+  return {
+    action,
+    file: card.rel,
+    matchedBy: card.id.matchedBy,
+    ok: true,
+    status: storedStatus(content, card.rel, card.status ?? card.allowed[0]),
+    type: card.type,
+  };
+}
+
 export default defineTool({
   description:
     "Создать или обновить карточку памяти в vault; для карточек — ЭТО, не write_file. " +
@@ -216,6 +572,18 @@ export default defineTool({
       .min(1)
       .max(6)
       .describe("2–5 тегов, lowercase-kebab"),
+    aliases: z
+      .array(
+        singleLine("alias").max(
+          ALIAS_CAP,
+          `alias слишком длинный: максимум ${ALIAS_CAP} символов`,
+        ),
+      )
+      .max(ALIASES_MAX, `Слишком много алиасов: максимум ${ALIASES_MAX}`)
+      .optional()
+      .describe(
+        "Другие написания имени — латиница, транслит, разговорное, с опечаткой",
+      ),
     status: singleLine("status").optional().describe("Валидируется по типу"),
     domain: singleLine("domain").optional().describe("Домен (work/personal/…)"),
     related: z
@@ -246,195 +614,31 @@ export default defineTool({
   // eslint-disable-next-line @typescript-eslint/require-await -- Preserve the established Promise-returning Eve tool contract.
   async execute(input) {
     try {
-      const {
-        operation,
-        type,
-        body,
-        related,
-        history_entry,
-        confidence,
-        replace_body,
-      } = input;
-      // Схема гарантирует непустоту и однострочность; обрезка — здесь, чтобы в файл не уехали
-      // краевые пробелы (они заставили бы квотировать скаляр и сломали бы заголовок).
-      // related нормализует mergeRelated, body — mergeCard.
-      const title = input.title.trim();
-      const description = input.description.trim();
-      const status = input.status?.trim();
-      const domain = input.domain?.trim();
-      const tags = normalizeTags(input.tags);
-
+      const allowed = SCHEMA.status[input.type] || ["active"];
       // Валидация статуса против схемы типа (жёстко — иначе модель придумает статус).
-      const allowed = SCHEMA.status[type] || ["active"];
-      if (status && !allowed.includes(status)) {
-        return {
-          ok: false,
-          error: `Недопустимый status "${status}" для type "${type}". Разрешены: ${allowed.join(", ")}.`,
-        };
-      }
+      const badStatus = statusError(input.type, input.status?.trim(), allowed);
+      if (badStatus !== null) return { ok: false, error: badStatus };
 
-      const dir = join(
-        resolveVaultDir(process.cwd()),
-        "cards",
-        CARD_TYPE_DIR[type],
-      );
       // Идентичность: точный слаг → иначе карточка того же типа с таким же H1/name/aliases
       // (легаси-файлы с латинским слагом и кириллическим заголовком).
-      const id = resolveCard(dir, title);
-      if (id.candidates && id.candidates.length > 1) {
-        const list = id.candidates.map((f) =>
-          relative(resolveVaultDir(process.cwd()), f).split(sep).join("/"),
-        );
+      const target = resolveTarget(input.type, input.title.trim());
+      if ("error" in target) {
         return {
+          candidates: target.candidates,
+          error: target.error,
           ok: false,
-          error:
-            `Неоднозначная карточка для "${title}": подходят ${list.length} файлов. ` +
-            "Уточни заголовок или обнови нужный файл явно — ничего не записано.",
-          candidates: list,
         };
       }
-      const file = id.file;
-      const rel = relative(resolveVaultDir(process.cwd()), file)
-        .split(sep)
-        .join("/");
+      // Схема гарантирует непустоту и однострочность; обрезка — в cardWrite, чтобы в файл
+      // не уехали краевые пробелы (они заставили бы квотировать скаляр и сломали бы
+      // заголовок). related нормализует mergeRelated, body — mergeCard.
+      const card = cardWrite(input, target, allowed);
 
-      // Пробельная пустота history_entry (value.trim() === "") ничего не вытесняет и не
-      // подделывает History: для UPDATE и NOOP она равна отсутствующему полю — так же, как
-      // SUPERSEDE читает его через trim(). Модели, заполняющие все поля схемы, шлют "" и
-      // без этого зацикливаются на одном отказе.
-      const historyEntry = history_entry?.trim() ? history_entry : undefined;
+      const early = earlyOutcome(card);
+      if (early !== null) return early;
 
-      if (operation === "NOOP") {
-        if (replace_body || historyEntry !== undefined) {
-          return {
-            ok: false,
-            error: "NOOP не принимает replace_body или history_entry.",
-          };
-        }
-        if (!existsSync(file)) {
-          return {
-            ok: false,
-            error: `NOOP требует существующую карточку ${rel}.`,
-          };
-        }
-        return {
-          ok: true,
-          file: rel,
-          type,
-          status: storedStatus(
-            readFileSync(file, "utf8"),
-            rel,
-            status ?? allowed[0],
-          ),
-          action: "noop",
-          matchedBy: id.matchedBy,
-        };
-      }
-      if (replace_body && operation && operation !== "SUPERSEDE") {
-        return {
-          ok: false,
-          error: "replace_body допустим только для SUPERSEDE.",
-        };
-      }
-
-      mkdirSync(dir, { recursive: true });
-
-      // Сбои лока/записи — структурированная ошибка, а не исключение: модель должна
-      // увидеть внятное «занято/не записалось» и решить, что делать, а не уронить ход.
-      let release: (() => void) | null = null;
-      try {
-        release = acquireLock(file);
-        const existing = existsSync(file)
-          ? readFileSync(file, "utf8")
-          : undefined;
-        const effectiveOperation = resolveOperation({
-          operation,
-          replaceBody: replace_body,
-          existing,
-        });
-        // history_entry несёт вытесненную истину, которой у ADD ещё нет: там он шум и молча
-        // отбрасывается (с записью в журнал), а у UPDATE — попытка подделать History.
-        if (historyEntry !== undefined && effectiveOperation === "UPDATE") {
-          return {
-            ok: false,
-            error: "history_entry допустим только для SUPERSEDE.",
-          };
-        }
-        if (effectiveOperation === "ADD" && existing !== undefined) {
-          return {
-            ok: false,
-            error: `ADD отказан: карточка ${rel} уже существует.`,
-          };
-        }
-        if (
-          (effectiveOperation === "UPDATE" ||
-            effectiveOperation === "SUPERSEDE") &&
-          existing === undefined
-        ) {
-          return {
-            ok: false,
-            error: `${effectiveOperation} требует существующую карточку ${rel}.`,
-          };
-        }
-        if (
-          effectiveOperation === "SUPERSEDE" &&
-          !history_entry?.trim() &&
-          !isLegacyHistoryReplace(operation, replace_body === true, body)
-        ) {
-          return {
-            ok: false,
-            error:
-              "SUPERSEDE требует history_entry; legacy replace_body должен содержать ## History.",
-          };
-        }
-        const { content, action, ignoredHistoryEntry } = mergeCard({
-          existing,
-          title,
-          fields: {
-            type,
-            description,
-            tags,
-            ...(effectiveOperation === "ADD"
-              ? {
-                  status: status ?? allowed[0],
-                  confidence: confidence ?? "EXTRACTED",
-                }
-              : {
-                  ...(status !== undefined ? { status } : {}),
-                  ...(confidence !== undefined ? { confidence } : {}),
-                }),
-            ...(domain ? { domain } : {}),
-          },
-          initialFields: { created: today(), source: `daily/${today()}.md` },
-          body,
-          related,
-          date: today(),
-          replaceBody: replace_body === true,
-          // Сырая operation: по её отсутствию mergeCard узнаёт легаси-путь replace_body.
-          operation,
-          // ADD получает сырое поле: пустую строку он отбрасывает сам и фиксирует это в журнале.
-          historyEntry:
-            effectiveOperation === "ADD" ? history_entry : historyEntry,
-        });
-        if (action !== "noop") atomicWrite(file, content);
-        if (ignoredHistoryEntry) logIgnoredHistoryEntry();
-        return {
-          ok: true,
-          file: rel,
-          type,
-          status: storedStatus(content, rel, status ?? allowed[0]),
-          action,
-          matchedBy: id.matchedBy,
-        };
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        return {
-          ok: false,
-          error: `Не удалось записать карточку ${rel}: ${detail}`,
-        };
-      } finally {
-        release?.();
-      }
+      mkdirSync(target.dir, { recursive: true });
+      return withCardLock(card.file, card.rel, () => writeLockedCard(card));
     } catch (error) {
       const text = vaultDirErrorText(error);
       if (text !== null) return { ok: false, error: text };
