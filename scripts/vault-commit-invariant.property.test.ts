@@ -38,8 +38,10 @@ import "./lib/ts-esm-hooks.ts";
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SCHEMA = join(REPO, "vault-template", "schema.json");
 const SEED = Number(process.env.IVA_VAULT_COMMIT_SEED ?? 20_261_001);
-/** Прогонов по умолчанию: 200. Переменная - только чтобы измерить прогон подешевле. */
-const RUNS = Number(process.env.IVA_VAULT_COMMIT_RUNS ?? 200);
+/** Прогонов по умолчанию: 50 - около десяти секунд, файл идёт в каждом полном прогоне и в
+ * проверке перед пушем (у неё минута на все тронутые файлы). Приёмка шва гоняет 200:
+ * `IVA_VAULT_COMMIT_RUNS=200`. Оба известных контрпримера класса ловятся до 25-го прогона. */
+const RUNS = Number(process.env.IVA_VAULT_COMMIT_RUNS ?? 50);
 process.env.ASSISTANT_TIMEZONE = "UTC";
 
 type Kind = "card" | "file" | "direct";
