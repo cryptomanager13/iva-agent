@@ -696,6 +696,27 @@ function statusAll(vault: string): string {
     vault,
   );
 }
+/** Состояние индекса одного пути: что владелец видит в status плюс флаги записи индекса -
+ * intent-to-add живёт только в них. */
+function indexState(vault: string, rel: string): string {
+  const status = trySh(
+    [
+      "-c",
+      "core.quotePath=false",
+      "status",
+      "--porcelain=v2",
+      "-uall",
+      "--",
+      rel,
+    ],
+    vault,
+  );
+  const flags = /flags: (\w+)/u.exec(
+    trySh(["ls-files", "--debug", "--", rel], vault),
+  )?.[1];
+  return `${status}|${flags ?? "нет"}`;
+}
+
 test("чужой GIT_DIR в окружении не уводит коммит из vault", async (t) => {
   const vault = makeVault(t);
   const foreign = foreignRepo(t);
@@ -731,4 +752,65 @@ test("имя файла с глобом забирает только свой �
   assert.deepEqual(touched(vault), ["notes/отчёт-*.md"]);
   assert.match(statusAll(vault), /^\?\? notes\/отчёт-январь\.md$/mu);
   assert.match(statusAll(vault), /^\?\? notes\/отчёт-февраль\.md$/mu);
+});
+
+test("intent-to-add владельца переживает неудачный коммит", async (t) => {
+  const vault = makeVault(t);
+  mkdirSync(join(vault, "daily"), { recursive: true });
+  const file = join(vault, "daily", "2026-09-21.md");
+  writeFileSync(file, "старое\n");
+  sh(["add", "-N", "--", "daily/2026-09-21.md"], vault);
+  const before = indexState(vault, "daily/2026-09-21.md");
+  hook(vault, "exit 1");
+
+  const result = await tool.file(file, "новое содержимое\n");
+  assert.equal(result.ok, true, result.error);
+  assert.equal(
+    indexState(vault, "daily/2026-09-21.md"),
+    before,
+    "помета intent-to-add возвращается вместе с записью индекса",
+  );
+});
+
+test("отказ git add на одном из путей не оставляет остальные застейдженными", async (t) => {
+  const vault = makeVault(t);
+  // Игнорируемый путь: git успевает застейджить соседний и всё равно выходит с ошибкой -
+  // именно на этом отказе индекс и оставался чужим.
+  writeFileSync(join(vault, ".gitignore"), "cards/notes/игнор.md\n");
+  sh(["add", "--", ".gitignore"], vault);
+  sh(["commit", "-q", "-m", "ignore"], vault);
+  const good = join(vault, "cards", "notes", "остаток.md");
+  writeFileSync(good, "# Остаток\n");
+  writeFileSync(join(vault, "cards", "notes", "игнор.md"), "# Игнор\n");
+
+  const outcome = await tool.seam.commitVaultWrite(
+    "file остаток: write",
+    [good, join(vault, "cards", "notes", "игнор.md")],
+    vault,
+  );
+  assert.equal(outcome.ok, false);
+  assert.match(
+    outcome.ok ? "" : outcome.reason,
+    /ignored by one of your \.gitignore files/u,
+  );
+  assert.equal(
+    statusAll(vault),
+    "?? cards/notes/остаток.md",
+    "ничего из отказавшего add не осталось в индексе",
+  );
+});
+
+test("vault подкаталог своего репозитория: причина называет корень выше", async (t) => {
+  const parent = foreignRepo(t);
+  const vault = join(parent, "vault");
+  mkdirSync(join(vault, "cards", "notes"), { recursive: true });
+  cpSync(SCHEMA, join(vault, "schema.json"));
+  process.env.ASSISTANT_VAULT_DIR = vault;
+
+  const { logged, value: result } = await journal(() =>
+    tool.card(card({ operation: "ADD", title: "Подкаталог" })),
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.match(logged, /выше vault/u);
+  assert.doesNotMatch(logged, /чужой/u);
 });

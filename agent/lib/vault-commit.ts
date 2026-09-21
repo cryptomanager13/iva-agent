@@ -28,12 +28,20 @@ const INDEX_WAIT_MS = [60, 120, 240, 480];
  * что у замка карточки. */
 const INDEX_LOCK_STALE_MS = 15_000;
 const INDEX_LOCK = "index.lock";
-const GIT_TIMEOUT_MS = 5000;
+/** Потолок на один вызов git. Холодная запись на вольте из 20000 карточек занимает 2597 мс
+ * (замер QA), дальше медиана 275 мс: 12 с - это тот же порядок с запасом больше четырёх раз,
+ * чтобы медленный диск не отменял коммит, а висящий хук не держал запись минутами. */
+const GIT_TIMEOUT_MS = 12_000;
 /** В vault может не быть identity (headless VPS, свежий образ): коммитим от Ивы через
  * `-c`, конфиг владельца не трогаем. */
 const IVA_IDENTITY = ["-c", "user.name=Iva", "-c", "user.email=iva@localhost"];
 const REASON_CAP = 200;
 const LOG_PREFIX = "[vault-commit]";
+/** Бит записи индекса: файл добавлен без содержимого (`git add -N`). */
+const INTENT_TO_ADD = 0x2000_0000;
+/** Пустой блоб: с ним в индексе лежит и `add -N`, и честно застейдженный пустой файл. */
+const EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+const ZERO_OBJECT = "0".repeat(40);
 
 /** Что наследуется от процесса: git ищет себя и конфиг владельца. Белый список, а не чёрный
  * список запрещённых GIT_*: чужой `GIT_DIR` (его оставляет после себя git-хук или
@@ -229,42 +237,76 @@ async function checkRepository(vault: string): Promise<RepoCheck> {
     ownRepositories.add(vault);
     return { kind: "own" };
   }
-  return { kind: "skip", reason: `репозиторий чужой: ${owner}` };
+  return { kind: "skip", reason: `репозиторий выше vault: ${owner}` };
 }
 
-/** Записи индекса по нашим путям до `git add`, или null - индекс прочитать не удалось.
- * Без снимка лучше не трогать индекс вовсе, чем вернуть его наугад. */
+/** Запись индекса по нашему пути в снимке: что вернуть, если коммит не состоялся. */
+type IndexEntry = {
+  readonly intentToAdd: boolean;
+  /** Строка `ls-files -s -z` целиком: её же понимает `update-index --index-info`. */
+  readonly record: string;
+};
+
+/** Помета «добавлено без содержимого» видна только в флагах записи индекса: в снимке её надо
+ * сохранить, иначе после неудачного коммита чужой `git add -N` превращается в застейдженный
+ * пустой файл и следующий коммит уносит его пустым. */
+async function markedIntentToAdd(
+  vault: string,
+  path: string,
+): Promise<boolean> {
+  const run = await git(["ls-files", "--debug", "--", path], vault);
+  const flags = /flags: ([0-9a-f]+)/u.exec(run.out)?.[1];
+  return (
+    flags !== undefined && (Number.parseInt(flags, 16) & INTENT_TO_ADD) !== 0
+  );
+}
+
+/** Записи индекса по нашим путям до `git add`, или null - индекс прочитать не удалось. Без
+ * снимка лучше не трогать индекс вовсе, чем вернуть его наугад. */
 async function indexEntries(
   vault: string,
   paths: readonly string[],
-): Promise<Map<string, string> | null> {
+): Promise<Map<string, IndexEntry> | null> {
   const run = await git(["ls-files", "-s", "-z", "--", ...paths], vault);
   if (run.code !== 0) return null;
-  const entries = new Map<string, string>();
-  for (const line of run.out.split("\0").filter(Boolean)) {
-    const tab = line.indexOf("\t");
-    if (tab > 0) entries.set(line.slice(tab + 1), line.slice(0, tab));
+  const entries = new Map<string, IndexEntry>();
+  for (const record of run.out.split("\0").filter(Boolean)) {
+    const tab = record.indexOf("\t");
+    if (tab <= 0) continue;
+    const path = record.slice(tab + 1);
+    const object = record.slice(0, tab).split(" ")[1];
+    const empty =
+      object === EMPTY_BLOB && (await markedIntentToAdd(vault, path));
+    entries.set(path, { intentToAdd: empty, record });
   }
   return entries;
 }
 
-/** Вернуть индекс по нашим путям как было: запись из снимка или её отсутствие. Чужой индекс
- * (другие пути) не трогаем - он не наш. */
+/** Вернуть индекс по нашим путям как было: одной пачкой, снимком записей. Чужой индекс (другие
+ * пути) не трогаем - он не наш; путь, которого в снимке не было, снимается нулевым режимом, а
+ * стадии конфликта слияния возвращаются тем же форматом, в каком лежали. */
 async function restoreIndex(
   vault: string,
   paths: readonly string[],
-  before: ReadonlyMap<string, string>,
+  before: ReadonlyMap<string, IndexEntry>,
 ): Promise<void> {
+  const payload: string[] = [];
+  const intent: string[] = [];
   for (const path of paths) {
     const entry = before.get(path);
-    const [mode, object, stage] = (entry ?? "").split(" ");
-    await git(
-      stage === "0"
-        ? ["update-index", "--cacheinfo", `${mode},${object},${path}`]
-        : ["update-index", "--force-remove", "--", path],
-      vault,
-    );
+    // Помета «без содержимого» снимается вместе с записью: `git add -N` поверх уже
+    // застейдженного файла - это no-op, поэтому сначала убираем нашу запись, потом ставим
+    // помету заново.
+    if (entry !== undefined && !entry.intentToAdd)
+      payload.push(`${entry.record}\0`);
+    else {
+      payload.push(`0 ${ZERO_OBJECT}\t${path}\0`);
+      if (entry !== undefined) intent.push(path);
+    }
   }
+  if (payload.length > 0)
+    await git(["update-index", "-z", "--index-info"], vault, payload.join(""));
+  for (const path of intent) await git(["add", "-N", "--", path], vault);
 }
 
 function vaultRoot(root: string): string | null {
@@ -300,7 +342,12 @@ async function commitPaths(
   const staged = await withIndexRetry(vault, () =>
     git(["add", "--", ...paths], vault),
   );
-  if (staged.code !== 0) return { ok: false, reason: reasonOf(staged) };
+  if (staged.code !== 0) {
+    // `git add` стейджит часть путей до отказа (игнорируемый путь, пропавший путь), поэтому
+    // индекс возвращается и здесь, а не только на отказе коммита.
+    if (before !== null) await restoreIndex(vault, paths, before);
+    return { ok: false, reason: reasonOf(staged) };
+  }
   const committed = await withIndexRetry(vault, () =>
     commitWith(vault, message, paths),
   );
