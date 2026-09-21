@@ -1,10 +1,11 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { existsSync, realpathSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { writeFileAtomic } from "../lib/fs-atomic.js";
 import { resolveVaultDir } from "@iva/vault-dir";
 import { vaultDirErrorText } from "../lib/vault-error.ts";
+import { commitVaultWrite } from "../lib/vault-commit.ts";
 
 // Host-native запись файла. Переопределяет встроенный write_file eve: пишет реальный
 // файл на VPS через каноническую атомарную запись, создавая родительские директории.
@@ -102,6 +103,17 @@ export default defineTool({
       };
     }
     await writeFileAtomic(path, content);
+    // Внутри vault файл - часть памяти, и правка оставляет след в её истории; вне vault
+    // шов молча пропускает путь.
+    await commitVaultWrite(`file ${fileRel(path)}: write`, [path]);
     return { ok: true, path, bytes: Buffer.byteLength(content, "utf8") };
   },
 });
+
+/** Путь файла для сообщения коммита: от vault, с прямыми слэшами. Вне vault он не попадёт
+ * ни в одно сообщение - шов такой путь не коммитит. */
+function fileRel(path: string): string {
+  return relative(resolveVaultDir(process.cwd()), resolve(path))
+    .split(sep)
+    .join("/");
+}

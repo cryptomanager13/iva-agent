@@ -56,7 +56,13 @@ At 05:00 `scripts/memory/brain.ts` runs mechanical maintenance — no LLM, all d
 4. `moc.generate` — regenerates the MOC topic indexes
 5. `supersede`, `dedup`, `link_cleanup` — dry-run scans; findings queue for the next rollup, never auto-applied
 
-Then it commits and pushes the vault. No remote yet? It creates a private `iva-vault` GitHub repo through `gh`. It pings you on Telegram only when a human is needed: a failed maintenance step, a health-score drop, CORE.md past its 1200-char cap, or a failed push (including when there's no remote and `gh` isn't logged in). Those pings are Alerts — they cannot be switched off, so each one names what broke, what it costs and the command that fixes it, in your language, and repeats at most once a week for the same problem ([ADR-0007](adr/0007-notices-are-opt-in.md)).
+Then it commits and pushes the vault: one commit for the whole night, on top of the trail the day left. The commit happens with or without a remote — a missing remote only skips the push. No remote yet? It creates a private `iva-vault` GitHub repo through `gh`. It pings you on Telegram only when a human is needed: a failed maintenance step, a health-score drop, CORE.md past its 1200-char cap, or a failed push (including when there's no remote and `gh` isn't logged in). Those pings are Alerts — they cannot be switched off, so each one names what broke, what it costs and the command that fixes it, in your language, and repeats at most once a week for the same problem ([ADR-0007](adr/0007-notices-are-opt-in.md)).
+
+## Memory under git
+
+The vault is its own git repository, and a write leaves a commit: `write_card` writes `card <slug>: ADD|UPDATE|SUPERSEDE`, `write_file` inside the vault writes `file <path>: write`, the nightly rollup commits its own CORE.md edits, and the vault cleanup an update runs commits `update <version>: vault cleanup`. The commit names the paths it touched, so your own uncommitted edits in Obsidian are left alone — the next night's Brain pass picks them up. A commit never fails a turn: if git is not installed, the folder is not a repository, or the index is busy, the file is still written and the reason goes to the service journal in one line.
+
+So history is per fact, not per night: `git log -- cards/projects/pepsi-gamer.md` shows every change to that card, and rolling one back is `git checkout <sha> -- cards/projects/pepsi-gamer.md`.
 
 ## Vault layout
 

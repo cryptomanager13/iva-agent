@@ -14,6 +14,7 @@ import { Client, type ClientSession, type MessageResult } from "eve/client";
 import { CORE_CAP } from "#lib/core-cap.ts";
 import { coreDamage, setLastDayPointer } from "#lib/core-clamp.ts";
 import { writeFileAtomicSync } from "#lib/fs-atomic.ts";
+import { commitVaultWrite } from "#lib/vault-commit.ts";
 import { tr } from "#lib/i18n.ts";
 import { readSettings } from "#lib/settings.ts";
 import {
@@ -549,6 +550,9 @@ if (period === "daily") {
   const damage = coreDamage(coreBeforeTurn, core);
   if (damage.damaged) {
     writeFileAtomicSync(CORE_PATH, coreBeforeTurn);
+    // Откат CORE - тоже правка памяти: без коммита ночной подметальщик сделал бы вид,
+    // что модель ничего не теряла.
+    await commitVaultWrite("file CORE.md: restore", [CORE_PATH]);
     core = coreBeforeTurn;
     const damagedHeadings = [
       ...damage.lostHeadings,
@@ -573,6 +577,7 @@ if (period === "daily") {
   const pointed = setLastDayPointer(core, yesterday);
   if (pointed !== core) {
     writeFileAtomicSync(CORE_PATH, pointed);
+    await commitVaultWrite("file CORE.md: pointer", [CORE_PATH]);
     core = pointed;
   }
 

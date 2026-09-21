@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { hasUnclosedFence, outsideFences, scanFences } from "./card-text.ts";
 import {
-  acquireFileLockSync,
+  acquireFileLock,
   releaseFileLock,
   writeFileAtomicSync,
 } from "./fs-atomic.ts";
@@ -1303,10 +1303,17 @@ function cardAction(
 const LOCK_STALE_MS = 15_000;
 
 /** Лок карточки — каталог `<карточка>.lock` рядом с ней. Занятая карточка это внятная
- * ошибка для модели, а не тихая перезапись чужой правки. */
-export function acquireLock(file: string, timeoutMs = 5000): () => void {
+ * ошибка для модели, а не тихая перезапись чужой правки. Ждём, отпуская event loop: под
+ * этим локом идёт ещё и коммит правки, а синхронное ожидание заморозило бы его. */
+export async function acquireLock(
+  file: string,
+  timeoutMs = 5000,
+): Promise<() => void> {
   const lock = `${file}.lock`;
-  const held = acquireFileLockSync(lock, { timeoutMs, staleMs: LOCK_STALE_MS });
+  const held = await acquireFileLock(lock, {
+    timeoutMs,
+    staleMs: LOCK_STALE_MS,
+  });
   if (held === null)
     throw new Error(`Карточка занята другим процессом: ${lock}`);
   return () => {

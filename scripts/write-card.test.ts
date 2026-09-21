@@ -1801,12 +1801,12 @@ test("реплей SUPERSEDE через полночь остаётся noop, а
   assert.equal(replayed.content, replaced.content);
 });
 
-test("лок сериализует запись: второй захват ждёт и падает по таймауту", () => {
+test("лок сериализует запись: второй захват ждёт и падает по таймауту", async () => {
   const file = join(VAULT, "cards", "notes", "lock-probe.md");
-  const release = acquireLock(file);
-  assert.throws(() => acquireLock(file, 100), /занята другим процессом/);
+  const release = await acquireLock(file);
+  await assert.rejects(acquireLock(file, 100), /занята другим процессом/);
   release();
-  acquireLock(file, 100)(); // после освобождения — снова доступно
+  (await acquireLock(file, 100))(); // после освобождения — снова доступно
 });
 
 test("write_card пережидает краткий внешний lock и пишет одну чистую карточку", async (t) => {

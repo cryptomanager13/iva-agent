@@ -100,14 +100,14 @@ test("replace_body: SUPERSEDE переписывает body, сохраняя н
   assert.match(r.content, /created: 2026-01-01/, "created не трогается");
 });
 
-test("card-лок: запоздавший release вытесненного держателя не снимает лок преемника", () => {
+test("card-лок: запоздавший release вытесненного держателя не снимает лок преемника", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cardlock-"));
   const file = join(dir, "x.md");
-  const staleRelease = cardLock(file);
+  const staleRelease = await cardLock(file);
   // Имитация staleness-отбора: лок «протух», преемник его отобрал и держит свой.
   const past = new Date(Date.now() - 60_000);
   utimesSync(`${file}.lock`, past, past);
-  const successorRelease = cardLock(file); // отобрал протухший, записал СВОЙ токен
+  const successorRelease = await cardLock(file); // отобрал протухший, записал СВОЙ токен
   staleRelease(); // no-op: на диске чужой токен
   assert.ok(existsSync(`${file}.lock`), "лок преемника обязан остаться");
   successorRelease();

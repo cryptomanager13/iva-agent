@@ -18,6 +18,7 @@ import { parseFrontmatterOrSkip } from "../lib/frontmatter.js";
 import { resolveTimeZone } from "../lib/timezone.js";
 import { resolveVaultDir } from "@iva/vault-dir";
 import { vaultDirErrorText } from "../lib/vault-error.ts";
+import { commitVaultWrite } from "../lib/vault-commit.ts";
 
 // Строго типизированная запись карточки памяти. Заменяет «write_file по наитию» для карточек:
 // zod-enum на type/status берётся из autograph schema.json (единый источник правды), поэтому
@@ -354,15 +355,15 @@ function earlyOutcome(card: CardWrite): CardOutcome | null {
 /** Лок вокруг карточки: занятую карточку модель должна увидеть как внятную ошибку, а не
  * как тихую перезапись чужой правки, а сбой записи — как «не записалось», а не как
  * уроненный ход. Освобождение лока — в finally: его требует даже выброшенный сбой. */
-function withCardLock(
+async function withCardLock(
   file: string,
   rel: string,
-  write: () => CardOutcome,
-): CardOutcome {
+  write: () => Promise<CardOutcome>,
+): Promise<CardOutcome> {
   let release: (() => void) | null = null;
   try {
-    release = acquireLock(file);
-    return write();
+    release = await acquireLock(file);
+    return await write();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return {
@@ -520,9 +521,15 @@ function droppedAliasesNote(dropped: string[]): string {
   return `Алиасы не поместились (потолок ${ALIASES_MAX}): ${dropped.join(", ")}.`;
 }
 
+/** Слаг карточки для сообщения коммита: имя файла без каталога и расширения. */
+function cardSlug(rel: string): string {
+  return rel.slice(rel.lastIndexOf("/") + 1).replace(/\.md$/u, "");
+}
+
 /** Запись под локом: что лежит на диске, какая операция из этого следует, отказы по
- * состоянию, слияние и атомарная запись. */
-function writeLockedCard(card: CardWrite): CardOutcome {
+ * состоянию, слияние, атомарная запись и коммит затронутого пути. Коммит идёт под тем же
+ * локом: история памяти повторяет порядок правок карточки. */
+async function writeLockedCard(card: CardWrite): Promise<CardOutcome> {
   const existing = existsSync(card.file)
     ? readFileSync(card.file, "utf8")
     : undefined;
@@ -548,7 +555,13 @@ function writeLockedCard(card: CardWrite): CardOutcome {
     replaceBody: card.replace_body === true,
     title: card.title,
   });
-  if (action !== "noop") atomicWrite(card.file, content);
+  if (action !== "noop") {
+    atomicWrite(card.file, content);
+    await commitVaultWrite(
+      `card ${cardSlug(card.rel)}: ${effectiveOperation}`,
+      [card.file],
+    );
+  }
   if (ignoredHistoryEntry) logIgnoredHistoryEntry();
   return {
     action,
@@ -631,7 +644,6 @@ export default defineTool({
         "Легаси-путь без operation: body целиком, ## History — внутри body.",
       ),
   }),
-  // eslint-disable-next-line @typescript-eslint/require-await -- Preserve the established Promise-returning Eve tool contract.
   async execute(input) {
     try {
       const allowed = SCHEMA.status[input.type] || ["active"];
