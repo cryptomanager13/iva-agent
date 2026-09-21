@@ -3,7 +3,7 @@
 // промолчал — код шлёт текст напоминания как есть и называет причину в строке. Оба шва
 // (send и ход) — двойники: сети и eve в тесте нет.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { beforeEach } from "node:test";
@@ -14,6 +14,10 @@ mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
 
 const { add, fireDue, list } = await import("#lib/reminder-store.ts");
 const { runReminderFire } = await import("./fire.ts");
+const { runReminderTurn } = await import("../lib/reminder-turn.ts");
+const { chatKeyOf, getChatStatus, isRunning, setChatStatus, setChatStatusIf } =
+  await import("#lib/run-status.ts");
+import type { CreateClient } from "../lib/reminder-turn.ts";
 
 let caseDir = "";
 beforeEach(() => {
@@ -23,6 +27,36 @@ beforeEach(() => {
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));
 
 const NOW = 1_800_000_000_000;
+
+/**
+ * Свой чат на тест: записи run-status общие на весь файл (DATA_DIR фиксируется на загрузке),
+ * и остаток от прошлого теста не должен решать, возьмёт ли напоминание чат.
+ */
+let chatSeq = 0;
+const freshChat = () => ({
+  id: `-100${(chatSeq += 1)}`,
+  threadId: `835${chatSeq}`,
+});
+
+/**
+ * Протухшая запись чата: setChatStatus всегда двигает updatedAt, поэтому пишем файл прямо —
+ * другого способа показать чужой ход, умерший полчаса назад, у теста нет.
+ */
+function seedStaleStatus(
+  chatKey: string,
+  record: Record<string, unknown>,
+): void {
+  const dir = join(root, "data", "run-status.d");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${Buffer.from(chatKey, "utf8").toString("base64url")}.json`),
+    JSON.stringify({
+      ...record,
+      generation: 1,
+      updatedAt: Date.now() - 40 * 60_000,
+    }),
+  );
+}
 
 /** Строка уже сработала: тик перевёл её в fired и запустил ребёнка. */
 async function firedRow(chat?: {
@@ -62,13 +96,18 @@ function makeSend(script: readonly SendAck[] = []) {
   return { calls, send };
 }
 
-const turn = (status: "completed" | "failed" | "waiting", message?: string) => {
+const turn = (
+  status: "completed" | "failed" | "waiting",
+  message?: string,
+  cancelled = false,
+) => {
   const prompts: string[] = [];
   const runTurn = (prompt: string) => {
     prompts.push(prompt);
     return Promise.resolve({
       status,
       ...(message === undefined ? {} : { message }),
+      ...(cancelled ? { cancelled: true } : {}),
       feedback: () => Promise.resolve(undefined),
     });
   };
@@ -87,8 +126,59 @@ const deps = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+type StreamEvent = { readonly type: string; readonly data?: unknown };
+
+/**
+ * Настоящий ход поверх двойника eve: стрим и сессия — от теста, всё остальное — боевой код,
+ * включая запись в run-status, которую тесты здесь и проверяют.
+ */
+function realTurn(
+  events: readonly StreamEvent[],
+  {
+    sessionId,
+    before,
+    fail,
+  }: {
+    readonly sessionId: string;
+    readonly before?: () => void;
+    /** Обрыв стрима после этих событий: так eve теряет связь на середине хода. */
+    readonly fail?: string;
+  },
+): typeof runReminderTurn {
+  const response = Object.assign(
+    (async function* () {
+      before?.();
+      await Promise.resolve();
+      for (const event of events) yield event;
+      if (fail !== undefined) throw new Error(fail);
+    })(),
+    { cancel: () => Promise.resolve(), sessionId },
+  );
+  const createClient: CreateClient = () =>
+    Promise.resolve({
+      sessions: {
+        create: () =>
+          Promise.resolve({
+            response,
+            session: {
+              send: () => Promise.resolve(),
+              reset: () => Promise.resolve(),
+            },
+          }),
+      },
+    });
+  return (prompt, options, turnDeps) =>
+    runReminderTurn(prompt, options, { ...turnDeps, createClient });
+}
+
+const completed = [
+  { type: "message.completed", data: { message: "готово" } },
+  { type: "session.completed" },
+] as const;
+
 void test("ход выполнил напоминание: его ответ уходит в чат и тему строки", async () => {
-  await firedRow({ id: "-100777", threadId: "835397" });
+  const chat = freshChat();
+  await firedRow(chat);
   const { calls, send } = makeSend();
   const { prompts, runTurn } = turn("completed", "Новости Австралии: …");
 
@@ -99,8 +189,8 @@ void test("ход выполнил напоминание: его ответ у�
   assert.match(prompts[0], /позвонить в клинику/u);
   assert.match(prompts[0], /final text of this turn/u);
   assert.equal(calls.length, 1, "отправка ровно одна");
-  assert.equal(calls[0].chat, "-100777");
-  assert.equal(calls[0].threadId, "835397");
+  assert.equal(calls[0].chat, chat.id);
+  assert.equal(calls[0].threadId, chat.threadId);
   assert.equal(calls[0].text, "Новости Австралии: …");
   const [row] = await list();
   assert.equal(row?.delivered, true);
@@ -172,6 +262,197 @@ void test("status failed: текст напоминания и причина п
   assert.equal(calls[0].text, "позвонить в клинику");
   const [row] = await list();
   assert.match(String(row?.error), /agent turn failed: turn timed out/u);
+});
+
+void test("владелец остановил ход: дословный текст не уходит, в строке факт отмены", async () => {
+  await firedRow();
+  const { calls, send } = makeSend();
+  const { runTurn } = turn("waiting", "напоминаю: позвонить в клинику", true);
+
+  assert.equal(await runReminderFire("r1", deps({ send, runTurn })), 0);
+
+  assert.equal(calls.length, 0, "отменённый ход ничего не отправляет");
+  const [row] = await list();
+  assert.equal(row?.delivered, false);
+  assert.match(String(row?.error), /cancelled by owner/u);
+  assert.deepEqual(
+    await fireDue(NOW + 60_000, 10),
+    [],
+    "повторного срабатывания нет",
+  );
+});
+
+void test("ход идёт от имени чата строки: стоп из него находит сессию хода", async () => {
+  const chat = freshChat();
+  await firedRow(chat);
+  const { calls, send } = makeSend();
+  const key = chatKeyOf(chat.id, chat.threadId);
+  const seen: Array<{ running: boolean; sessionId: unknown }> = [];
+  const runTurn = realTurn(completed, {
+    sessionId: "sess-fire",
+    before: () =>
+      seen.push({
+        running: isRunning(key),
+        sessionId: getChatStatus(key)?.sessionId,
+      }),
+  });
+
+  assert.equal(await runReminderFire("r1", deps({ send, runTurn })), 0);
+
+  assert.deepEqual(seen, [{ running: true, sessionId: "sess-fire" }]);
+  assert.equal(isRunning(key), false, "после хода запись снята");
+  assert.equal(calls[0].text, "готово");
+});
+
+void test("занятый чат: живой ход владельца остаётся побайтно тем же", async () => {
+  const chat = freshChat();
+  await firedRow(chat);
+  const { calls, send } = makeSend();
+  const key = chatKeyOf(chat.id, chat.threadId);
+  const owner = setChatStatus(key, {
+    status: "running",
+    sessionId: "owner-sess",
+    turnId: "owner-turn",
+    ingressId: "ing-1",
+    statusMessageId: 42,
+  });
+  const during: unknown[] = [];
+  const runTurn = realTurn(completed, {
+    sessionId: "reminder-sess",
+    before: () => during.push(getChatStatus(key)),
+  });
+
+  assert.equal(await runReminderFire("r1", deps({ send, runTurn })), 0);
+
+  assert.deepEqual(during, [owner], "чужую запись не трогаем и во время хода");
+  assert.deepEqual(getChatStatus(key), owner, "и не снимаем после");
+  assert.equal(
+    isRunning(key),
+    true,
+    "стоп владельца по-прежнему видит его ход",
+  );
+  assert.equal(calls[0].text, "готово", "ответ владельцу всё равно доехал");
+});
+
+void test("ход владельца поверх напоминания: снятие напоминания его не трогает", async () => {
+  const chat = freshChat();
+  await firedRow(chat);
+  const { calls, send } = makeSend();
+  const key = chatKeyOf(chat.id, chat.threadId);
+  const runTurn = realTurn(completed, {
+    sessionId: "reminder-sess",
+    // Владелец пишет в чат, пока ход напоминания идёт: его ход забирает запись.
+    before: () => {
+      const current = getChatStatus(key);
+      assert.equal(
+        current?.sessionId,
+        "reminder-sess",
+        "до хода владельца запись была за напоминанием",
+      );
+      setChatStatusIf(
+        key,
+        { generation: current?.generation },
+        { status: "running", sessionId: "owner-sess", turnId: "owner-turn" },
+      );
+    },
+  });
+
+  assert.equal(await runReminderFire("r1", deps({ send, runTurn })), 0);
+
+  const after = getChatStatus(key);
+  assert.equal(after?.sessionId, "owner-sess");
+  assert.equal(after?.turnId, "owner-turn");
+  assert.equal(isRunning(key), true, "ход владельца остался виден");
+  assert.equal(calls[0].text, "готово");
+});
+
+void test("отмена без границы сессии: текст не уходит, в строке факт отмены", async () => {
+  await firedRow();
+  const { calls, send } = makeSend();
+  // Ход погасили снаружи, а границы сессии eve так и не прислал: признак отмены обязан
+  // доехать до кода, иначе владелец получит дословный текст, которого не просил.
+  const runTurn = realTurn([{ type: "turn.cancelled" }], {
+    sessionId: "sess-cut",
+  });
+
+  assert.equal(await runReminderFire("r1", deps({ send, runTurn })), 0);
+
+  assert.equal(calls.length, 0, "отменённый ход ничего не отправляет");
+  const [row] = await list();
+  assert.equal(row?.delivered, false);
+  assert.match(String(row?.error), /cancelled by owner/u);
+});
+
+void test("отмена, а потом обрыв стрима: текст не уходит, в строке факт отмены", async () => {
+  await firedRow();
+  const { calls, send } = makeSend();
+  // Боевой путь /stop: eve успел сказать turn.cancelled, session.* не прислал, и стрим
+  // оборвался — признак отмены обязан пережить обрыв.
+  const runTurn = realTurn([{ type: "turn.cancelled" }], {
+    sessionId: "sess-cut",
+    fail: "stream reset by peer",
+  });
+
+  assert.equal(await runReminderFire("r1", deps({ send, runTurn })), 0);
+
+  assert.equal(calls.length, 0, "отменённый ход ничего не отправляет");
+  const [row] = await list();
+  assert.equal(row?.delivered, false);
+  assert.match(String(row?.error), /cancelled by owner/u);
+});
+
+void test("протухшая запись владельца: напоминание забирает чат и называет осиротевший индикатор", async () => {
+  const chat = freshChat();
+  await firedRow(chat);
+  const key = chatKeyOf(chat.id, chat.threadId);
+  // Ход владельца умер полчаса назад, не убрав за собой «Работаю…».
+  seedStaleStatus(key, {
+    status: "running",
+    sessionId: "owner-sess",
+    turnId: "owner-turn",
+    statusMessageId: 42,
+    retireAfterTurn: {
+      replayMs: 1,
+      sessionId: "owner-sess",
+      turnId: "owner-turn",
+    },
+  });
+  const { calls, send } = makeSend();
+  const lines: string[] = [];
+  const during: Array<Record<string, unknown> | null> = [];
+  const runTurn = realTurn(completed, {
+    sessionId: "reminder-sess",
+    before: () => during.push(getChatStatus(key)),
+  });
+
+  assert.equal(
+    await runReminderFire(
+      "r1",
+      deps({
+        send,
+        runTurn,
+        log: (...args: unknown[]) => lines.push(args.join(" ")),
+      }),
+    ),
+    0,
+  );
+
+  assert.equal(
+    during[0]?.sessionId,
+    "reminder-sess",
+    "протухшую запись напоминание забирает себе",
+  );
+  assert.equal(
+    during[0]?.statusMessageId,
+    undefined,
+    "осиротевший индикатор с записи снят: после захвата его больше никто не найдёт",
+  );
+  assert.ok(
+    lines.some((line) => /working status 42 of a dead turn stays/u.test(line)),
+    lines.join("\n"),
+  );
+  assert.equal(isRunning(key), false, "после хода запись снята");
+  assert.equal(calls[0].text, "готово", "ответ владельцу всё равно доехал");
 });
 
 void test("отправка упала: delivered=false с ответом Telegram", async () => {

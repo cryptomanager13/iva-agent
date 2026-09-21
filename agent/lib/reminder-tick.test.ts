@@ -16,15 +16,19 @@ const root = mkdtempSync(join(tmpdir(), "iva-reminder-tick-"));
 process.env.ASSISTANT_DATA_DIR = join(root, "data");
 mkdirSync(process.env.ASSISTANT_DATA_DIR, { recursive: true });
 
-const { add, list, recordDelivery, reminderFile, sweepFired } =
-  await import("./reminder-store.ts");
 const {
-  REMINDER_FIRE_TIMEOUT_MS,
-  readTickPulse,
-  runReminderTick,
-  tickPulseFile,
-} = await import("./reminder-tick.ts");
+  add,
+  list,
+  recordDelivery,
+  recordTurnSession,
+  reminderFile,
+  sweepFired,
+} = await import("./reminder-store.ts");
+const { readTickPulse, runReminderTick, tickPulseFile } =
+  await import("./reminder-tick.ts");
 const { schedulerStatus } = await import("./reminder-tool.ts");
+const { chatKeyOf, getChatStatus, isRunning, setChatStatus } =
+  await import("./run-status.ts");
 
 let caseDir = "";
 beforeEach(() => {
@@ -49,6 +53,14 @@ const exited = (code: number): RunScheduledJobResult => ({
   ok: false,
   code,
   signal: null,
+});
+
+/** Ребёнка убили насмерть: своего finally он не отработал. */
+const killed = (): RunScheduledJobResult => ({
+  skipped: false,
+  ok: false,
+  code: null,
+  signal: "SIGKILL",
 });
 
 /** Двойник runScheduledJob: помнит вызовы и отвечает по сценарию теста. */
@@ -101,7 +113,8 @@ void test("созревшая строка уходит в fired, ребёнок
     stub.calls.map((call) => [...call.argv]),
     [["scripts/reminders/fire.ts", "a"]],
   );
-  assert.equal(stub.calls[0].timeoutMs, REMINDER_FIRE_TIMEOUT_MS);
+  // Срока у ребёнка нет: ход напоминания живёт, пока идут события (сторож тишины — внутри хода).
+  assert.equal(stub.calls[0].timeoutMs, null);
   assert.equal(stub.calls[0].statusPath, undefined);
 
   const [row] = await list();
@@ -362,4 +375,113 @@ void test("отметка пульса обновляется на каждом 
   await runReminderTick({ nowMs: now + 60_000, runJob: stub.runJob, log });
   const second = readTickPulse();
   assert.ok(second !== null && second > first, "mtime пульса не сдвинулся");
+});
+
+void test("убитый ребёнок: запись хода снята тиком сразу, а не через полчаса", async () => {
+  const now = Date.now();
+  await at("a", now - 60_000);
+  const key = chatKeyOf("7701", null);
+  const { log } = logLines();
+  // SIGKILL: свой finally ребёнок не отработает. Сессию хода он успел записать в строку —
+  // единственный признак, по которому тик находит его запись в run-status.
+  const stub = jobStub(async (id) => {
+    const [row] = (await list()).filter((candidate) => candidate.id === id);
+    await recordTurnSession(id, {
+      firedAt: row?.firedAt ?? null,
+      sessionId: "sess-a",
+    });
+    setChatStatus(key, {
+      status: "running",
+      sessionId: "sess-a",
+      turnId: null,
+    });
+    return killed();
+  });
+
+  const result = await runReminderTick({
+    nowMs: now,
+    runJob: stub.runJob,
+    log,
+  });
+
+  assert.equal(result.filled, 1);
+  assert.equal(isRunning(key), false, "чат не остаётся занятым");
+  assert.equal(getChatStatus(key)?.sessionId, undefined, "сессия снята");
+  const [row] = await list();
+  assert.match(String(row?.error), /killed by SIGKILL/u);
+});
+
+void test("убитый ребёнок, вышедший без факта: запись хода тоже снята", async () => {
+  const now = Date.now();
+  await at("a", now - 60_000);
+  const key = chatKeyOf("7704", null);
+  const { log } = logLines();
+  // Текст мог уйти, а запись факта не состояться: ребёнок вышел 0 и промолчал.
+  const stub = jobStub(async (id) => {
+    const [row] = (await list()).filter((candidate) => candidate.id === id);
+    await recordTurnSession(id, {
+      firedAt: row?.firedAt ?? null,
+      sessionId: "sess-a",
+    });
+    setChatStatus(key, {
+      status: "running",
+      sessionId: "sess-a",
+      turnId: null,
+    });
+    return ok();
+  });
+
+  await runReminderTick({ nowMs: now, runJob: stub.runJob, log });
+
+  assert.equal(isRunning(key), false, "чат не остаётся занятым");
+  assert.equal(getChatStatus(key)?.sessionId, undefined, "сессия снята");
+});
+
+void test("убитый ребёнок: чужой ход в том же чате не тронут", async () => {
+  const now = Date.now();
+  await at("a", now - 60_000);
+  const key = chatKeyOf("7702", null);
+  const owner = setChatStatus(key, {
+    status: "running",
+    sessionId: "owner-sess",
+    turnId: "owner-turn",
+    statusMessageId: 42,
+  });
+  const { log } = logLines();
+  const stub = jobStub(async (id) => {
+    const [row] = (await list()).filter((candidate) => candidate.id === id);
+    await recordTurnSession(id, {
+      firedAt: row?.firedAt ?? null,
+      sessionId: "sess-a",
+    });
+    return killed();
+  });
+
+  await runReminderTick({ nowMs: now, runJob: stub.runJob, log });
+
+  assert.deepEqual(getChatStatus(key), owner, "чужая запись не тронута");
+  assert.equal(isRunning(key), true);
+});
+
+void test("убитый ребёнок: запись другого напоминания не тронута", async () => {
+  const now = Date.now();
+  await at("a", now - 60_000);
+  const key = chatKeyOf("7703", null);
+  const other = setChatStatus(key, {
+    status: "running",
+    sessionId: "sess-b",
+  });
+  const { log } = logLines();
+  const stub = jobStub(async (id) => {
+    const [row] = (await list()).filter((candidate) => candidate.id === id);
+    await recordTurnSession(id, {
+      firedAt: row?.firedAt ?? null,
+      sessionId: "sess-a",
+    });
+    return killed();
+  });
+
+  await runReminderTick({ nowMs: now, runJob: stub.runJob, log });
+
+  assert.deepEqual(getChatStatus(key), other);
 });

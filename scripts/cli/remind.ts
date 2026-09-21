@@ -7,7 +7,11 @@ import {
   reminderPrompt,
   runReminderTurn,
 } from "../lib/reminder-turn.ts";
-import type { CreateClient, ReminderTurn } from "../lib/reminder-turn.ts";
+import type {
+  CreateClient,
+  ReminderClientOptions,
+  ReminderTurn,
+} from "../lib/reminder-turn.ts";
 import type { createCliRuntime } from "./runtime.ts";
 
 export type {
@@ -20,36 +24,93 @@ type SendTelegramHtml =
   typeof import("../lib/telegram-send.ts").sendTelegramHtml;
 
 type RunAgentTurn = (prompt: string) => Promise<ReminderTurn>;
-type Timeout = <T>(work: Promise<T>, timeoutMs: number) => Promise<T>;
 
 export type RemindDependencies = {
   readonly createClient?: CreateClient;
   readonly readEnv?: typeof readEnvFresh;
   readonly send?: SendTelegramHtml;
   readonly runAgentTurn?: RunAgentTurn;
-  readonly timeout?: Timeout;
-  readonly timeoutMs?: number;
 };
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+/** Куда отправлять: токен и чат владельца; без них напоминание некуда девать. */
+function targetOf(env: NodeJS.ProcessEnv): {
+  readonly token: string;
+  readonly chat: string;
+} {
+  const token = String(env.TELEGRAM_BOT_TOKEN ?? "").trim();
+  if (!token)
+    throw new Error("TELEGRAM_BOT_TOKEN is missing — run: iva config");
+  const chat = notificationChat(env);
+  if (!chat)
+    throw new Error(
+      "No target chat — set TELEGRAM_DIGEST_CHAT_ID or TELEGRAM_ALLOWED_USER_IDS in .env",
+    );
+  return { token, chat };
+}
 
-const deadline: Timeout = (work, timeoutMs) =>
-  new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`Reminder turn timed out after ${timeoutMs}ms`)),
-      timeoutMs,
+/** Причина, по которой от хода не пришло текста. */
+function noTextCause(turn: ReminderTurn | undefined): string {
+  if (turn?.status !== "failed") return `no text (status "${turn?.status}")`;
+  return `status "failed"${turn.message ? `: ${turn.message}` : ""}`;
+}
+
+/**
+ * Один ход агента по тексту разового напоминания. Провал хода не бросает наружу: код всё
+ * равно отправит текст владельцу, а причину назовёт в журнале.
+ */
+async function runAgent(
+  text: string,
+  client: ReminderClientOptions,
+  dependencies: RemindDependencies,
+): Promise<{ readonly turn?: ReminderTurn; readonly message?: string }> {
+  try {
+    const { tr } = await import("#lib/i18n.ts");
+    const prompt = reminderPrompt({ text }, tr);
+    const runner =
+      dependencies.runAgentTurn ??
+      ((prompt: string) =>
+        runReminderTurn(prompt, client, {
+          createClient: dependencies.createClient,
+        }));
+    // Срока у хода нет (решение владельца 21.09.2026): он идёт, сколько нужно работе,
+    // а кончают его тишина внутри хода или стоп из чата.
+    const turn = await runner(prompt);
+    if (turn.status !== "failed" && turn.message)
+      return { turn, message: turn.message };
+    console.error(`remind: agent turn failed: ${noTextCause(turn)}`);
+    return { turn };
+  } catch (error) {
+    const failure = error instanceof Error ? error.message : String(error);
+    console.error(`remind: agent turn failed: ${failure}`);
+    return {};
+  }
+}
+
+/** Итог подсказки: неудача — причина, а не молчание: вызывающий скажет о ней в журнале. */
+type HintOutcome =
+  | { readonly delivered: true }
+  | { readonly delivered: false; readonly error: string };
+
+/** Подсказка о форматировании; её провал не валит уже доставленное напоминание. */
+async function hintFormatting(
+  turn: ReminderTurn | undefined,
+  error: string,
+): Promise<HintOutcome> {
+  if (!turn?.feedback)
+    return { delivered: false, error: "the turn has no session left" };
+  try {
+    await turn.feedback(
+      `The last reminder failed Telegram parse_mode=HTML (${error}) and was sent as plain text — ` +
+        "format more simply next time: **bold**, `code`, lists, no raw HTML.",
     );
-    void work.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
-  });
+    return { delivered: true };
+  } catch (hintError) {
+    return {
+      delivered: false,
+      error: hintError instanceof Error ? hintError.message : String(hintError),
+    };
+  }
+}
 
 /** Create the remind command without reading .env or touching eve at import time. */
 export function createRemindCommand(
@@ -63,65 +124,27 @@ export function createRemindCommand(
     const text = args.join(" ").trim();
     if (!text) throw new Error("Nothing to send — usage: iva remind <text>");
     const env = await readEnv(ENV_PATH);
-    const token = String(env.TELEGRAM_BOT_TOKEN ?? "").trim();
-    if (!token)
-      throw new Error("TELEGRAM_BOT_TOKEN is missing — run: iva config");
-    const chat = notificationChat(env);
-    if (!chat)
-      throw new Error(
-        "No target chat — set TELEGRAM_DIGEST_CHAT_ID or TELEGRAM_ALLOWED_USER_IDS in .env",
-      );
-    const client = reminderClientOptions(env);
+    const target = targetOf(env);
 
-    let turn: ReminderTurn | undefined;
-    let failure: string | undefined;
-    try {
-      const { tr } = await import("#lib/i18n.ts");
-      const prompt = reminderPrompt({ text }, tr);
-      const timeoutMs = dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const runner =
-        dependencies.runAgentTurn ??
-        ((prompt) =>
-          runReminderTurn(prompt, client, {
-            createClient: dependencies.createClient,
-          }));
-      turn = await (dependencies.timeout ?? deadline)(
-        runner(prompt),
-        timeoutMs,
-      );
-    } catch (error) {
-      turn = undefined;
-      failure = error instanceof Error ? error.message : String(error);
-    }
-
-    const agentMessage =
-      turn?.status !== "failed" && turn?.message ? turn.message : undefined;
-    if (!agentMessage) {
-      const cause =
-        failure ??
-        (turn?.status === "failed"
-          ? `status "failed"${turn.message ? `: ${turn.message}` : ""}`
-          : `no text (status "${turn?.status}")`);
-      console.error(`remind: agent turn failed: ${cause}`);
-    }
+    const { turn, message: agentMessage } = await runAgent(
+      text,
+      reminderClientOptions(env),
+      dependencies,
+    );
     const message = agentMessage ?? `⏰ ${text}`;
     const send =
       dependencies.send ??
       (await import("../lib/telegram-send.ts")).sendTelegramHtml;
-    const result = await send(token, chat, message, { retryTransient: true });
+    const result = await send(target.token, target.chat, message, {
+      retryTransient: true,
+    });
     if (!result.ok)
       throw new Error(`Reminder Telegram send failed: ${result.error}`);
-    if (agentMessage && result.fellBack && turn?.feedback) {
-      // The Reminder is already delivered: a lost feedback turn must not fail the unit,
-      // or the journal would claim a delivered Reminder was lost.
-      try {
-        await turn.feedback(
-          `The last reminder failed Telegram parse_mode=HTML (${result.error}) and was sent as plain text — ` +
-            "format more simply next time: **bold**, `code`, lists, no raw HTML.",
-        );
-      } catch {
-        // Delivery succeeded; the formatting hint just will not reach this turn.
-      }
+    if (agentMessage !== undefined && result.fellBack) {
+      const hint = await hintFormatting(turn, result.error);
+      // Напоминание доставлено; не дошедшая подсказка видна в журнале и исход не меняет.
+      if (!hint.delivered)
+        console.error(`remind: formatting hint not delivered: ${hint.error}`);
     }
     ok("Reminder sent to Telegram");
   };

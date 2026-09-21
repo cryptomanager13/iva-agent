@@ -79,6 +79,152 @@ export interface MarkTelegramTurnAliveOptions {
 
 export type TurnHeartbeat = { sessionId: string; at: number };
 
+export interface TakeOverTelegramChatOptions {
+  chatKey: string;
+  /** Что записать в освободившийся чат: chatTakeOverPatch(...) плюс поля своего хода. */
+  patch: Record<string, unknown>;
+  now?: () => number;
+  staleMs?: number;
+  getStatusImpl: GetStatus;
+  setStatusIfImpl: SetStatusIf;
+  /** Уборка осиротевшего индикатора «Работаю…»; у кого нет своего Bot API-шва — no-op. */
+  removeWorkingStatusImpl?: (messageId: number) => Promise<unknown>;
+  onWorkingStatusError?: (error: unknown) => void;
+}
+
+/**
+ * Что записать в чат, доставшийся от мёртвого хозяина: тот же набор обнулений, что у канала,
+ * плюс поля своего хода. Иначе поля протухшего хода (statusAt, firstOutputAt, latencyLogged,
+ * resetAt) переезжают в запись нового хозяина и врут про его сроки.
+ */
+export function chatTakeOverPatch(
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    status: "running",
+    ingressId: null,
+    ingressAt: null,
+    statusAt: null,
+    turnAt: null,
+    firstOutputAt: null,
+    sessionId: null,
+    turnId: null,
+    statusMessageId: null,
+    latencyLogged: null,
+    resetAt: null,
+    ...fields,
+  };
+}
+
+// Живой чужой ход: его индикатор уже на экране, а свой этот ход получит в turn.started.
+const freshRunning = (
+  status: ChatStatus,
+  at: number,
+  staleMs: number,
+): boolean =>
+  status?.status === "running" &&
+  typeof status.updatedAt === "number" &&
+  at - status.updatedAt < staleMs;
+
+// Индикатор протухшей записи: после захвата его больше никто не найдёт — прибирает тот, кто взял.
+const orphanWorkingStatusId = (status: ChatStatus): number | undefined =>
+  status?.status === "running" && typeof status.statusMessageId === "number"
+    ? status.statusMessageId
+    : undefined;
+
+/**
+ * Убрать сообщение «Работаю…», за которым больше никто не следит. Сбой уборки не критичен:
+ * сообщение живёт дольше, чем нужно, но состояние чата уже верно.
+ */
+async function dropWorkingStatus(
+  messageId: number | undefined,
+  remove: ((messageId: number) => Promise<unknown>) | undefined,
+  onError: (error: unknown) => void = () => {},
+): Promise<void> {
+  if (messageId === undefined) return;
+  try {
+    await remove?.(messageId);
+  } catch (error) {
+    onError(error);
+  }
+}
+
+/** Всё, что нужно одной попытке клейма. */
+type ClaimStep = {
+  readonly chatKey: string;
+  readonly patch: Record<string, unknown>;
+  readonly at: number;
+  readonly staleMs: number;
+  readonly getStatusImpl: GetStatus;
+  readonly setStatusIfImpl: SetStatusIf;
+};
+
+/** Попытка ровно одна: занятый чат — сразу нет, проигранный CAS — повод повторить. */
+function claimOnce(step: ClaimStep): {
+  readonly taken: boolean;
+  readonly live: boolean;
+  readonly orphanMessageId?: number;
+} {
+  const current = step.getStatusImpl(step.chatKey);
+  if (freshRunning(current, step.at, step.staleMs))
+    return { taken: false, live: true };
+  const claimed = step.setStatusIfImpl(
+    step.chatKey,
+    { generation: current?.generation },
+    step.patch,
+  );
+  return claimed
+    ? {
+        taken: true,
+        live: false,
+        orphanMessageId: orphanWorkingStatusId(current),
+      }
+    : { taken: false, live: false };
+}
+
+/**
+ * Взять чат у осиротевшей записи — один путь на канал и на ход напоминания
+ * (scripts/reminders/fire.ts), второй копии клейма в репозитории нет. Живой чужой ход не
+ * трогаем вовсе: false — чат занят, запись не тронута. Клейм — CAS по generation, чтобы
+ * конкурирующий претендент не украл состояние между read и write.
+ */
+export async function takeOverTelegramChat({
+  chatKey,
+  patch,
+  now,
+  staleMs,
+  getStatusImpl,
+  setStatusIfImpl,
+  removeWorkingStatusImpl,
+  onWorkingStatusError,
+}: TakeOverTelegramChatOptions): Promise<boolean> {
+  const step: ClaimStep = {
+    chatKey,
+    patch,
+    at: (now ?? Date.now)(),
+    staleMs: staleMs ?? 30 * 60_000,
+    getStatusImpl,
+    setStatusIfImpl,
+  };
+  const onError = onWorkingStatusError ?? (() => {});
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { taken, live, orphanMessageId } = claimOnce(step);
+      if (live) return false;
+      if (!taken) continue;
+      await dropWorkingStatus(
+        orphanMessageId,
+        removeWorkingStatusImpl,
+        onError,
+      );
+      return true;
+    }
+  } catch (error) {
+    onError(error);
+  }
+  return false;
+}
+
 // Пульс живого хода. Жнец моста (scripts/poller/queue.ts) считает ход мёртвым по
 // возрасту updatedAt, а тот двигался только на старте хода, первом выводе и финале:
 // молчаливый ход на сорок минут (глубокий ресёрч) получал насильный idle, реальный
@@ -101,6 +247,52 @@ const durationFromIngress = (ingressAt: unknown, at: unknown): number | null =>
     ? at - ingressAt
     : null;
 
+/**
+ * Индикатор раннего статуса: отправить и привязать к записи. Запись могла уйти между
+ * отправкой и привязкой (reset, чужой ход) — сообщение, за которым никто не следит,
+ * прибираем сами; сбой отправки только журналируется, ход он не останавливает.
+ */
+async function sendEarlyStatus({
+  chatKey,
+  ingressId,
+  now,
+  setStatusIfImpl,
+  sendWorkingStatusImpl,
+  removeWorkingStatusImpl,
+  onWorkingStatusError,
+}: {
+  readonly chatKey: string;
+  readonly ingressId: string;
+  readonly now: () => number;
+  readonly setStatusIfImpl: SetStatusIf;
+  readonly sendWorkingStatusImpl: (options: {
+    canStop: false;
+  }) => Promise<number | null | undefined>;
+  readonly removeWorkingStatusImpl?: (messageId: number) => Promise<unknown>;
+  readonly onWorkingStatusError?: (error: unknown) => void;
+}): Promise<void> {
+  let statusMessageId;
+  try {
+    statusMessageId = await sendWorkingStatusImpl({ canStop: false });
+  } catch (error) {
+    onWorkingStatusError?.(error);
+    return;
+  }
+  if (statusMessageId === null || statusMessageId === undefined) return;
+
+  const attached = setStatusIfImpl(
+    chatKey,
+    { status: "running", ingressId },
+    { statusMessageId, statusAt: now() },
+  );
+  if (!attached)
+    await dropWorkingStatus(
+      statusMessageId,
+      removeWorkingStatusImpl,
+      onWorkingStatusError,
+    );
+}
+
 export async function publishTelegramEarlyStatus({
   chatKey,
   ingressId = randomUUID(),
@@ -109,88 +301,35 @@ export async function publishTelegramEarlyStatus({
   getStatusImpl,
   setStatusIfImpl,
   sendWorkingStatusImpl,
-  removeWorkingStatusImpl = async () => {},
-  onWorkingStatusError = () => {},
+  removeWorkingStatusImpl,
+  onWorkingStatusError,
 }: PublishTelegramEarlyStatusOptions): Promise<string | null> {
   const ingressAt = now();
   // Мост пропускает реплаи на сообщения бота мимо busy-очереди, поэтому сюда можно
-  // попасть, пока предыдущий ход ещё бежит. Безусловный overwrite крал у него
-  // sessionId+statusMessageId: терминальная уборка проходила мимо CAS и «Работаю…/Стоп»
-  // оставался в чате навсегда. Живой ход не трогаем — его индикатор уже на экране,
-  // а свой этот ход получит в turn.started. Клейм — CAS по generation, чтобы
-  // конкурирующий ingress не украл состояние между read и write.
-  let claimed = null;
-  let orphanMessageId: number | undefined;
-  try {
-    for (let attempt = 0; attempt < 3 && !claimed; attempt++) {
-      const current = getStatusImpl(chatKey);
-      if (
-        current?.status === "running" &&
-        typeof current.updatedAt === "number" &&
-        ingressAt - current.updatedAt < staleMs
-      ) {
-        return null;
-      }
-      // Протухший running: после overwrite его индикатор больше никто не найдёт —
-      // прибираем сами (best-effort, как в reaper).
-      orphanMessageId =
-        current?.status === "running" &&
-        typeof current.statusMessageId === "number"
-          ? current.statusMessageId
-          : undefined;
-      claimed = setStatusIfImpl(
-        chatKey,
-        { generation: current?.generation },
-        {
-          status: "running",
-          ingressId,
-          ingressAt,
-          statusAt: null,
-          turnAt: null,
-          firstOutputAt: null,
-          sessionId: null,
-          turnId: null,
-          statusMessageId: null,
-          latencyLogged: null,
-          resetAt: null,
-        },
-      );
-    }
-  } catch (error) {
-    onWorkingStatusError(error);
-    return null;
-  }
-  if (!claimed) return null;
-  if (orphanMessageId !== undefined) {
-    try {
-      await removeWorkingStatusImpl(orphanMessageId);
-    } catch (error) {
-      onWorkingStatusError(error);
-    }
-  }
-
-  let statusMessageId;
-  try {
-    statusMessageId = await sendWorkingStatusImpl({ canStop: false });
-  } catch (error) {
-    onWorkingStatusError(error);
-    return ingressId;
-  }
-  if (statusMessageId === null || statusMessageId === undefined)
-    return ingressId;
-
-  const attached = setStatusIfImpl(
+  // попасть, пока предыдущий ход ещё бежит. Клейм общий с ходом напоминания
+  // (takeOverTelegramChat): живой ход не трогаем — его индикатор уже на экране,
+  // а свой этот ход получит в turn.started; протухшую запись забираем и прибираем
+  // осиротевший индикатор мёртвого хода.
+  const claimed = await takeOverTelegramChat({
     chatKey,
-    { status: "running", ingressId },
-    { statusMessageId, statusAt: now() },
-  );
-  if (!attached) {
-    try {
-      await removeWorkingStatusImpl(statusMessageId);
-    } catch (error) {
-      onWorkingStatusError(error);
-    }
-  }
+    patch: chatTakeOverPatch({ ingressId, ingressAt }),
+    now: () => ingressAt,
+    staleMs,
+    getStatusImpl,
+    setStatusIfImpl,
+    removeWorkingStatusImpl,
+    onWorkingStatusError,
+  });
+  if (!claimed) return null;
+  await sendEarlyStatus({
+    chatKey,
+    ingressId,
+    now,
+    setStatusIfImpl,
+    sendWorkingStatusImpl,
+    removeWorkingStatusImpl,
+    onWorkingStatusError,
+  });
   return ingressId;
 }
 

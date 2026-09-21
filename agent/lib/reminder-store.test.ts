@@ -33,6 +33,7 @@ const {
   recordDelivery,
   reminderFile,
   remove,
+  recordTurnSession,
   sweepFired,
 } = await import("./reminder-store.ts");
 const { saveJsonAtomic } = await import("./json-store.ts");
@@ -249,6 +250,69 @@ test("факт доставки живёт в строке своего сраб
     recordDelivery("nope", { firedAt: null, delivered: true, error: null }),
     /nope/,
   );
+});
+
+test("строка помнит сессию хода, а запоздалый ход старого срока её не переписывает", async () => {
+  const now = 11_000_000;
+  await add({
+    id: "one",
+    text: "долгая работа",
+    schedule: { kind: "at", atMs: now },
+  });
+  const [fired] = await fireDue(now, 10);
+  assert.ok(fired);
+  assert.equal(fired.sessionId, null, "до хода сессии нет");
+
+  const stamped = await recordTurnSession("one", {
+    firedAt: fired.firedAt,
+    sessionId: "sess-1",
+  });
+  assert.equal(stamped.sessionId, "sess-1");
+  assert.equal(
+    (await list())[0]?.sessionId,
+    "sess-1",
+    "сессию хода видит тик: по ней снимается запись чата",
+  );
+
+  // Ход прошлого срока опоздал: его сессия — не сессия текущего срока.
+  const lines: string[] = [];
+  const ignored = await recordTurnSession(
+    "one",
+    { firedAt: fired.firedAt! - 1, sessionId: "sess-old" },
+    { log: (...args: unknown[]) => lines.push(args.map(String).join(" ")) },
+  );
+  assert.equal(ignored.sessionId, "sess-1");
+  assert.equal((await list())[0]?.sessionId, "sess-1");
+  assert.ok(
+    lines.some((line) => line.includes("turn session for firedAt")),
+    lines.join("\n"),
+  );
+
+  await assert.rejects(
+    recordTurnSession("nope", { firedAt: fired.firedAt, sessionId: "sess-1" }),
+    /nope/,
+  );
+});
+
+test("строка без поля sessionId (таблица старой версии) читается как «хода не было»", async () => {
+  const legacy = row({ id: "old", nextRunAtMs: 8 }) as unknown as Record<
+    string,
+    unknown
+  >;
+  delete legacy.sessionId;
+  await saveJsonAtomic(reminderFile(), {
+    schemaVersion: REMINDER_SCHEMA_VERSION,
+    rows: [legacy],
+  });
+  const [read] = await list();
+  assert.equal(read?.sessionId, null);
+
+  // Кривая сессия — ошибка строки, не тихий null.
+  await saveJsonAtomic(reminderFile(), {
+    schemaVersion: REMINDER_SCHEMA_VERSION,
+    rows: [{ ...row({ id: "old", nextRunAtMs: 8 }), sessionId: "" }],
+  });
+  await assert.rejects(list(), /sessionId must be null or a non-empty string/u);
 });
 
 test("результат старого срока не переписывает факт нового и уходит в журнал", async () => {

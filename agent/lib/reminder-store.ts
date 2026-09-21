@@ -53,6 +53,13 @@ export interface Reminder {
   delivered: boolean | null;
   /** Причина последнего сбоя — отправки или хода агента. */
   error: string | null;
+  /**
+   * Сессия идущего хода: её пишет ребёнок перед ходом, читает тик. Убитый ребёнок (SIGKILL)
+   * свой `finally` не отработает, и запись чата снимет тик — по этой самой сессии.
+   * null — в этом срабатывании хода ещё не было; строки, записанные до появления поля,
+   * его не несут вовсе.
+   */
+  sessionId?: string | null;
 }
 export type ReminderInput = {
   id: string;
@@ -74,6 +81,7 @@ const ROW_KEYS = [
   "firedAt",
   "delivered",
   "error",
+  "sessionId",
 ] as const;
 
 function fail(file: string, message: string): never {
@@ -189,48 +197,51 @@ function assertChat(
   return { id: value.id, threadId: value.threadId };
 }
 
-function assertReminder(file: string, value: unknown): Reminder {
-  if (!isPlainObject(value))
-    fail(file, `reminder row must be an object, got ${JSON.stringify(value)}`);
-
-  const idLabel = JSON.stringify(value.id);
-
-  for (const key of Object.keys(value)) {
-    if (!(ROW_KEYS as readonly string[]).includes(key))
-      badReminder(file, idLabel, `unknown key ${JSON.stringify(key)}`);
-  }
-
-  const id = value.id;
-  if (typeof id !== "string" || id.length === 0 || id.trim() !== id)
+/** id строки: без него строка не адресуется и не находится в remind list. */
+function assertId(file: string, value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.trim() !== value)
     fail(
       file,
-      `id must be a non-empty string without surrounding whitespace, got ${idLabel}`,
+      `id must be a non-empty string without surrounding whitespace, got ${JSON.stringify(value)}`,
     );
+  return value;
+}
 
-  if (typeof value.text !== "string" || value.text.trim().length === 0)
-    badReminder(file, idLabel, "text must be a non-empty string");
+/** Число-срок: безопасное целое не меньше нуля. */
+function assertTime(
+  file: string,
+  idLabel: string,
+  name: string,
+  value: unknown,
+): number {
+  if (!isSafeInt(value) || value < 0)
+    badReminder(
+      file,
+      idLabel,
+      `${name} must be a safe integer >= 0, got ${JSON.stringify(value)}`,
+    );
+  return value;
+}
 
-  let schedule: ReminderSchedule;
+/** Расписание строки: форма проверяется там же, где и при добавлении. */
+function assertSchedule(
+  file: string,
+  idLabel: string,
+  value: unknown,
+): ReminderSchedule {
   try {
-    schedule = normalizeSchedule(value.schedule);
+    return normalizeSchedule(value);
   } catch (error) {
     badReminder(file, idLabel, (error as Error).message);
   }
+}
 
-  if (!isSafeInt(value.nextRunAtMs) || value.nextRunAtMs < 0)
-    badReminder(
-      file,
-      idLabel,
-      `nextRunAtMs must be a safe integer >= 0, got ${JSON.stringify(value.nextRunAtMs)}`,
-    );
-
-  if (!isSafeInt(value.createdAt) || value.createdAt < 0)
-    badReminder(
-      file,
-      idLabel,
-      `createdAt must be a safe integer >= 0, got ${JSON.stringify(value.createdAt)}`,
-    );
-
+/** Статус и срок срабатывания: у сработавшей строки срок обязан быть. */
+function assertStatus(
+  file: string,
+  idLabel: string,
+  value: Record<string, unknown>,
+): { readonly status: ReminderStatus; readonly firedAt: number | null } {
   const status = value.status;
   if (status !== "pending" && status !== "fired")
     badReminder(
@@ -238,7 +249,6 @@ function assertReminder(file: string, value: unknown): Reminder {
       idLabel,
       `status must be "pending" or "fired", got ${JSON.stringify(status)}`,
     );
-
   const firedAt = value.firedAt;
   if (firedAt !== null && (!isSafeInt(firedAt) || firedAt < 0))
     badReminder(
@@ -248,6 +258,48 @@ function assertReminder(file: string, value: unknown): Reminder {
     );
   if (status === "fired" && firedAt === null)
     badReminder(file, idLabel, "fired row has no firedAt");
+  return { status, firedAt };
+}
+
+/**
+ * Сессия идущего хода. Строки, записанные до появления поля, читаются как «ход не начинался»:
+ * тик снимает запись чата только по ней.
+ */
+function assertSessionId(
+  file: string,
+  idLabel: string,
+  value: unknown,
+): string | null {
+  if (
+    value !== null &&
+    value !== undefined &&
+    (typeof value !== "string" || value.length === 0)
+  )
+    badReminder(
+      file,
+      idLabel,
+      `sessionId must be null or a non-empty string, got ${JSON.stringify(value)}`,
+    );
+  return value ?? null;
+}
+
+function assertReminder(file: string, value: unknown): Reminder {
+  if (!isPlainObject(value))
+    fail(file, `reminder row must be an object, got ${JSON.stringify(value)}`);
+
+  const idLabel = JSON.stringify(value.id);
+
+  // Чужой ключ — строка чужой версии: читать её наугад значит молча испортить данные
+  // следующей записью.
+  for (const key of Object.keys(value)) {
+    if (!(ROW_KEYS as readonly string[]).includes(key))
+      badReminder(file, idLabel, `unknown key ${JSON.stringify(key)}`);
+  }
+
+  const id = assertId(file, value.id);
+  if (typeof value.text !== "string" || value.text.trim().length === 0)
+    badReminder(file, idLabel, "text must be a non-empty string");
+  const { status, firedAt } = assertStatus(file, idLabel, value);
 
   const delivered = value.delivered;
   if (delivered !== null && typeof delivered !== "boolean")
@@ -270,13 +322,14 @@ function assertReminder(file: string, value: unknown): Reminder {
     text: value.text,
     // Строки до этого поля чата не несут: им остаётся чат владельца из настроек.
     chat: assertChat(file, idLabel, value.chat),
-    schedule,
-    nextRunAtMs: value.nextRunAtMs,
-    createdAt: value.createdAt,
+    schedule: assertSchedule(file, idLabel, value.schedule),
+    nextRunAtMs: assertTime(file, idLabel, "nextRunAtMs", value.nextRunAtMs),
+    createdAt: assertTime(file, idLabel, "createdAt", value.createdAt),
     status,
     firedAt,
     delivered,
     error,
+    sessionId: assertSessionId(file, idLabel, value.sessionId),
   };
 }
 
@@ -316,6 +369,7 @@ function migrateV1Row(
     firedAt,
     delivered: alreadyRan ? value.lastStatus === "ok" : null,
     error: typeof value.lastError === "string" ? value.lastError : null,
+    sessionId: null,
   };
 }
 
@@ -396,6 +450,26 @@ function byDeadline(a: Reminder, b: Reminder): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/**
+ * Первый срок: у разовой строки он и есть её срок, у повторяющейся его считает croner выше
+ * и передаёт вызовом — забытый nextRunAtMs оставил бы строку без срока вовсе.
+ */
+function assertFirstRun(
+  file: string,
+  idLabel: string,
+  schedule: ReminderSchedule,
+  nextRunAtMs: number | undefined,
+): number {
+  if (schedule.kind === "at") {
+    if (nextRunAtMs !== undefined)
+      badReminder(file, idLabel, 'nextRunAtMs is not allowed for kind "at"');
+    return schedule.atMs;
+  }
+  if (nextRunAtMs === undefined)
+    badReminder(file, idLabel, 'nextRunAtMs is required for kind "cron"');
+  return assertTime(file, idLabel, "nextRunAtMs", nextRunAtMs);
+}
+
 function buildReminder(
   file: string,
   input: ReminderInput,
@@ -415,41 +489,19 @@ function buildReminder(
       badReminder(file, idLabel, `unknown input key ${JSON.stringify(key)}`);
   }
 
-  let schedule: ReminderSchedule;
-  try {
-    schedule = normalizeSchedule(input.schedule);
-  } catch (error) {
-    badReminder(file, idLabel, (error as Error).message);
-  }
-
-  let nextRunAtMs: number;
-  if (schedule.kind === "at") {
-    if (input.nextRunAtMs !== undefined)
-      badReminder(file, idLabel, 'nextRunAtMs is not allowed for kind "at"');
-    nextRunAtMs = schedule.atMs;
-  } else {
-    if (input.nextRunAtMs === undefined)
-      badReminder(file, idLabel, 'nextRunAtMs is required for kind "cron"');
-    if (!isSafeInt(input.nextRunAtMs) || input.nextRunAtMs < 0)
-      badReminder(
-        file,
-        idLabel,
-        `nextRunAtMs must be a safe integer >= 0, got ${JSON.stringify(input.nextRunAtMs)}`,
-      );
-    nextRunAtMs = input.nextRunAtMs;
-  }
-
+  const schedule = assertSchedule(file, idLabel, input.schedule);
   return {
     id: input.id,
     text: input.text,
     chat: assertChat(file, idLabel, input.chat ?? null),
     schedule,
-    nextRunAtMs,
+    nextRunAtMs: assertFirstRun(file, idLabel, schedule, input.nextRunAtMs),
     createdAt: Date.now(),
     status: "pending",
     firedAt: null,
     delivered: null,
     error: null,
+    sessionId: null,
   };
 }
 
@@ -522,6 +574,7 @@ export async function fireDue(
       row.firedAt = nowMs;
       row.delivered = null;
       row.error = null;
+      row.sessionId = null;
       if (row.schedule.kind === "cron") {
         try {
           row.nextRunAtMs = nextCronRunMs(
@@ -544,12 +597,43 @@ export async function fireDue(
 }
 
 /**
- * Факт отправки. Успех не стирает уже записанную причину, провал отправки называет
- * свою (она и есть главная для владельца). Результат принимается
- * только за своё срабатывание: firedAt результата обязан совпасть с firedAt строки,
- * иначе запоздалый ответ старого срока переписал бы факт нового — такой результат
- * уходит в журнал и отбрасывается. `delivered: null` — факта нет (текст мог уйти, а
- * запись не состояться): строка остаётся без факта, `error` называет причину.
+ * Правка строки срабатывания под локом. Результат принимается только за своё срабатывание:
+ * запоздалый ответ старого срока иначе переписал бы факт нового — такой ответ уходит в журнал
+ * и отбрасывается. Успех не стирает уже записанную причину: её называют сами обновления.
+ */
+async function updateFiringRow(
+  id: string,
+  firing: {
+    readonly firedAt: number | null;
+    /** Что именно пишут — только ради строки журнала об отброшенном результате. */
+    readonly what: string;
+  },
+  options: ReminderRecordOptions,
+  update: (row: Reminder) => void,
+): Promise<Reminder> {
+  const { firedAt, what } = firing;
+  const file = reminderFile();
+  return mutate(file, async () => {
+    const rows = await loadTable(file);
+    const row = rows.find((candidate) => candidate.id === id);
+    if (row === undefined)
+      fail(file, `reminder ${JSON.stringify(id)} not found`);
+    if (row.firedAt !== firedAt) {
+      recordLog(options)(
+        `reminders: ${id} ${what} for firedAt=${firedAt} ignored: current firedAt=${row.firedAt}`,
+      );
+      return structuredClone(row);
+    }
+    update(row);
+    await saveTable(file, rows);
+    return structuredClone(row);
+  });
+}
+
+/**
+ * Факт отправки: провал отправки называет свою причину (она и есть главная для владельца),
+ * `delivered: null` — факта нет (текст мог уйти, а запись не состояться): строка остаётся
+ * без факта, `error` называет причину.
  */
 export async function recordDelivery(
   id: string,
@@ -560,23 +644,37 @@ export async function recordDelivery(
   },
   options: ReminderRecordOptions = {},
 ): Promise<Reminder> {
-  const file = reminderFile();
-  return mutate(file, async () => {
-    const rows = await loadTable(file);
-    const row = rows.find((candidate) => candidate.id === id);
-    if (row === undefined)
-      fail(file, `reminder ${JSON.stringify(id)} not found`);
-    if (row.firedAt !== outcome.firedAt) {
-      recordLog(options)(
-        `reminders: ${id} delivery result for firedAt=${outcome.firedAt} ignored: current firedAt=${row.firedAt}`,
-      );
-      return structuredClone(row);
-    }
-    row.delivered = outcome.delivered;
-    if (outcome.error !== null) row.error = outcome.error;
-    await saveTable(file, rows);
-    return structuredClone(row);
-  });
+  return updateFiringRow(
+    id,
+    { firedAt: outcome.firedAt, what: "delivery result" },
+    options,
+    (row) => {
+      row.delivered = outcome.delivered;
+      if (outcome.error !== null) row.error = outcome.error;
+    },
+  );
+}
+
+/**
+ * Сессия идущего хода. Пишется до клейма чата: тик снимает запись убитого ребёнка только
+ * по ней, и запись без сессии он бы не нашёл.
+ */
+export async function recordTurnSession(
+  id: string,
+  session: {
+    readonly firedAt: number | null;
+    readonly sessionId: string;
+  },
+  options: ReminderRecordOptions = {},
+): Promise<Reminder> {
+  return updateFiringRow(
+    id,
+    { firedAt: session.firedAt, what: "turn session" },
+    options,
+    (row) => {
+      row.sessionId = session.sessionId;
+    },
+  );
 }
 
 /** Журнал отброшенного результата: по умолчанию в stdout, как у планировщика. */

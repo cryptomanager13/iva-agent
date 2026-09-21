@@ -17,7 +17,7 @@ import { createCliRuntime } from "./runtime.ts";
 const RUNS = { numRuns: 500 };
 const ROOT = "/tmp/iva-cli-remind-test";
 
-type AgentOutcome = "ok" | "empty" | "failed" | "throw" | "timeout";
+type AgentOutcome = "ok" | "empty" | "failed" | "throw";
 type SendResult = { ok: boolean; fellBack: boolean; error: string };
 type SendCall = readonly [
   bot: string,
@@ -27,7 +27,7 @@ type SendCall = readonly [
 ];
 
 // The turn reads its client's response as a stream, so a fake client answers with an async
-// iterable of events plus eve's cooperative cancel.
+// iterable of events plus eve's cooperative cancel and the session id a stop would use.
 function fakeTurnResponse(events: readonly TurnStreamEvent[]) {
   let index = 0;
   return Object.assign(
@@ -44,7 +44,7 @@ function fakeTurnResponse(events: readonly TurnStreamEvent[]) {
         },
       }),
     },
-    { cancel: () => Promise.resolve() },
+    { cancel: () => Promise.resolve(), sessionId: "sess-remind" },
   );
 }
 
@@ -80,7 +80,6 @@ function remindCommand(
       if (agentOutcome === "throw")
         return Promise.reject(new Error("eve unavailable"));
       try {
-        if (agentOutcome === "timeout") await new Promise(() => {});
         if (agentOutcome === "failed")
           return {
             status: "failed",
@@ -105,7 +104,6 @@ function remindCommand(
         }
       }
     },
-    timeoutMs: 1,
   };
   const cmdRemind = createRemindCommand(
     {
@@ -378,7 +376,6 @@ void test("a lost agent turn names its cause on stderr and still delivers the ra
   for (const { outcome, cause } of [
     { outcome: "throw", cause: /eve unavailable/u },
     { outcome: "failed", cause: /status "failed".*ignore me/u },
-    { outcome: "timeout", cause: /timed out after 1ms/u },
     { outcome: "empty", cause: /no text \(status "waiting"\)/u },
   ] as const) {
     error.mock.resetCalls();
@@ -405,7 +402,6 @@ const agentOutcome = fc.constantFrom<AgentOutcome>(
   "empty",
   "failed",
   "throw",
-  "timeout",
 );
 
 void test("property: one content send chooses agent text or the raw fallback", async (t) => {

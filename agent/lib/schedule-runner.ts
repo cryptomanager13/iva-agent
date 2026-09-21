@@ -1,7 +1,8 @@
 // Thin spawner shared by agent/schedules/*.ts and agent/lib/schedule-migration.ts.
 // Runs an existing cron script exactly the way the (now retired) systemd units did —
-// `flock -w 3900 <lockPath> <nodeBin> --env-file-if-exists=.env <argv...>` — under a hard
-// timeout, and records the outcome to a status file so `iva doctor` and the /menu → crons screen
+// `flock -w 3900 <lockPath> <nodeBin> --env-file-if-exists=.env <argv...>` — under a
+// deadline (`timeoutMs: null` means none: a reminder turn lives as long as it works), and
+// records the outcome to a status file so `iva doctor` and the /menu → crons screen
 // can see it. Never throws: eve's schedule runner and the fire-and-forget migration hook
 // both need a promise that always settles. The flag is the tolerant one on purpose: the
 // parent (systemd EnvironmentFile, eve start) already carries every key of .env in its own
@@ -68,7 +69,11 @@ export interface RunScheduledJobOptions {
   readonly root?: string;
   readonly nodeBin?: string;
   readonly lockPath?: string;
-  readonly timeoutMs?: number;
+  /**
+   * Срок запуска. `null` — срока нет: ход живёт, пока идёт работа (напоминания).
+   * Ночные задания срока не задают и получают DEFAULT_TIMEOUT_MS.
+   */
+  readonly timeoutMs?: number | null;
   readonly killGraceMs?: number;
   readonly guardMs?: number;
   readonly statusPath?: string;
@@ -139,6 +144,15 @@ function ownsReservation(
   );
 }
 
+/**
+ * Срок запуска как число. `null` — срока нет (ход напоминания живёт, пока идут события),
+ * и тогда срока нет и у брони: она держится, пока жив её владелец, а его смерть освобождает
+ * её сразу (reservationOwnerIsDead).
+ */
+function deadlineMs(timeoutMs: number | null): number {
+  return timeoutMs ?? Number.POSITIVE_INFINITY;
+}
+
 export class ScheduleStatusError extends Error {}
 
 // Shared with schedule-migration.ts — one status file, one implementation of how it's
@@ -190,7 +204,7 @@ function factError(outcome: SpawnOutcome, ok: boolean): string | null {
   return null;
 }
 
-// Fire-and-forget: раннер не ждёт хода агента (он идёт до восьми минут) и не падает, если
+// Fire-and-forget: раннер не ждёт хода агента (он идёт, сколько нужно работе) и не падает, если
 // ребёнок не поднялся. Но и молчать о таком провале нельзя: ребёнок отвязан (detached,
 // stdio ignore), поэтому единственный его след — строка журнала и отметка в строке факта,
 // которую раннер ставит только если сам ход ничего записать не успел. Повторов нет: провал
@@ -347,14 +361,13 @@ export async function runScheduledJob(
         }
         const prior = existing[name];
 
-        // Genuinely still running (started less than our own hard timeout ago) — a run
-        // that hasn't succeeded OR failed yet, so the lastSuccessAt guard below can't
-        // see it. Without this, a Nitro tick and a migration catch-up landing on the
-        // same period at nearly the same instant would both read the same stale
-        // lastSuccessAt and both pass that guard.
+        // Genuinely still running — a run that hasn't succeeded OR failed yet, so the
+        // lastSuccessAt guard below can't see it. Without this, a Nitro tick and a
+        // migration catch-up landing on the same period at nearly the same instant would
+        // both read the same stale lastSuccessAt and both pass that guard.
         if (
           typeof prior?.inProgressSince === "number" &&
-          now() - prior.inProgressSince < timeoutMs &&
+          now() - prior.inProgressSince < deadlineMs(timeoutMs) &&
           !reservationOwnerIsDead(prior)
         ) {
           const ageS = Math.round((now() - prior.inProgressSince) / 1000);
@@ -492,20 +505,25 @@ export async function runScheduledJob(
         resolve(result);
       };
 
-      const killTimer = setTimeout(() => {
-        log(
-          `schedule-runner: ${name} exceeded ${timeoutMs}ms — sending SIGTERM to its process group`,
-        );
-        killGroup("SIGTERM");
-        hardTimer = setTimeout(() => {
-          log(
-            `schedule-runner: ${name} still running after SIGTERM — sending SIGKILL to its process group`,
-          );
-          killGroup("SIGKILL");
-        }, killGraceMs);
-        if (hardTimer.unref) hardTimer.unref();
-      }, timeoutMs);
-      if (killTimer.unref) killTimer.unref();
+      // Без срока убивать нечего: таймер не заводится вовсе (setTimeout с бесконечностью
+      // Node схлопывает в 1 мс — это и был бы потолок, которого больше нет).
+      const killTimer =
+        timeoutMs === null
+          ? undefined
+          : setTimeout(() => {
+              log(
+                `schedule-runner: ${name} exceeded ${timeoutMs}ms — sending SIGTERM to its process group`,
+              );
+              killGroup("SIGTERM");
+              hardTimer = setTimeout(() => {
+                log(
+                  `schedule-runner: ${name} still running after SIGTERM — sending SIGKILL to its process group`,
+                );
+                killGroup("SIGKILL");
+              }, killGraceMs);
+              if (hardTimer.unref) hardTimer.unref();
+            }, timeoutMs);
+      if (killTimer?.unref) killTimer.unref();
 
       child.on("error", (error) =>
         settle({ code: null, signal: null, tail, errTail, error }),

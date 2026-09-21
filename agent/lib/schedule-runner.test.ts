@@ -868,3 +868,34 @@ void test("damaged status file: the attempt is deferred, nothing is spawned, and
     "the journal must name the file the owner has to fix",
   );
 });
+
+// T50c: напоминание запускается без срока (timeoutMs: null) — ход живёт, пока идут события.
+void test("no deadline (timeoutMs: null): a working child runs to completion, nothing kills it", async () => {
+  const root = await scaffold();
+  const marker = join(root, "done");
+  await writeFile(
+    join(root, "slow.ts"),
+    [
+      "import { writeFileSync } from 'node:fs';",
+      `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, 'x'); process.exit(0); }, 400);`,
+    ].join("\n"),
+  );
+  const { log, lines } = collectLogs();
+
+  const result = await runScheduledJob({
+    name: "reminder-r1",
+    argv: ["slow.ts"],
+    root,
+    nodeBin: process.execPath,
+    timeoutMs: null,
+    log,
+  });
+
+  assert.equal(result.ok, true, "ребёнок без срока доходит до конца сам");
+  assert.equal(existsSync(marker), true, "ребёнку дали доработать");
+  assert.equal(
+    lines.some((l) => l.includes("SIGTERM") || l.includes("exceeded")),
+    false,
+    "срока нет — убивать нечего",
+  );
+});

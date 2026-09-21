@@ -22,6 +22,7 @@ import {
   sweepFired,
   type Reminder,
 } from "./reminder-store.ts";
+import { listChatStatuses, setChatStatusIf } from "./run-status.ts";
 import {
   runScheduledJob,
   type RunScheduledJobOptions,
@@ -32,8 +33,6 @@ import {
 export const REMINDER_CLAIM_LIMIT = 5;
 /** Тик старше этого — планировщик не жив. */
 export const REMINDER_TICK_STALE_MS = 3 * 60_000;
-/** Потолок ребёнка: ход агента останавливается на восьмой минуте, отправка — быстрее. */
-export const REMINDER_FIRE_TIMEOUT_MS = 10 * 60_000;
 
 export function tickPulseFile(dir: string = dataDir()): string {
   return join(dir, "reminders.tick");
@@ -74,6 +73,29 @@ export interface ReminderTickResult {
   readonly error?: string;
 }
 
+/** Всё, чем живёт один тик: значения по умолчанию разбираются один раз, до работы. */
+type TickWiring = {
+  readonly nowMs: number;
+  readonly limit: number;
+  readonly root: string;
+  readonly nodeBin: string;
+  readonly runJob: typeof runScheduledJob;
+  readonly log: (...args: unknown[]) => void;
+};
+
+function tickWiring(options: ReminderTickOptions): TickWiring {
+  return {
+    nowMs: options.nowMs ?? Date.now(),
+    limit: options.limit ?? REMINDER_CLAIM_LIMIT,
+    root: options.root ?? process.cwd(),
+    nodeBin: options.nodeBin ?? process.execPath,
+    runJob: options.runJob ?? runScheduledJob,
+    log:
+      options.log ??
+      ((...args: unknown[]) => console.log(new Date().toISOString(), ...args)),
+  };
+}
+
 function message(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
@@ -87,20 +109,76 @@ function fireFailure(result: RunScheduledJobResult): string {
 }
 
 /**
+ * Запуск ребёнка. Настоящий runScheduledJob никогда не бросает; двойник в тесте — может,
+ * причём и синхронно. Любой бросок значит одно: ребёнок не сказал факта.
+ */
+async function fireOnce(
+  options: RunScheduledJobOptions,
+  runJob: typeof runScheduledJob,
+): Promise<RunScheduledJobResult> {
+  try {
+    return await runJob(options);
+  } catch (error) {
+    return { skipped: false, ok: false, code: null, signal: null, error };
+  }
+}
+
+/** Запись факта в строку; false — запись не сдалась, и причина осталась в журнале. */
+async function recordOutcome(
+  row: Reminder,
+  outcome: {
+    readonly delivered: boolean | null;
+    readonly error: string | null;
+  },
+  log: (...args: unknown[]) => void,
+): Promise<boolean> {
+  try {
+    await recordDelivery(row.id, { firedAt: row.firedAt, ...outcome }, { log });
+    return true;
+  } catch (error) {
+    if (error instanceof ReminderStoreError) {
+      log(`reminders: ${row.id} outcome not recorded: ${message(error)}`);
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Снять запись хода сработавшей строки: убитый ребёнок (SIGKILL) свой `finally` не отработает,
+ * и чат до получаса оставался бы «занятым» — мост буферизовал бы владельца, а потом жнец
+ * сбросил бы сессию чата. Признак своей записи один — её `sessionId`: его пишет ребёнок
+ * перед ходом (scripts/reminders/fire.ts). Ход владельца, забравший чат, пишет свою сессию,
+ * поэтому CAS не пройдёт и чужая запись останется целой.
+ */
+function releaseReminderStatus(
+  row: Reminder,
+  log: (...args: unknown[]) => void,
+): void {
+  const sessionId = row.sessionId;
+  if (sessionId === null || sessionId === undefined) return;
+  try {
+    for (const { chatKey, status } of listChatStatuses()) {
+      if (status.sessionId !== sessionId) continue;
+      setChatStatusIf(
+        chatKey,
+        { sessionId },
+        { status: "idle", sessionId: null, turnId: null },
+      );
+    }
+  } catch (error) {
+    log(`reminders: ${row.id} run-status not cleared: ${message(error)}`);
+  }
+}
+
+/**
  * Один тик. Никогда не бросает наружу: это обработчик расписания, как и runScheduledJob —
  * сбой самого тика не должен ронять ход планировщика.
  */
 export async function runReminderTick(
   options: ReminderTickOptions = {},
 ): Promise<ReminderTickResult> {
-  const nowMs = options.nowMs ?? Date.now();
-  const limit = options.limit ?? REMINDER_CLAIM_LIMIT;
-  const root = options.root ?? process.cwd();
-  const nodeBin = options.nodeBin ?? process.execPath;
-  const runJob = options.runJob ?? runScheduledJob;
-  const log =
-    options.log ??
-    ((...args: unknown[]) => console.log(new Date().toISOString(), ...args));
+  const { nowMs, limit, root, nodeBin, runJob, log } = tickWiring(options);
 
   let rows: Reminder[];
   try {
@@ -132,22 +210,20 @@ export async function runReminderTick(
   let filled = 0;
 
   const fireRow = async (row: Reminder): Promise<void> => {
-    const jobOptions: RunScheduledJobOptions = {
-      name: `reminder-${row.id}`,
-      argv: ["scripts/reminders/fire.ts", row.id],
-      root,
-      nodeBin,
-      timeoutMs: REMINDER_FIRE_TIMEOUT_MS,
-      log,
-    };
-    // Настоящий runScheduledJob никогда не бросает; двойник в тесте — может, причём и
-    // синхронно. Любой бросок значит одно: ребёнок не сказал факта.
-    let result: RunScheduledJobResult;
-    try {
-      result = await runJob(jobOptions);
-    } catch (error) {
-      result = { skipped: false, ok: false, code: null, signal: null, error };
-    }
+    const result = await fireOnce(
+      {
+        name: `reminder-${row.id}`,
+        argv: ["scripts/reminders/fire.ts", row.id],
+        root,
+        nodeBin,
+        // Срока у ребёнка нет: ход напоминания живёт, пока идут события, и сторожит его
+        // тишина внутри хода (REMINDER_TURN_INACTIVITY_MS). Ночные расписания свой срок
+        // сохраняют — он у них по умолчанию (DEFAULT_TIMEOUT_MS).
+        timeoutMs: null,
+        log,
+      },
+      runJob,
+    );
     const after = (await list()).find((candidate) => candidate.id === row.id);
     if (after === undefined || after.delivered !== null) {
       spawned += 1;
@@ -160,42 +236,26 @@ export async function runReminderTick(
     // (лок таблицы занят) — сказать «не дошло» про такую строку нельзя. Факт остаётся
     // невидимым, причина названа явно, и доктор говорит о ней иначе, чем о провале.
     if (result.ok && !result.skipped) {
-      try {
-        await recordDelivery(
-          row.id,
-          {
-            firedAt: row.firedAt,
-            delivered: null,
-            error: "delivery fact not recorded",
-          },
-          { log },
-        );
-      } catch (error) {
-        if (error instanceof ReminderStoreError) {
-          log(`reminders: ${row.id} outcome not recorded: ${message(error)}`);
-          return;
-        }
-        throw error;
-      }
+      const recorded = await recordOutcome(
+        row,
+        { delivered: null, error: "delivery fact not recorded" },
+        log,
+      );
+      if (!recorded) return;
+      releaseReminderStatus(after, log);
       filled += 1;
       log(`reminders: ${row.id} delivery fact not recorded`);
       return;
     }
     // Ребёнок не сказал факта: причина — по коду выхода. Больше за эту строку не берёмся.
     const failure = fireFailure(result);
-    try {
-      await recordDelivery(
-        row.id,
-        { firedAt: row.firedAt, delivered: false, error: failure },
-        { log },
-      );
-    } catch (error) {
-      if (error instanceof ReminderStoreError) {
-        log(`reminders: ${row.id} outcome not recorded: ${message(error)}`);
-        return;
-      }
-      throw error;
-    }
+    const recorded = await recordOutcome(
+      row,
+      { delivered: false, error: failure },
+      log,
+    );
+    if (!recorded) return;
+    releaseReminderStatus(after, log);
     filled += 1;
     log(`reminders: ${row.id} not delivered: ${failure}`);
   };
