@@ -61,11 +61,22 @@ test("чистка после установки без агентского д�
     pathToFileURL(join(broken, "scripts", "lib", "vault-pair.ts")).href
   )) as typeof import("./vault-pair.ts");
 
-  const pair = await loader.loadVaultPair(
-    "update 9.9.9",
-    join(broken, "vault"),
-  );
+  const lines: string[] = [];
+  const real = console.error;
+  console.error = (...args: unknown[]) => lines.push(args.join(" "));
+  let pair: unknown;
+  try {
+    pair = await loader.loadVaultPair("update 9.9.9", join(broken, "vault"));
+  } finally {
+    console.error = real;
+  }
   assert.equal(pair, null, "нет шва - нет пары, а не отказ");
+  assert.equal(
+    lines.length,
+    1,
+    "молчание тут неотличимо от сломанного модуля: одно объяснение в журнал",
+  );
+  assert.match(lines[0], /vault-pair|шов|vault-commit/u);
 });
 
 test("живой шов приходит парой и коммитит обе половины под своим именем", async (t) => {

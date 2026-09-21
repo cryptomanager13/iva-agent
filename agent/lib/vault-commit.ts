@@ -386,6 +386,18 @@ export async function commitVaultWrite(
   return outcome;
 }
 
+/** Ночной подметальщик: закоммитить всё незакоммиченное в vault - днём это делают писатели, а
+ * он подбирает то, что осталось. Механизм тот же, что у правки: свой репозиторий, своё
+ * окружение, пути литералами. */
+export async function commitVaultSweep(
+  message: string,
+  root: string,
+): Promise<VaultCommit> {
+  const paths = await changedVaultPaths(root);
+  if (paths.length === 0) return { ok: true, committed: false };
+  return await commitVaultWrite(message, paths, root);
+}
+
 /** Снимок «до» и результат «после» чужой работы над vault: чистку карточек делает не
  * агент, а чужой процесс (обновлятор ждёт её, меню узнаёт о конце ходом раннера), поэтому
  * шов отдаёт две половины пары, а не оборачивает работу. Обе половины называют только

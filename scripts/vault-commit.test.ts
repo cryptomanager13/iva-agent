@@ -814,3 +814,22 @@ test("vault подкаталог своего репозитория: причи
   assert.match(logged, /выше vault/u);
   assert.doesNotMatch(logged, /чужой/u);
 });
+
+test("подметальщик Brain коммитит только в свой репозиторий vault", async (t) => {
+  const vault = makeVault(t);
+  const foreign = foreignRepo(t);
+  const before = fingerprint(foreign);
+  writeFileSync(join(vault, "cards", "notes", "остаток.md"), "# Остаток\n");
+  process.env.GIT_DIR = join(foreign, ".git");
+  const outcome = await tool.seam.commitVaultSweep(
+    "chore: memory 2026-09-21",
+    vault,
+  );
+  delete process.env.GIT_DIR;
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(subjects(vault), ["chore: memory 2026-09-21"]);
+  assert.deepEqual(touched(vault), ["cards/notes/остаток.md"]);
+  assert.deepEqual(subjects(foreign), ["foreign base"]);
+  assert.equal(fingerprint(foreign), before);
+});

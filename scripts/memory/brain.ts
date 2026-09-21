@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadVaultSweep } from "../lib/vault-pair.ts";
 import {
   classifyGitPushError,
   ensureVaultGitignore,
@@ -680,10 +681,12 @@ if (ensureVaultGitignore(VAULT()))
   console.log("brain: added temp-file patterns to the vault .gitignore");
 
 // Локальный коммит есть всегда: без remote отменяется только push. Днём память коммитят
-// сами писатели, а здесь подметальщик забирает то, что осталось незакоммиченным.
-run("git", ["add", "-A"]);
-// commit may return non-zero if there is nothing to commit — that is normal.
-run("git", ["commit", "-m", `chore: memory ${today}`]);
+// сами писатели, а здесь подметальщик забирает то, что осталось незакоммиченным. Коммитит он
+// тем же швом, что и день: сверка «это репозиторий самого vault» и своё окружение git не
+// дают памяти уехать в чужую историю. Нет агентского дерева - коммита нет, но ночь идёт.
+const swept = await loadVaultSweep(`chore: memory ${today}`, VAULT());
+if (swept !== null && !swept.ok)
+  console.error(`brain: vault commit failed: ${swept.reason ?? ""}`);
 if (!remoteUrl) {
   console.error("brain: no remote and gh unavailable — push skipped");
   console.log("=== brain: vault committed locally, push skipped ===");

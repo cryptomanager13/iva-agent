@@ -8,17 +8,42 @@ export interface VaultPair {
   readonly before: () => Promise<void>;
 }
 
-/** Шов коммита памяти достаётся одним способом у обоих потребителей (обновлятор, меню):
- * динамический импорт на вызове, а не на загрузке модуля. Нет агентского дерева - чистка
- * идёт без коммитов, а не падает: файлы памяти при этом правит не шов, а сама чистка. */
+/** Итог коммита подметальщика: причину отказа он печатает сам, значение нужно только для
+ * журнала вызывающего. */
+export type SweepResult = {
+  readonly ok: boolean;
+  readonly reason?: string;
+};
+
+/** Модуль шва достаётся динамическим импортом на вызове, а не на загрузке: установка без
+ * агентского дерева обязана грузиться (обновлятор, меню, ночной бин). Отсутствие шва - не
+ * отказ вызывающего, но и не тишина: одно объяснение в журнал, чтобы поломка модуля не
+ * выглядела как «коммитить было нечего». */
+async function seamModule<T>(
+  take: (module: typeof import("../../agent/lib/vault-commit.ts")) => T,
+): Promise<T | null> {
+  try {
+    return take(await import("../../agent/lib/vault-commit.ts"));
+  } catch (error) {
+    console.error(
+      `[vault-pair] шов коммита памяти не загрузился, работы без него: ${String(error)}`,
+    );
+    return null;
+  }
+}
+
+/** Пара коммитов вокруг чужой работы над vault (обновлятор, меню). */
 export async function loadVaultPair(
   label: string,
   root: string,
 ): Promise<VaultPair | null> {
-  try {
-    const { vaultWritePair } = await import("../../agent/lib/vault-commit.ts");
-    return vaultWritePair(label, root);
-  } catch {
-    return null;
-  }
+  return await seamModule((seam) => seam.vaultWritePair(label, root));
+}
+
+/** Ночной подметальщик: коммит всего незакоммиченного в vault. */
+export async function loadVaultSweep(
+  message: string,
+  root: string,
+): Promise<SweepResult | null> {
+  return await seamModule((seam) => seam.commitVaultSweep(message, root));
 }
