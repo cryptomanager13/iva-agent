@@ -16,6 +16,7 @@ import {
   listCodexModels,
 } from "../lib/codex-oauth.ts";
 import { validateModelSelection } from "../lib/model-validation.ts";
+import { claudeStatus } from "../lib/claude-cli-status.ts";
 import { fetchModels } from "../lib/model-catalog.ts";
 import { isEntrypoint } from "../lib/version-layout.ts";
 import { dataDirOf, loadEnvFile, writeEnvFile } from "./config-file.ts";
@@ -92,6 +93,7 @@ function createSetupContext(): SetupContext {
     runDeviceCodeLogin,
     fetchModels,
     validateModelSelection,
+    claudeCli: () => claudeStatus(),
     writeEnv: (out) => writeEnvFile(ENV_PATH, out, droppedKey),
     ...createNetworkChecks({
       fetchFn: fetch,

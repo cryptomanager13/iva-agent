@@ -16,9 +16,10 @@
     1) Ollama Cloud — https://ollama.com (~$20/mo, higher limits)
     2) OpenCode Go — https://opencode.ai/go (~$5/mo, cheaper)
     3) OpenAI (ChatGPT subscription) — chatgpt.com (sign in, no API key)
-    4) OpenRouter — https://openrouter.ai (one key → 300+ models, pay-as-you-go)
-    5) Custom — your own OpenAI-compatible endpoint (proxy, vLLM, LiteLLM, a vendor plan)
-  Provider (1/2/3/4/5) [2]: ⏎
+    4) Claude (Pro/Max subscription) — claude.ai (the claude CLI signed in on this server, no API key)
+    5) OpenRouter — https://openrouter.ai (one key → 300+ models, pay-as-you-go)
+    6) Custom — your own OpenAI-compatible endpoint (proxy, vLLM, LiteLLM, a vendor plan)
+  Provider (1/2/3/4/5/6) [2]: ⏎
 
   OpenCode key: https://opencode.ai/auth (subscribe to Go → copy the API key).
   Paste the OpenCode API key [oc-key…(keep)]: ⏎

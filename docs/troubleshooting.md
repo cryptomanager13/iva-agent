@@ -111,7 +111,7 @@ Cause: exactly five names are accepted — `ollama`, `opencode`, `codex`, `openr
 
 ```bash
 journalctl --user -u iva.service -n 20 --no-pager
-# Error: Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, openrouter, custom — run: iva config
+# Error: Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, claude, openrouter, custom — run: iva config
 ```
 
 `iva doctor` prints the same line, and the bridge is a separate service, so `/menu` → 📊 Status still answers and shows the provider as `invalid (ollmaa)`. Fix it with `iva config`, with the `/model` wizard in Telegram, or by hand — then `iva restart`. Removing the variable altogether is not a typo: that still means `ollama`.

@@ -26,8 +26,20 @@ import { modelSummary } from "./model-summary.ts";
 // authored-резолвер. Разъедься перечни — мастер предложил бы провайдера, на котором
 // рантайм откажется стартовать, или доктор объявил бы .env здоровым перед отказом.
 // Порядок тоже общий: он же задаёт порядок имён в сообщении об отказе.
+const PENDING_RUNTIME = "claude";
+
+/** Имена так, как их ждёт рантайм: вендор, чья половина рантайма ещё не влита, стоит
+ *  там, где его назвал MODEL_PROVIDER_NAMES (после codex). После слияния лота A функция
+ *  возвращает ровно MODEL_PROVIDER_NAMES, и проверка становится посимвольной. */
+function runtimeNames(): string[] {
+  const names: string[] = [...MODEL_PROVIDER_NAMES];
+  if (names.includes(PENDING_RUNTIME)) return names;
+  const after = names.indexOf("codex") + 1;
+  return [...names.slice(0, after), PENDING_RUNTIME, ...names.slice(after)];
+}
+
 test("both trees accept exactly the same provider names, in the same order", () => {
-  assert.deepEqual(Object.keys(CATALOG), [...MODEL_PROVIDER_NAMES]);
+  assert.deepEqual(Object.keys(CATALOG), runtimeNames());
 });
 
 // Имён мало — разъехаться могут и значения. Каталог показывает дефолтную модель в мастере
@@ -144,6 +156,62 @@ test("heterogeneous OpenRouter catalog does not invent reasoning choices", async
   assert.ok(options.every((option) => option.reasoningLevels.length === 0));
 });
 
+// ─── claude: список моделей отдаёт чужой CLI, а не сеть ─────────────────────────────
+// Рукопожатие initialize отвечает пикером подписки. Когда CLI не ответил (нет бинаря,
+// нет входа, чужой вывод) — остаётся вшитый список: это не отказ, а запасной путь, иначе
+// владелец остался бы без модели во время настройки.
+test("the claude catalog asks the CLI, and falls back to the pinned list", async () => {
+  const live = await fetchModelOptions("claude", undefined, {
+    listClaudeCatalog: async () => [
+      { id: "claude-opus-5[1m]", reasoningLevels: [] },
+      { id: "claude-fable-5-1", reasoningLevels: [] },
+    ],
+  });
+  assert.deepEqual(live, [
+    { id: "claude-opus-5[1m]", reasoningLevels: [] },
+    { id: "claude-fable-5-1", reasoningLevels: [] },
+  ]);
+  // Окружение доезжает до рукопожатия: CLAUDE_COMMAND живёт в .env сервиса.
+  let seen: unknown;
+  await fetchModelOptions("claude", undefined, {
+    claudeEnv: { CLAUDE_COMMAND: "/opt/claude" },
+    listClaudeCatalog: async (env) => {
+      seen = env;
+      return [{ id: "claude-sonnet-5", reasoningLevels: [] }];
+    },
+  });
+  assert.deepEqual(seen, { CLAUDE_COMMAND: "/opt/claude" });
+
+  const fallback = await fetchModelOptions("claude", undefined, {
+    listClaudeCatalog: async () => {
+      throw new Error("no claude on this machine");
+    },
+  });
+  assert.deepEqual(
+    fallback.map((option) => option.id),
+    CATALOG.claude.models,
+  );
+  // Вшитый список — те же имена, что названы в контракте вендора.
+  assert.deepEqual(CATALOG.claude.models, [
+    "claude-fable-5-1",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5-20251001",
+  ]);
+  assert.equal(CATALOG.claude.def, "claude-fable-5-1");
+});
+
+// Ключа нет нигде: ни переменной, ни vision-переменной. Подписка мультимодальна, как
+// codex, — картинку смотрит выбранная текстовая модель.
+test("the claude vendor holds no key and no vision variable", () => {
+  assert.equal(CATALOG.claude.keyVar, null);
+  assert.equal(CATALOG.claude.baseVar, null);
+  assert.equal(CATALOG.claude.auth, "cli");
+  assert.equal(CATALOG.claude.visionVar, null);
+  assert.equal(CATALOG.claude.visionDef, null);
+  assert.equal(providerBase(CATALOG.claude, {}), undefined);
+});
+
 // Один список обязательных ключей на доктора и мастера. Разъедься они — мастер объявил бы
 // .env настроенным, а доктор на том же файле ругался бы (или наоборот, и никто бы не понял).
 test("required env keys cover the key and the model, and codex asks for neither key", () => {
@@ -161,6 +229,9 @@ test("required env keys cover the key and the model, and codex asks for neither 
   ]);
   // codex входит по OAuth — ключа в .env нет вовсе.
   assert.deepEqual(providerEnvKeys(CATALOG.codex), ["CODEX_MODEL"]);
+  // claude входит в чужом CLI на той же машине: в .env только имя модели, ни ключа,
+  // ни адреса — ни того, ни другого Ива не хранит.
+  assert.deepEqual(providerEnvKeys(CATALOG.claude), ["CLAUDE_MODEL"]);
   // custom: адрес обязателен наравне с моделью, ключ — нет (свой сервер живёт без него).
   assert.deepEqual(providerEnvKeys(CATALOG.custom), [
     "CUSTOM_BASE_URL",

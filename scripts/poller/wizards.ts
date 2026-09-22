@@ -14,6 +14,12 @@ import {
   validateModelSelection,
 } from "../lib/model-validation.ts";
 import { getAccessToken } from "#lib/codex-auth.ts";
+import {
+  claudeStatus,
+  CLAUDE_INSTALL_HINT,
+  CLAUDE_LOGIN_HINT,
+  type ClaudeStatus,
+} from "../lib/claude-cli-status.ts";
 import { runDeviceCodeLogin } from "../lib/codex-oauth.ts";
 import { compactNumber, modelSummary } from "../lib/model-summary.ts";
 import { getLang, tr } from "#lib/i18n.ts";
@@ -27,7 +33,10 @@ import {
   type RichButton,
   type RichButtonStyle,
 } from "../lib/telegram-buttons.ts";
-import type { ModelOption } from "../lib/model-catalog.ts";
+import type {
+  ModelOption,
+  ProviderCatalogEntry,
+} from "../lib/model-catalog.ts";
 import type { TelegramFlowState } from "../lib/tg-flow.ts";
 import { ALLOWED, DATA_DIR_ABS, ENV_PATH, log } from "./config.ts";
 import { reply, sc, tg } from "./transport.ts";
@@ -50,6 +59,8 @@ type WizardState = TelegramFlowState & {
   dropKey?: boolean;
   // Адрес своего эндпоинта, введённый в этом же диалоге (custom).
   pendingBase?: string | null;
+  // План подписки из чужого CLI (вендор claude): экран моделей называет его владельцу.
+  plan?: string | null;
   reenterKey?: string | null;
 };
 type WizardRequestResult<T> =
@@ -158,21 +169,28 @@ export function isStaleWizard(
   );
 }
 
+// Verb без аргумента живёт на своих шагах: таблица вместо цепочки if, потому что шагов
+// становится больше, а правило остаётся одним — кнопка работает там, где её нарисовали.
+const PLAIN_STEPS = new Map<string, readonly string[]>([
+  ["keep", ["intro", "effort"]],
+  ["chg", ["intro"]],
+  // «Без ключа» — только там, где ключ на самом деле необязателен.
+  ["nokey", ["awaiting_key"]],
+  ["retry", ["model_error", "cli_status"]],
+  ["back", ["model_error"]],
+]);
+
 export function wizardActionAllowed(
   st: Pick<WizardSnapshot, "step"> | null,
   action: string,
 ) {
-  if (!st || action === "cancel") return Boolean(st);
-  if (action === "keep") return st.step === "intro" || st.step === "effort";
-  if (action === "chg") return st.step === "intro";
-  // «Без ключа» живёт ровно на экране ввода ключа и только у провайдера, где ключ не обязателен.
-  if (action === "nokey") return st.step === "awaiting_key";
+  if (!st) return false;
+  if (action === "cancel") return true;
   if (action.startsWith("prov:")) return st.step === "provider";
   if (action.startsWith("m:")) return st.step === "models";
   if (action.startsWith("eff:")) return st.step === "effort";
-  if (action === "retry" || action === "back") return st.step === "model_error";
   if (action.startsWith("rs:")) return st.step === "saved";
-  return false;
+  return PLAIN_STEPS.get(action)?.includes(st.step ?? "") ?? false;
 }
 
 export function selectWizardModel(
@@ -499,12 +517,21 @@ export async function resolveThinkCatalogLoad(
 
 async function showProviderScreen(st: WizardState) {
   st.step = "provider";
-  const authNote = (auth: string) =>
-    auth === "oauth"
-      ? tr("sign in with the OpenAI subscription.", "вход по подписке OpenAI.")
-      : auth === "key-optional"
-        ? tr("the key is optional here.", "ключ тут не обязателен.")
-        : tr("connect with an API key.", "подключение по API-ключу.");
+  const authNote = (auth: string) => {
+    if (auth === "oauth")
+      return tr(
+        "sign in with the OpenAI subscription.",
+        "вход по подписке OpenAI.",
+      );
+    if (auth === "cli")
+      return tr(
+        "uses the claude CLI signed in on this server — no key.",
+        "работает через CLI claude, залогиненный на этом сервере, — ключа нет.",
+      );
+    return auth === "key-optional"
+      ? tr("the key is optional here.", "ключ тут не обязателен.")
+      : tr("connect with an API key.", "подключение по API-ключу.");
+  };
   const lines = [
     `# ${tr("🧠 Model", "🧠 Модель")}`,
     tr("Pick a provider:", "Выбери провайдера:"),
@@ -570,7 +597,9 @@ async function pickProvider(st: WizardState, provider: string) {
   st.pendingKey = null;
   st.pendingBase = null;
   st.dropKey = false;
+  st.plan = null;
   const cat = CATALOG[provider];
+  if (cat.auth === "cli") return await pickCliProvider(st, cat);
   if (cat.auth === "oauth") {
     st.step = "loading";
     const loadingShown = await wizScreen(
@@ -599,6 +628,68 @@ async function pickProvider(st: WizardState, provider: string) {
   }
   return askKeyOrShowModels(st, env);
 }
+
+/**
+ * Вендор без ключа: единственный источник входа — CLI на том же сервере. Ни поставить
+ * пакет, ни войти в подписку из Telegram нельзя, поэтому мастер показывает две команды
+ * для сервера и кнопку «Проверить снова», а не спрашивает ключ, которого не существует.
+ */
+async function pickCliProvider(st: WizardState, cat: ProviderCatalogEntry) {
+  st.step = "loading";
+  const env = await readEnvValues(ENV_PATH);
+  if (!wizardIsCurrent(st)) return false;
+  const loadingShown = await wizScreen(
+    st,
+    [
+      `# ${tr("🧠 Model", "🧠 Модель")} · ${escapeRichText(cat.label)}`,
+      tr("Checking the claude CLI…", "Проверяю CLI claude…"),
+      cancelLine(),
+    ].join("\n\n"),
+  );
+  if (!wizardIsCurrent(st)) return loadingShown;
+  // PATH берём у процесса, остальное — из свежего .env: CLAUDE_COMMAND могли вписать
+  // только что, а сервис читает файл при старте.
+  const checked = await runWizardRequest(st, () =>
+    claudeStatus({ ...process.env, ...env }),
+  );
+  if (checked.stale) return loadingShown;
+  if (!checked.ok || !checked.value.ready)
+    return showCliStatusScreen(st, checked.ok ? checked.value : noClaude());
+  st.plan = checked.value.plan;
+  return showModelScreen(st);
+}
+
+/** Экран «CLI ещё не готов»: команды для сервера и кнопка перечитать статус. */
+async function showCliStatusScreen(st: WizardState, status: ClaudeStatus) {
+  st.step = "cli_status";
+  return wizScreen(
+    st,
+    [
+      `# ${tr("🧠 Model", "🧠 Модель")} · ${escapeRichText(CATALOG[st.provider].label)}`,
+      tr(
+        `Iva calls the claude CLI on this server, and it isn't ready: ${escapeRichText(status.hint)}`,
+        `Ива зовёт CLI claude на этом же сервере, а он ещё не готов: ${escapeRichText(status.hint)}`,
+      ),
+      tr("On the server run:", "На сервере выполните:") +
+        `\n${CLAUDE_INSTALL_HINT}\n${CLAUDE_LOGIN_HINT}`,
+      `${button(tr("Check again", "Проверить снова"), "iva_model:retry")} — ${tr(
+        "read the status again.",
+        "перечитать статус.",
+      )}`,
+      cancelLine(),
+    ].join("\n\n"),
+  );
+}
+
+/** Отказ проверки статуса: сказать владельцу то же, что сказал бы доктор. */
+const noClaude = (): ClaudeStatus => ({
+  installed: false,
+  loggedIn: false,
+  plan: "",
+  conflict: null,
+  ready: false,
+  hint: `${CLAUDE_INSTALL_HINT} и ${CLAUDE_LOGIN_HINT}`,
+});
 
 // Продолжение после введённого адреса: тот же порядок шагов, что и в pickProvider.
 async function pickProviderAfterBase(st: WizardState) {
@@ -685,14 +776,8 @@ async function showModelScreen(st: WizardState) {
   st.step = "models";
   const lines = [
     `# ${tr("🧠 Model", "🧠 Модель")} · ${escapeRichText(cat.label)}`,
+    ...modelScreenNotes(st, current),
   ];
-  if (current)
-    lines.push(
-      tr(
-        `Current (display only): **${escapeRichText(current)}**.`,
-        `Текущая (только для справки): **${escapeRichText(current)}**.`,
-      ),
-    );
   lines.push(
     tr(
       `Choose a live model (${cat.label}):`,
@@ -707,6 +792,30 @@ async function showModelScreen(st: WizardState) {
   );
   lines.push(cancelLine());
   return wizScreen(st, lines.join("\n\n"));
+}
+
+/** Строки над списком моделей: план подписки из чужого CLI и текущая модель (для справки). */
+function modelScreenNotes(
+  st: WizardState,
+  current: string | undefined,
+): string[] {
+  const notes: string[] = [];
+  // План называет тот же `claude auth status`, что читает доктор.
+  if (st.plan)
+    notes.push(
+      tr(
+        `Plan: ${escapeRichText(st.plan)}.`,
+        `План: ${escapeRichText(st.plan)}.`,
+      ),
+    );
+  if (current)
+    notes.push(
+      tr(
+        `Current (display only): **${escapeRichText(current)}**.`,
+        `Текущая (только для справки): **${escapeRichText(current)}**.`,
+      ),
+    );
+  return notes;
 }
 
 async function showModelValidationError(st: WizardState, error: unknown) {
@@ -1076,6 +1185,9 @@ async function onWizardRetry(st: WizardState): Promise<boolean> {
       msgId: st.msgId ?? undefined,
     });
   }
+  // «Проверить снова» на экране чужого CLI начинает шаг вендора заново, а не просит
+  // каталог у провайдера, вход в которого ещё не сделан.
+  if (st.step === "cli_status") return pickProvider(st, st.provider);
   return showModelScreen(st);
 }
 
@@ -1327,6 +1439,12 @@ export function resetMessageCopy(
         ),
       };
 }
+
+/** Шов для теста: тот же шаг, что зовёт тап по кнопке провайдера. */
+export const wizardPickProvider = (
+  st: WizardState,
+  provider: string,
+): Promise<boolean> => pickProvider(st, provider);
 
 export {
   flows,

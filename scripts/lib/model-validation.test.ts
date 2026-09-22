@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await */
 import { test } from "node:test";
+import { ClaudeCliError } from "./claude-cli-status.ts";
 import {
   ModelValidationError,
   validateModelSelection,
@@ -306,4 +307,53 @@ test("empty and malformed selections are rejected before provider I/O", async ()
       error.code === "invalid_selection",
   );
   assert.equal(calls, 0);
+});
+
+// ─── claude: ключа нет, проверка — живой запрос через чужой CLI ──────────────────────
+// В .env у вендора одна строка (имя модели), поэтому «ключ принят» тут не проверяется
+// вовсе: проверяется, что модель вообще есть у подписки. Проба ходит через
+// scripts/lib/claude-cli-status.ts, а рантайм — своей рукой.
+test("the claude selection is probed through the CLI, not through a catalog", async () => {
+  const seen: string[] = [];
+  const selected = await validateModelSelection(
+    { provider: "claude", model: "  claude-fable-5-1  " },
+    {
+      fetchFn: () => {
+        throw new Error("сеть не при чём: у этого вендора её нет");
+      },
+      probeClaude: async (model) => {
+        seen.push(model);
+        return { id: model, reasoningLevels: [], answered: true };
+      },
+    },
+  );
+  assert.deepEqual(seen, ["claude-fable-5-1"]);
+  assert.equal(selected.id, "claude-fable-5-1");
+  assert.equal(selected.answered, true);
+});
+
+test("a CLI refusal becomes the matching selection error", async () => {
+  const cases = [
+    ["not_logged_in", "auth_rejected"],
+    ["not_installed", "not_installed"],
+    ["model_unavailable", "model_unavailable"],
+    ["timeout", "timeout"],
+  ] as const;
+  for (const [code, expected] of cases) {
+    await assert.rejects(
+      validateModelSelection(
+        { provider: "claude", model: "claude-fable-5-1" },
+        {
+          probeClaude: () => {
+            throw new ClaudeCliError(code, "the CLI said no");
+          },
+        },
+      ),
+      (error) =>
+        error instanceof ModelValidationError &&
+        error.code === expected &&
+        error.message === "the CLI said no",
+      code,
+    );
+  }
 });
