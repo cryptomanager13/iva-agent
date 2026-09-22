@@ -87,7 +87,12 @@ function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** Заголовки, которые принадлежат соединению, а не запросу: их пересылать нельзя. */
+/**
+ * Заголовки, которые принадлежат соединению, а не запросу: их пересылать нельзя. Заново
+ * `content-length` не ставится: тело уезжает наверх `Transfer-Encoding: chunked`, и это
+ * единственное, чем запрос CLI отличается от запроса, который CLI послал бы сам
+ * (api.anthropic.com принимает оба; проверено живьём 22.09.2026).
+ */
 const HOP_BY_HOP = new Set([
   "host",
   "connection",
@@ -360,7 +365,12 @@ function handle(
   request: IncomingMessage,
   response: ServerResponse,
 ): void {
-  if (request.method !== "POST" || !gate.match(request.url ?? "")) {
+  // Origin ставит браузер, а не CLI: со страницы, угадавшей порт, ход не начинают.
+  if (
+    request.method !== "POST" ||
+    request.headers.origin !== undefined ||
+    !gate.match(request.url ?? "")
+  ) {
     // Ничего не объясняем: на этом порту нет других путей, и любой ответ — подсказка тому,
     // кто не должен был сюда попасть. Сюда же попадает `HEAD <префикс>/api/hello` — им CLI
     // проверяет, живой ли шлюз. Живая проверка 22.09.2026: на 404 он не отказывается работать

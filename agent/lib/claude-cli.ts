@@ -76,12 +76,23 @@ const INSTALL_HINT =
   "install it with `npm install -g @anthropic-ai/claude-code` or point CLAUDE_COMMAND at the binary";
 /** Значения, при которых переменная означает «не включено». */
 const OFF_VALUES = new Set(["", "0", "false", "no", "off"]);
-const AUTH_CONFLICTS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-const BACKEND_CONFLICTS = [
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
+/**
+ * Переменные, при которых ход ушёл бы мимо подписки владельца. Ключи уводят CLI на платный
+ * ключ; `ANTHROPIC_BASE_URL` — на чужой адрес, и молча подменять его на адрес реле значило бы
+ * тихо отменять настройку владельца (его прокси перестал бы работать без единого слова).
+ */
+const AUTH_CONFLICTS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_FOUNDRY_API_KEY",
+  "ANTHROPIC_BASE_URL",
 ];
+/**
+ * Любой чужой бэкенд объявляется одной и той же приставкой (`CLAUDE_CODE_USE_BEDROCK`,
+ * `_VERTEX`, `_FOUNDRY` и тот, который Anthropic назовёт завтра). Перечень имён устарел бы
+ * молча и увёл бы ход мимо подписки, поэтому смотрим приставку, а не список.
+ */
+const BACKEND_PREFIX = "CLAUDE_CODE_USE_";
 /**
  * Что CLI обязан видеть с этими значениями. Телеметрия и необязательный трафик выключены:
  * они уходят на чужие адреса, а ход — это запрос к api.anthropic.com и ничего больше.
@@ -224,7 +235,9 @@ process.stdin.on("data", (chunk) => {
       ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "iva-inert-inventory", version: "1" } }
       : row.method === "tools/list"
         ? { tools: manifest }
-        : { isError: true, content: [{ type: "text", text: "Denied: tools run in Iva, not here." }] };
+        : row.method === "tools/call"
+          ? { isError: true, content: [{ type: "text", text: "Denied: tools run in Iva, not here." }] }
+          : {};
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: row.id, result }) + "\\n");
   }
 });`;
@@ -592,9 +605,9 @@ function toolInput(input: unknown): unknown {
 export function readCompletion(
   messages: readonly NativeMessage[],
   names: readonly string[],
+  usage: Record<string, unknown> | undefined = messages.at(-1)?.usage,
 ): ClaudeCompletion {
   const blocks = messages.flatMap((message) => message.content ?? []);
-  const usage = messages.at(-1)?.usage;
   return {
     text: blocks
       .filter(
@@ -694,6 +707,7 @@ function tokenCount(value: unknown): number {
 export function claudeEnv(
   source: Readonly<Record<string, string | undefined>>,
   relayUrl: string,
+  maxOutputTokens?: number,
 ): Record<string, string> {
   const conflicts = claudeConflicts(source);
   if (conflicts.length > 0)
@@ -703,7 +717,19 @@ export function claudeEnv(
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(source))
     if (value !== undefined) env[key] = value;
-  return { ...env, ...CLAUDE_ENV, ANTHROPIC_BASE_URL: relayUrl };
+  // Унаследованное тело запроса — чужие инструменты и чужой потолок вывода поверх наших:
+  // своё мы кладём в приватный settings.json и другого источника не признаём.
+  delete env.CLAUDE_CODE_EXTRA_BODY;
+  const child: Record<string, string> = {
+    ...env,
+    ...CLAUDE_ENV,
+    ANTHROPIC_BASE_URL: relayUrl,
+  };
+  // Потолок вывода CLI знает и сам, до запроса: без этой переменной он подставляет свой и
+  // просит у модели больше, чем разрешила eve.
+  if (maxOutputTokens !== undefined)
+    child.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(maxOutputTokens);
+  return child;
 }
 
 /** Имена конфликтующих переменных — без значений: этого достаточно, чтобы починить .env. */
@@ -711,11 +737,14 @@ export function claudeConflicts(
   source: Readonly<Record<string, string | undefined>>,
 ): string[] {
   const names = AUTH_CONFLICTS.filter((key) => (source[key] ?? "").length > 0);
-  return names.concat(
-    BACKEND_CONFLICTS.filter(
-      (key) => !OFF_VALUES.has((source[key] ?? "").toLowerCase()),
-    ),
-  );
+  const backends = Object.keys(source)
+    .filter(
+      (key) =>
+        key.startsWith(BACKEND_PREFIX) &&
+        !OFF_VALUES.has((source[key] ?? "").toLowerCase()),
+    )
+    .sort();
+  return names.concat(backends);
 }
 
 /**
@@ -940,6 +969,18 @@ async function* silentFor(
 type ClaudeSettings = {
   /** Тишина CLI до отказа; в тестах — доли секунды, в бою CLAUDE_SILENCE_TIMEOUT_MS. */
   readonly silenceTimeoutMs?: number;
+  /**
+   * Куда реле пропускает единственный запрос. В бою — api.anthropic.com; параметр существует
+   * ради тестов, где на его месте стоит loopback-заглушка: без неё боевая ветка «ответ пойман
+   * реле» проверялась бы только живым CLI и настоящей подпиской владельца.
+   */
+  readonly upstream?: string;
+};
+
+/** Что одинаково у всех шагов этой модели: порог тишины и адрес, куда ходит реле. */
+type CallSettings = {
+  readonly silenceMs: number;
+  readonly upstream: string;
 };
 
 /** Рукописная LanguageModelV4: шаг модели — это один запуск Claude Code CLI. */
@@ -947,7 +988,10 @@ export function makeClaudeCliModel(
   model: string,
   settings: ClaudeSettings = {},
 ): LanguageModelV4 {
-  const silenceMs = settings.silenceTimeoutMs ?? CLAUDE_SILENCE_TIMEOUT_MS;
+  const call: CallSettings = {
+    silenceMs: settings.silenceTimeoutMs ?? CLAUDE_SILENCE_TIMEOUT_MS,
+    upstream: settings.upstream ?? CLAUDE_UPSTREAM,
+  };
   return {
     specificationVersion: "v4",
     provider: CLAUDE_PROVIDER_ID,
@@ -955,17 +999,54 @@ export function makeClaudeCliModel(
     // Картинки едут только base64: URL пришлось бы скачивать, а у CLI нет для этого канала.
     supportedUrls: {},
     doStream: (options: LanguageModelV4CallOptions) =>
-      Promise.resolve(streamCall(model, options, silenceMs)),
+      Promise.resolve(streamCall(model, options, call)),
     doGenerate: (options: LanguageModelV4CallOptions) =>
-      generateCall(model, options, silenceMs),
+      generateCall(model, options, call),
   };
+}
+
+/**
+ * Ход, отменённый ДО первого события. Слушатель `abort` на уже отменённом сигнале не
+ * сработает никогда, поэтому без этой проверки Iva подняла бы `claude`, оплатила запрос по
+ * подписке и ждала бы его молчания до порога тишины — ради ответа, который никто не ждёт.
+ */
+function abortedStream(
+  options: LanguageModelV4CallOptions,
+): LanguageModelV4StreamResult {
+  const signal = options.abortSignal;
+  const reason: unknown = signal?.reason;
+  const error =
+    reason instanceof Error
+      ? reason
+      : new ClaudeCliError("the turn was cancelled before Claude CLI started");
+  return {
+    stream: new ReadableStream<LanguageModelV4StreamPart>({
+      start(controller) {
+        controller.enqueue({
+          type: "stream-start",
+          warnings: claudeWarnings(options),
+        });
+        controller.error(error);
+      },
+    }),
+  };
+}
+
+/** Отменённый ход дальше не идёт: ни запуска CLI, ни запроса к api.anthropic.com. */
+function assertLive(options: LanguageModelV4CallOptions): void {
+  if (options.abortSignal?.aborted !== true) return;
+  const reason: unknown = options.abortSignal.reason;
+  throw reason instanceof Error
+    ? reason
+    : new ClaudeCliError("the turn was cancelled while Claude CLI was running");
 }
 
 function streamCall(
   model: string,
   options: LanguageModelV4CallOptions,
-  silenceMs: number,
+  call: CallSettings,
 ): LanguageModelV4StreamResult {
+  if (options.abortSignal?.aborted === true) return abortedStream(options);
   const session = new ClaudeSession();
   const onAbort = () => {
     session.abort();
@@ -977,7 +1058,7 @@ function streamCall(
         type: "stream-start",
         warnings: claudeWarnings(options),
       });
-      void runCall({ model, options, session, controller, silenceMs })
+      void runCall({ model, options, session, controller, call })
         .catch((error: unknown) => {
           try {
             controller.error(asClaudeError(error));
@@ -1002,34 +1083,57 @@ type RunContext = {
   readonly options: LanguageModelV4CallOptions;
   readonly session: ClaudeSession;
   readonly controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>;
-  readonly silenceMs: number;
+  readonly call: CallSettings;
 };
 
+/**
+ * Шаг целиком: сначала ход доигрывается и за собой убирается, и только потом закрывается
+ * поток наружу. Порядок важен: закрой поток раньше — и потребитель, получивший `finish`,
+ * вправе тут же остановить Иву, оставив на диске временную папку с системным промптом.
+ */
 async function runCall(context: RunContext): Promise<void> {
-  const { model, options, session, controller, silenceMs } = context;
   const text = new TextStream();
+  const { completion, admission } = await produce(context, text);
+  emit(completion, text, admission, context.controller);
+  report(context.model, completion, admission);
+}
+
+async function produce(
+  context: RunContext,
+  text: TextStream,
+): Promise<{ completion: ClaudeCompletion; admission: Admission }> {
+  const { model, options, session, controller, call } = context;
   try {
     const prepared = prepareCall(model, options, session);
-    const admission = await startAdmission(CLAUDE_UPSTREAM, silenceMs);
+    assertLive(options);
+    const admission = await startAdmission(call.upstream, call.silenceMs);
     session.adopt(admission);
-    const env = claudeEnv(process.env, admission.url);
+    const env = claudeEnv(
+      process.env,
+      admission.url,
+      options.maxOutputTokens ?? undefined,
+    );
+    assertLive(options);
     const child = await spawnClaude(claudeCommand(env), prepared.argv, {
       cwd: session.tempDir,
       env,
-      stdio: ["pipe", "pipe", "pipe"],
+      // stderr никто не читает: оставленная труба заполнилась бы и остановила CLI на записи.
+      stdio: ["pipe", "pipe", "ignore"],
       // Своя группа процессов: отмена бьёт по ней целиком (см. killTree).
       detached: true,
     });
     session.attach(child);
     if (child.stdout === null)
       throw new ClaudeCliError("Claude CLI started without a stdout pipe");
-    const events = silentFor(jsonLines(child.stdout), silenceMs);
+    const events = silentFor(jsonLines(child.stdout), call.silenceMs);
     await writeFrames(child, prepared.frames, events);
     const seen = await collect(events, text, controller);
     const exit = await waitForExit(child);
-    const completion = complete(admission, seen, exit, prepared.names);
-    emit(completion, text, admission, controller);
-    report(model, completion, admission);
+    assertLive(options);
+    return {
+      completion: complete(admission, seen, exit, prepared.names),
+      admission,
+    };
   } finally {
     await session.close();
   }
@@ -1191,9 +1295,10 @@ async function waitForExit(child: ChildProcess): Promise<number | null> {
 /**
  * Что считать ответом модели. Реле запомнило настоящий ответ целиком — он и есть правда:
  * CLI мог его обрезать, а его собственный второй поход в API отбит реле. Без запомненного
- * ответа верим CLI, но требуем целостности: один `result`, хоть одно сообщение ассистента
- * и увиденный `message_stop`. Отдельная граница — `error_max_turns` с вызовами инструментов
- * и кодом выхода 1: это штатный конец хода после tool_use, а не отказ.
+ * ответа верим CLI. В обоих случаях требуем целостности хода: один `result`, хоть одно
+ * сообщение ассистента и увиденный конец ответа. Отдельные штатные границы — `error_max_turns`
+ * с вызовами инструментов и кодом выхода 1 (конец шага после tool_use) и разобранный ниже
+ * «провал, о котором мы и просили»: отбитый второй запрос CLI и отказ самой модели.
  */
 function complete(
   admission: Admission,
@@ -1201,39 +1306,87 @@ function complete(
   exit: number | null,
   names: readonly string[],
 ): ClaudeCompletion {
-  const captured = admission.capture.complete
-    ? admission.capture.message
-    : null;
-  if (captured !== null) return readCompletion([captured], names);
-  throwIfNativeError(seen, admission);
-  const result = lastResult(seen, admission);
-  const completion = readCompletion(seen.assistants, names);
-  if (!isToolBoundary(completion, result, exit)) assertSuite(result, exit);
+  const captured = capturedMessage(admission, seen);
+  const assistants = captured === null ? seen.assistants : [captured];
+  const handled = failureExpected(admission, captured);
+  if (seen.nativeError !== undefined && !handled)
+    throw new ClaudeCliError(`${seen.nativeError}${upstreamNote(admission)}`);
+  const result = onlyResult(
+    seen,
+    assistants.length,
+    captured !== null,
+    admission,
+  );
+  const completion = readCompletion(
+    assistants,
+    names,
+    captured === null ? asRecord(result?.usage) : captured.usage,
+  );
+  if (!handled && !isToolBoundary(completion, result, exit))
+    assertSuite(result, exit);
   return completion;
 }
 
-/** Ошибку, которую CLI назвал сам (assistant с `error` или текстом `API Error`), не глотаем. */
-function throwIfNativeError(seen: Collected, admission: Admission): void {
-  if (seen.nativeError !== undefined)
-    throw new ClaudeCliError(`${seen.nativeError}${upstreamNote(admission)}`);
+/**
+ * Ответ, пойманный реле. Если реле пропустило запрос, а целого ответа из него не собралось
+ * (не 200, обрыв SSE посреди блока) — верить пересказу CLI нельзя: ход оборвался на настоящем
+ * запросе, и это надо назвать, а не подменять тем, что CLI успел напечатать.
+ */
+function capturedMessage(
+  admission: Admission,
+  seen: Collected,
+): NativeMessage | null {
+  if (!admission.used) return null;
+  const captured = admission.capture.message;
+  if (
+    admission.status === 200 &&
+    admission.capture.complete &&
+    captured !== null
+  )
+    return captured;
+  const detail = seen.nativeError === undefined ? "" : `: ${seen.nativeError}`;
+  throw new ClaudeCliError(
+    `api.anthropic.com did not finish the response${upstreamNote(admission)}${detail}`,
+  );
 }
 
-/** Последний `result` CLI; без него или без сообщений ассистента ответ неполный. */
-function lastResult(
+/**
+ * Провал CLI, о котором мы и просили. Отбитый второй запрос — это работа реле: ответ уже
+ * получен, а ненулевой код выхода и `API Error` в выводе рассказывают о попытке CLI продолжить
+ * ход за eve. Отказ модели (`refusal`) — тоже ответ: его текст уезжает владельцу как есть.
+ */
+function failureExpected(
+  admission: Admission,
+  captured: NativeMessage | null,
+): boolean {
+  return admission.denied > 0 || captured?.stop_reason === "refusal";
+}
+
+/** Единственный `result` CLI; без него или без сообщений ассистента ответ неполный. */
+function onlyResult(
   seen: Collected,
+  assistants: number,
+  captured: boolean,
   admission: Admission,
 ): Record<string, unknown> | undefined {
   const result = seen.results.at(-1);
   const subtype = text(result?.subtype);
   if (
     seen.results.length !== 1 ||
-    seen.assistants.length === 0 ||
-    !seen.stopped
+    assistants === 0 ||
+    !(captured || seen.stopped)
   )
     throw new ClaudeCliError(
       `Claude CLI returned an incomplete response (${subtype || "no result"}${upstreamNote(admission)})`,
     );
   return result;
+}
+
+/** Поле чужого JSON, которое обязано быть объектом: массив и null объектом не считаются. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /**
@@ -1320,7 +1473,9 @@ function reconcile(
 function finishOf(completion: ClaudeCompletion): LanguageModelV4FinishReason {
   const raw = completion.stopReason;
   if (completion.calls.length > 0) return { unified: "tool-calls", raw };
-  if (raw === "max_tokens") return { unified: "length", raw };
+  // Переполненное окно — та же стена, что и потолок вывода: ответ оборван не по своей воле.
+  if (raw === "max_tokens" || raw === "model_context_window_exceeded")
+    return { unified: "length", raw };
   return { unified: "stop", raw };
 }
 
@@ -1344,9 +1499,9 @@ function report(
 async function generateCall(
   model: string,
   options: LanguageModelV4CallOptions,
-  silenceMs: number,
+  call: CallSettings,
 ): Promise<LanguageModelV4GenerateResult> {
-  const { stream } = streamCall(model, options, silenceMs);
+  const { stream } = streamCall(model, options, call);
   const reader = stream.getReader();
   const content: LanguageModelV4Content[] = [];
   const warnings: SharedV4Warning[] = [];
