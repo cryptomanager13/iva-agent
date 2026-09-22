@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- Node's test runner owns registrations. */
 // Тесты контрактов файловых тулов: write_file не затирает существующие карточки,
-// но продолжает писать CORE.md; путь из memory_search открывается read_file без ENOENT.
+// путь из memory_search открывается read_file, glob и grep обходят vault-симлинк.
 
 import "./lib/ts-esm-hooks.ts";
 import { test } from "node:test";
@@ -9,12 +9,13 @@ import {
   mkdtempSync,
   mkdirSync,
   readdirSync,
+  symlinkSync,
   writeFileSync,
   readFileSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ToolContext } from "eve/tools";
 import { settled } from "./fixtures/tool-result.ts";
@@ -34,6 +35,9 @@ writeFileSync(join(VAULT, "CORE.md"), "# CORE\n", "utf8");
 
 const { default: writeFile } = await import("../agent/tools/write_file.ts");
 const { default: readFileTool } = await import("../agent/tools/read_file.ts");
+const { default: globTool } = await import("../agent/tools/glob.ts");
+const { default: grepTool } = await import("../agent/tools/grep.ts");
+const { walkFiles } = await import("../agent/lib/vault-file-search.ts");
 const { default: memorySearch } =
   await import("../agent/tools/memory_search.ts");
 
@@ -128,6 +132,168 @@ test("read_file принимает и абсолютный путь", async () =
     await readFileTool.execute({ path: CARD }, testToolContext("read_file")),
   );
   assert.ok(read.content.includes("Иван Петров"));
+});
+
+const SYMLINK_LAYOUT = mkdtempSync(join(tmpdir(), "iva-symlink-paths-"));
+const APP_ROOT = join(SYMLINK_LAYOUT, "app");
+const REAL_VAULT = join(SYMLINK_LAYOUT, "real-vault");
+const PROJECT = join(REAL_VAULT, "projects", "x");
+const OUTSIDE = join(SYMLINK_LAYOUT, "outside");
+mkdirSync(APP_ROOT, { recursive: true });
+mkdirSync(PROJECT, { recursive: true });
+mkdirSync(OUTSIDE, { recursive: true });
+writeFileSync(join(PROJECT, "needle.md"), "строка T57 найдена\n", "utf8");
+writeFileSync(join(OUTSIDE, "external.txt"), "вне vault\n", "utf8");
+symlinkSync(REAL_VAULT, join(APP_ROOT, "vault"), "dir");
+symlinkSync(join(PROJECT, "needle.md"), join(PROJECT, "alias.md"), "file");
+symlinkSync(REAL_VAULT, join(PROJECT, "loop"), "dir");
+process.on("exit", () =>
+  rmSync(SYMLINK_LAYOUT, { recursive: true, force: true }),
+);
+
+async function fromSymlinkedVault<T>(run: () => Promise<T>): Promise<T> {
+  const previousCwd = process.cwd();
+  const previousVault = process.env.ASSISTANT_VAULT_DIR;
+  delete process.env.ASSISTANT_VAULT_DIR;
+  process.chdir(APP_ROOT);
+  try {
+    return await run();
+  } finally {
+    process.chdir(previousCwd);
+    if (previousVault === undefined) delete process.env.ASSISTANT_VAULT_DIR;
+    else process.env.ASSISTANT_VAULT_DIR = previousVault;
+  }
+}
+
+test("glob видит vault-симлинк от каталога приложения и по умолчанию", async () => {
+  const fromApp = settled(
+    await globTool.execute(
+      { pattern: "vault/projects/x/**", cwd: APP_ROOT },
+      testToolContext("glob"),
+    ),
+  );
+  assert.ok(
+    fromApp.includes("vault/projects/x/needle.md"),
+    `glob не нашёл vault/projects/x/needle.md от каталога приложения: ${JSON.stringify(fromApp)}`,
+  );
+
+  const fromVault = await fromSymlinkedVault(async () =>
+    settled(
+      await globTool.execute(
+        { pattern: "projects/x/**" },
+        testToolContext("glob"),
+      ),
+    ),
+  );
+  assert.ok(
+    fromVault.includes("projects/x/needle.md"),
+    `glob не нашёл projects/x/needle.md от корня vault: ${JSON.stringify(fromVault)}`,
+  );
+  assert.ok(
+    fromVault.includes("projects/x/alias.md"),
+    `glob не счёл симлинк на файл файлом: ${JSON.stringify(fromVault)}`,
+  );
+
+  const fromRelativeCwd = await fromSymlinkedVault(async () =>
+    settled(
+      await globTool.execute(
+        { pattern: "x/**", cwd: "projects" },
+        testToolContext("glob"),
+      ),
+    ),
+  );
+  assert.ok(
+    fromRelativeCwd.includes("x/needle.md"),
+    `glob не резолвит относительный cwd от vault: ${JSON.stringify(fromRelativeCwd)}`,
+  );
+});
+
+test("grep резолвит относительный path от vault-симлинка", async () => {
+  const result = await fromSymlinkedVault(async () =>
+    settled(
+      await grepTool.execute(
+        { pattern: "T57", path: "projects/x" },
+        testToolContext("grep"),
+      ),
+    ),
+  );
+  assert.equal(
+    result.count,
+    2,
+    `grep нашёл не оба файла: ${JSON.stringify(result)}`,
+  );
+  assert.deepEqual(
+    result.matches.map((match) => basename(match.file)).sort(),
+    ["alias.md", "needle.md"],
+    `grep не нашёл оба пути через vault-симлинк: ${JSON.stringify(result.matches)}`,
+  );
+});
+
+test(
+  "цикл симлинков не зацикливает glob и grep",
+  { timeout: 2_000 },
+  async () => {
+    const walked = await walkFiles(join(APP_ROOT, "vault"));
+    assert.deepEqual(
+      walked.map((file) => basename(file)).sort(),
+      ["alias.md", "needle.md"],
+      `общий обход повторно прошёл цикл: ${JSON.stringify(walked)}`,
+    );
+
+    const globResult = await fromSymlinkedVault(async () =>
+      settled(
+        await globTool.execute(
+          { pattern: "projects/x/**" },
+          testToolContext("glob"),
+        ),
+      ),
+    );
+    assert.deepEqual(
+      globResult,
+      ["projects/x/alias.md", "projects/x/needle.md"],
+      `glob повторно обошёл цикл: ${JSON.stringify(globResult)}`,
+    );
+
+    const grepResult = await fromSymlinkedVault(async () =>
+      settled(
+        await grepTool.execute(
+          { pattern: "T57", path: "projects" },
+          testToolContext("grep"),
+        ),
+      ),
+    );
+    assert.equal(
+      grepResult.count,
+      2,
+      `grep повторно обошёл цикл: ${JSON.stringify(grepResult)}`,
+    );
+  },
+);
+
+test("glob и grep сохраняют абсолютный путь вне vault", async () => {
+  const globResult = settled(
+    await globTool.execute(
+      { pattern: "**/*.txt", cwd: OUTSIDE },
+      testToolContext("glob"),
+    ),
+  );
+  assert.deepEqual(
+    globResult,
+    ["external.txt"],
+    `glob не нашёл абсолютный cwd вне vault: ${JSON.stringify(globResult)}`,
+  );
+
+  const grepResult = settled(
+    await grepTool.execute(
+      { pattern: "вне vault", path: join(OUTSIDE, "external.txt") },
+      testToolContext("grep"),
+    ),
+  );
+  assert.equal(
+    grepResult.count,
+    1,
+    `grep не прочитал абсолютный path вне vault: ${JSON.stringify(grepResult)}`,
+  );
 });
 
 // Инструкции не должны давать read_file путь с префиксом `vault/`: тул резолвит

@@ -35,15 +35,6 @@ const BLIND_SPOT: ReadonlyArray<{
     path: "agent/instructions/05-language.ts",
     why: "динамика eve; язык проверен через ходы",
   },
-  // Тонкие тулы: тривиальные обёртки, поведение держат тесты поверхностей.
-  {
-    path: "agent/tools/glob.ts",
-    why: "тонкая обёртка; гоняют bash/grep-тесты поверхностей",
-  },
-  {
-    path: "agent/tools/grep.ts",
-    why: "тонкая обёртка; гоняют bash/grep-тесты поверхностей",
-  },
   // Транзитивно покрыты: свой тест грузит соседа, этот едет прицепом.
   {
     path: "agent/lib/plugin-skills.ts",

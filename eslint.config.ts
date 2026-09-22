@@ -16,6 +16,7 @@ export default defineConfig([
     "data/",
     ".scratch/",
     ".worktrees/",
+    ".claude/",
     "**/wt/",
     "**/.workflow-data/",
     "**/.iva-update/",

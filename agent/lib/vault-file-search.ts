@@ -1,0 +1,89 @@
+import { readdir, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import { resolveVaultDir } from "@iva/vault-dir";
+
+const IGNORE_DIRS = new Set([
+  ".git",
+  "node_modules",
+  ".next",
+  "dist",
+  ".cache",
+]);
+
+export function globToRegExp(pattern: string): RegExp {
+  const normalized = pattern.split(sep).join("/");
+  let expression = "";
+  for (let index = 0; index < normalized.length; index++) {
+    const char = normalized[index];
+    if (char === "*") {
+      if (normalized[index + 1] === "*") {
+        expression += "(?:.*)";
+        index++;
+        if (normalized[index + 1] === "/") index++;
+      } else {
+        expression += "[^/]*";
+      }
+    } else if (char === "?") {
+      expression += "[^/]";
+    } else if ("\\^$+.()|{}[]".includes(char)) {
+      expression += `\\${char}`;
+    } else {
+      expression += char;
+    }
+  }
+  return new RegExp(`^${expression}$`);
+}
+
+export function resolveVaultToolRoot(path?: string): string {
+  if (path !== undefined && isAbsolute(path)) return path;
+  const vault = resolveVaultDir(process.cwd());
+  return path === undefined ? vault : resolve(vault, path);
+}
+
+async function walk(
+  dir: string,
+  out: string[],
+  visited: Set<string>,
+): Promise<void> {
+  let canonical: string;
+  try {
+    canonical = await realpath(dir);
+  } catch {
+    return;
+  }
+  if (visited.has(canonical)) return;
+  visited.add(canonical);
+
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    let isDirectory = entry.isDirectory();
+    let isFile = entry.isFile();
+    if (entry.isSymbolicLink()) {
+      try {
+        const info = await stat(full);
+        isDirectory = info.isDirectory();
+        isFile = info.isFile();
+      } catch {
+        continue;
+      }
+    }
+    if (isDirectory) {
+      if (IGNORE_DIRS.has(entry.name)) continue;
+      await walk(full, out, visited);
+    } else if (isFile) {
+      out.push(full);
+    }
+  }
+}
+
+export async function walkFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  await walk(root, files, new Set());
+  return files;
+}
