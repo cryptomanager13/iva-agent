@@ -207,16 +207,32 @@ async function inTempDir<T>(body: (cwd: string) => Promise<T>): Promise<T> {
 
 // ── статус ────────────────────────────────────────────────────────────────────
 
-/** Чужая авторизация в окружении: она увела бы подписку на чужой счёт (ключ или режим
- *  стороннего шлюза). Имя переменной называем, значение — никогда. */
-function foreignAuth(env: ClaudeEnv): string | null {
-  for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]) {
-    if ((env[name] ?? "").trim()) return name;
+/** Значения, при которых переменная означает «не включено». Правило общее с рантаймом. */
+const OFF_VALUES = new Set(["", "0", "false", "no", "off"]);
+/** Ключ и адрес, уводящие CLI с подписки владельца. Тот же перечень, что у рантайма в
+ *  `agent/lib/claude-cli.ts`; разъедься половины — доктор объявил бы .env здоровым перед
+ *  агентом, который на этом же .env отказывается делать ход. Сторожит зеркальный тест. */
+const FOREIGN_AUTH = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_FOUNDRY_API_KEY",
+  "ANTHROPIC_BASE_URL",
+];
+
+/** Чужая авторизация или чужой адрес в окружении: подписка ушла бы на чужой счёт или мимо
+ *  неё вовсе. Имя переменной называем, значение — никогда. */
+export function firstConflict(env: ClaudeEnv): string | null {
+  for (const name of FOREIGN_AUTH) {
+    if ((env[name] ?? "").length > 0) return name;
   }
   return (
-    Object.keys(env).find(
-      (name) => name.startsWith("CLAUDE_CODE_USE_") && (env[name] ?? "").trim(),
-    ) ?? null
+    Object.keys(env)
+      .sort()
+      .find(
+        (name) =>
+          name.startsWith("CLAUDE_CODE_USE_") &&
+          !OFF_VALUES.has((env[name] ?? "").toLowerCase()),
+      ) ?? null
   );
 }
 
@@ -262,7 +278,7 @@ async function claudeStatusRaw(
   options: ClaudeCliOptions,
 ): Promise<ClaudeStatus> {
   const command = claudeBinary(env) as string[];
-  const conflict = foreignAuth(env);
+  const conflict = firstConflict(env);
   const result = await runClaude([...command, "auth", "status"], {
     env,
     input: "",
@@ -311,7 +327,7 @@ function hintFor({
   loggedIn: boolean;
 }): string {
   if (conflict)
-    return `${conflict} is set in .env — the subscription works without any key, and that variable would move the calls to another account. Remove the line`;
+    return `${conflict} is set in .env — the subscription works without any key or address of its own, and that variable would send the calls somewhere else. Remove the line`;
   return loggedIn
     ? ""
     : `Claude Code CLI is not signed in — run on the server: ${CLAUDE_LOGIN_HINT}`;

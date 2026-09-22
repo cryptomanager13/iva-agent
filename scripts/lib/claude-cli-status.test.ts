@@ -14,11 +14,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { claudeConflicts } from "#lib/claude-cli.ts";
 import {
   claudeBinary,
   claudeContextWindow,
   claudeStatus,
   ClaudeCliError,
+  firstConflict,
   listClaudeModels,
   probeClaudeModel,
 } from "./claude-cli-status.ts";
@@ -154,7 +156,10 @@ test("a foreign auth variable makes the vendor unusable and is named, not printe
   for (const name of [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_SOMETHING_NEW",
   ]) {
     const status = await claudeStatus(
       envWith(t, "auth", { [name]: "sk-ant-secret-value" }),
@@ -164,6 +169,30 @@ test("a foreign auth variable makes the vendor unusable and is named, not printe
     assert.match(status.hint, new RegExp(name, "u"), name);
     assert.equal(status.hint.includes("sk-ant-secret-value"), false, name);
   }
+});
+
+// Доктор и агент обязаны отказывать на одном и том же .env: доктор читает свой перечень
+// (половина CLI не импортирует рантайм, ADR-0003), а отказывает на ходу рантайм. Разъедься
+// они — доктор объявил бы .env здоровым перед агентом, который на нём не делает ни хода.
+test("both halves refuse the same variables, and the same values", () => {
+  const cases: Record<string, string | undefined>[] = [
+    { ANTHROPIC_API_KEY: "sk-ant-x" },
+    { ANTHROPIC_AUTH_TOKEN: "t" },
+    { ANTHROPIC_FOUNDRY_API_KEY: "k" },
+    { ANTHROPIC_BASE_URL: "https://proxy.example" },
+    { CLAUDE_CODE_USE_BEDROCK: "1" },
+    { CLAUDE_CODE_USE_BEDROCK: "0" },
+    { CLAUDE_CODE_USE_VERTEX: "false" },
+    { CLAUDE_CODE_USE_SOMETHING_NEW: "yes" },
+    { CLAUDE_MODEL: "claude-fable-5-1", PATH: "/usr/bin" },
+    {},
+  ];
+  for (const env of cases)
+    assert.equal(
+      firstConflict(env),
+      claudeConflicts(env)[0] ?? null,
+      JSON.stringify(env),
+    );
 });
 
 test("the model list is the CLI picker, deduplicated", async (t) => {
