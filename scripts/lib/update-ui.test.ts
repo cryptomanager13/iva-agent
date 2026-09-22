@@ -16,6 +16,7 @@ import {
 import { REPAIR_COMMAND } from "./update-check.ts";
 
 type TelegramBody = {
+  disable_notification?: boolean;
   message_id?: number;
   text?: string;
   rich_message?: { markdown?: string };
@@ -474,6 +475,7 @@ test("a final Telegram refuses to edit is sent as its own message", async (t) =>
   assert.equal(sent.length, 1, "the user is told the update finished");
   assert.match(screenOf(sent[0]?.body), /Iva updated/);
   assert.match(screenOf(sent[0]?.body), /v1 → v2/);
+  assert.equal(sent[0]?.body.disable_notification, true);
   assert.ok(
     errors.some((line) =>
       /update status edit failed: 400 .*FROZEN/u.test(line),

@@ -65,6 +65,7 @@ await test("статус уходит rich-сообщением с кнопко�
   assert.equal(await status.sendWorkingStatus(tg), 500);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, "sendRichMessage");
+  assert.equal(calls[0].body.disable_notification, true);
   const markdown = markdownOf(calls[0]);
   assert.equal(
     markdown,
@@ -83,6 +84,10 @@ await test("отказ Telegram на custom_emoji роняет лоадер на
 
   assert.equal(await status.sendWorkingStatus(rejectCustom.tg), 501);
   assert.equal(rejectCustom.calls.length, 2);
+  assert.deepEqual(
+    rejectCustom.calls.map((call) => call.body.disable_notification),
+    [true, true],
+  );
   // Кнопка живёт в тексте, поэтому падение анимации её не снимает.
   const fallbackMarkdown = markdownOf(rejectCustom.calls[1]);
   assert.equal(fallbackMarkdown, `⏳ ${STOP_BUTTON}`);
@@ -245,4 +250,26 @@ await test("своя сессия гасит статус-сообщение", a
   );
   assert.equal(calls[0].body.message_id, 801);
   assert.equal(runStatus.getChatStatus(key)?.status, "idle");
+});
+
+await test("обычный статус и фолбэк rich-статуса отправляются тихо", async () => {
+  const failedRich = handle((call) =>
+    call.method === "sendRichMessage"
+      ? { ok: false, body: { description: "rich unsupported" } }
+      : { ok: true, body: { result: { message_id: 503 } } },
+  );
+  assert.equal(await status.sendWorkingStatus(failedRich.tg), 503);
+  assert.deepEqual(
+    failedRich.calls.map((call) => call.body.disable_notification),
+    [true, true],
+  );
+
+  writeFileSync(
+    join(dataDir, "settings.json"),
+    JSON.stringify({ menuStyle: "classic" }),
+  );
+  const classic = handle();
+  assert.equal(await status.sendWorkingStatus(classic.tg), 500);
+  assert.equal(classic.calls[0].method, "sendMessage");
+  assert.equal(classic.calls[0].body.disable_notification, true);
 });

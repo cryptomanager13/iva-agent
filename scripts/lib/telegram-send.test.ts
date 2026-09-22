@@ -58,6 +58,38 @@ void test("telegram-send loads under bare Node and redacts outbound secrets", as
   );
   assert.equal(requests[0].body.chat_id, "test-chat");
   assert.equal(requests[0].body.text, "[REDACTED]");
+  assert.equal("disable_notification" in requests[0].body, false);
+});
+
+void test("a scheduled model reply keeps quiet delivery through the plain fallback", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const requests: CapturedRequest[] = [];
+  globalThis.fetch = (url: URL | RequestInfo, options?: RequestInit) => {
+    requests.push(captureRequest(url, options));
+    return Promise.resolve(
+      new Response(requests.length === 1 ? "bad entities" : "", {
+        status: requests.length === 1 ? 400 : 200,
+      }),
+    );
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { sendTelegramHtml } = await import("./telegram-send.ts");
+  const result = await sendTelegramHtml(
+    "test-bot",
+    "test-chat",
+    "<!-- iva:silent -->\nОтчёт по расписанию",
+  );
+
+  assert.deepEqual(result, { ok: true, fellBack: true, error: "" });
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.body.disable_notification, true);
+    assert.doesNotMatch(String(request.body.text), /iva:silent/u);
+  }
+  assert.equal("parse_mode" in requests[1].body, false);
 });
 
 void test("telegram-send keeps redaction when retrying a rejected HTML message", async (t) => {

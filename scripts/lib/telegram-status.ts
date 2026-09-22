@@ -232,13 +232,17 @@ export function createTelegramUpdateReporter({
    * Финал — rich message: кнопка «посмотреть конфликты» стоит в самом тексте, рядом со
    * своим пояснением, поэтому отдельной клавиатуры у финального экрана больше нет.
    */
-  async function finish(markdown: string): Promise<boolean> {
+  async function finish(
+    markdown: string,
+    { silent = false }: { silent?: boolean } = {},
+  ): Promise<boolean> {
     const body = screenPayload(markdown);
     if ((await edit(body)).ok) return true;
     try {
       await call("rich_message" in body ? "sendRichMessage" : "sendMessage", {
         chat_id: activeJob.chatId,
         ...body,
+        ...(silent ? { disable_notification: true } : {}),
       });
       return true;
     } catch (caught) {
@@ -332,7 +336,7 @@ export function createTelegramUpdateReporter({
         // обновление не переносит. Иначе финал обещал бы сохранность правок в коде Ивы.
         updateKeepsLine(lang),
       ];
-      return finish(lines.join("\n"));
+      return finish(lines.join("\n"), { silent: true });
     },
     dispose() {},
   };

@@ -21,6 +21,7 @@ import {
   type OutboxTransport,
 } from "../../agent/lib/outbox.ts";
 import { traceOutbox, type TraceScope } from "../../agent/lib/trace.ts";
+import { parseTelegramDelivery } from "../../agent/lib/telegram-delivery.ts";
 import { classifyDeliverStatus } from "./deliver-policy.ts";
 
 type TelegramRequest = Record<string, unknown>;
@@ -192,6 +193,12 @@ function messageTransport(
   };
 }
 
+/**
+ * Delivers a scheduled model result through Telegram, retaining its delivery choice.
+ *
+ * A leading IVA quiet-delivery marker is removed before formatting and enables
+ * Telegram's soundless notification mode for every delivery fallback.
+ */
 export async function sendTelegramHtml(
   bot: string,
   chat: string,
@@ -205,17 +212,24 @@ export async function sendTelegramHtml(
     trace,
   }: TelegramSendOptions = {},
 ): Promise<{ ok: boolean; fellBack: boolean; error: string }> {
+  const { text, silent } =
+    typeof md === "string"
+      ? parseTelegramDelivery(md)
+      : { text: md, silent: false };
   const transport = messageTransport(
     chat,
     poster(bot, retryTransient, fetchImpl, sleep),
-    threadId ? { message_thread_id: threadId } : {},
+    {
+      ...(silent ? { disable_notification: true } : {}),
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    },
   );
   try {
     const { ok, fellBack, error } = await traceOutbox(
       { source: "cron", ...trace },
-      String(md),
+      String(text),
       () =>
-        sendThroughOutbox(md as string, transport, {
+        sendThroughOutbox(text as string, transport, {
           limit: caption ? 1024 : 4096,
         }),
     );

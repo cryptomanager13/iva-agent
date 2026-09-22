@@ -129,6 +129,7 @@ export async function handleUpdateCheck(
     force
       ? tr("◇ Rebuilding the current version", "◇ Пересобираю текущую версию")
       : tr("◇ Checking for updates", "◇ Проверяю обновления"),
+    { silent: true },
   )) as TelegramMessage | null;
   if (!status || typeof status.message_id !== "number") return false;
   // The same rebuild `iva update --force` does on the server, asked from the chat: no

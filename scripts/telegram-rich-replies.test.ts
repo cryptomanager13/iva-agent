@@ -37,9 +37,17 @@ after(() => {
 // Разметка rich-конструкции: таблица уходит rich-сообщением, когда шов её видит.
 const TABLE = "| a | b |\n|---|---|\n| 1 | 2 |";
 
-type SentBody = { readonly parse_mode?: string; readonly text?: string };
+type SentBody = {
+  readonly disable_notification?: boolean;
+  readonly parse_mode?: string;
+  readonly text?: string;
+};
 type ApiCall =
-  | { readonly kind: "request"; readonly method: string }
+  | {
+      readonly kind: "request";
+      readonly method: string;
+      readonly body: unknown;
+    }
   | { readonly kind: "post"; readonly body: SentBody };
 
 // Спецификатор в переменной — как в scripts/telegram-reply-context.test.ts. Канал один
@@ -104,8 +112,8 @@ function telegramDouble() {
   > = {
     chatId: "1",
     messageThreadId: undefined,
-    request: async (method): Promise<TelegramApiResponse> => {
-      calls.push({ kind: "request", method });
+    request: async (method, body): Promise<TelegramApiResponse> => {
+      calls.push({ kind: "request", method, body });
       return { ok: true, status: 200, body: {} };
     },
     post: async (body) => {
@@ -219,6 +227,51 @@ void test("never: таблица уходит HTML, auto: rich", async () => {
   assert.deepEqual(on.calls.map(callLine), ["request:sendRichMessage"]);
 });
 
+void test("тихий режим сохраняется на rich, HTML и plain-фолбэке", async () => {
+  const { outboxTransport } = await loadChannel();
+  const rich = telegramDouble();
+  await sendThroughOutbox(TABLE, outboxTransport(rich.tg, "auto", true));
+  assert.equal(rich.calls[0].kind, "request");
+  assert.equal(
+    (rich.calls[0].body as { disable_notification?: boolean })
+      .disable_notification,
+    true,
+  );
+
+  const html = telegramDouble();
+  await sendThroughOutbox(
+    "обычный ответ",
+    outboxTransport(html.tg, "never", true),
+  );
+  assert.equal(html.calls[0].kind, "post");
+  assert.equal(html.calls[0].body.disable_notification, true);
+
+  const fallback = telegramDouble();
+  let first = true;
+  const tg = {
+    ...fallback.tg,
+    post: async (body: Parameters<typeof fallback.tg.post>[0]) => {
+      const result = await fallback.tg.post(body);
+      if (first) {
+        first = false;
+        throw new Error("HTML rejected");
+      }
+      return result;
+    },
+  };
+  const delivered = await sendThroughOutbox(
+    "обычный ответ",
+    outboxTransport(tg, "never", true),
+  );
+  assert.equal(delivered.ok, true);
+  assert.deepEqual(
+    fallback.calls.map((call) =>
+      call.kind === "post" ? call.body.disable_notification : undefined,
+    ),
+    [true, true],
+  );
+});
+
 void test("канал отдаёт режим в транспорт: при auto таблица уходит rich-сообщением", async (t) => {
   const calls: WiringCall[] = [];
   t.after(installBotApiDouble(calls));
@@ -279,4 +332,33 @@ void test("канал отдаёт режим в транспорт: при auto
     0,
     `auto не должен идти HTML-путём: ${rendered}`,
   );
+  assert.equal(
+    (calls[0].body as { disable_notification?: boolean }).disable_notification,
+    undefined,
+  );
+
+  for (const [message, method] of [
+    [`<!-- iva:silent -->\n${TABLE}`, "sendRichMessage"],
+    ["<!-- iva:silent -->\nОбычный ответ", "sendMessage"],
+  ]) {
+    await contextStorage.run(ctx, () =>
+      adapter["message.completed"](
+        {
+          finishReason: "stop",
+          message,
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_silent",
+        },
+        context,
+      ),
+    );
+    const sent = calls.at(-1);
+    assert.equal(sent?.method, method);
+    assert.equal(
+      (sent?.body as { disable_notification?: boolean }).disable_notification,
+      true,
+    );
+    assert.doesNotMatch(JSON.stringify(sent?.body), /iva:silent/u);
+  }
 });
