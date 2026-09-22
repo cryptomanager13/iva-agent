@@ -1096,6 +1096,8 @@ test("имя модели для CLI и окно контекста берутс
     claudeNativeModel("claude-haiku-4-5"),
     "claude-haiku-4-5-20251001",
   );
+  // Прошлый Opus подписки — тоже миллионное окно, то есть тоже с суффиксом.
+  assert.equal(claudeNativeModel("claude-opus-4-8"), "claude-opus-4-8[1m]");
   // Незнакомая модель уезжает как есть: чужой аккаунт не угадывают.
   assert.equal(claudeNativeModel("claude-mystery-9"), "claude-mystery-9");
   assert.deepEqual(claudeModel("claude-mystery-9"), {

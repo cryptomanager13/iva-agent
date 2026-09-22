@@ -137,6 +137,13 @@ const CLAUDE_MODELS: Record<
     window: 1_000_000,
     adaptive: true,
   },
+  // Прошлый Opus остаётся в таблице, пока пикер аккаунта его предлагает: без строки здесь
+  // ход ушёл бы к CLI именем без суффикса, а на такое имя он отвечает «модели нет».
+  "claude-opus-4-8": {
+    native: "claude-opus-4-8",
+    window: 1_000_000,
+    adaptive: true,
+  },
   // Haiku 4.5 adaptive thinking не умеет: с ним подписка отвечает
   // 400 «adaptive thinking is not supported on this model» (живьём 22.09.2026).
   "claude-haiku-4-5-20251001": {
