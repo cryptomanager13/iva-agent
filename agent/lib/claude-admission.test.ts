@@ -84,7 +84,7 @@ type Fixture = {
 /** Заглушка api.anthropic.com: отвечает заранее заготовленными событиями. */
 async function fakeUpstream(
   t: TestContext,
-  options: { status?: number; split?: boolean } = {},
+  options: { status?: number; split?: boolean; events?: unknown[] } = {},
 ): Promise<Fixture> {
   const requests: IncomingMessage[] = [];
   const bodies: string[] = [];
@@ -121,11 +121,11 @@ async function fakeUpstream(
       if (options.split === true && pending.length >= 0) {
         pending.push(write);
         setTimeout(() => {
-          if (pending.includes(write)) write(answerEvents());
+          if (pending.includes(write)) write(options.events ?? answerEvents());
         }, 5);
         return;
       }
-      write(answerEvents());
+      write(options.events ?? answerEvents());
     });
   });
   server.on("connection", () => {
@@ -414,3 +414,22 @@ async function waitFor(check: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+// Fable стримит вызов инструмента без аргументов пустым `partial_json` (c1, 22.09.2026):
+// у Hermes тот же ответ падал на JSON-разборе пустой строки, ответ считался неполным,
+// и хост повторял ход трижды. Пустой input — это `{}`, ответ целый.
+test("инструмент без аргументов: пустой partial_json — это {} и целый ответ", async (t) => {
+  const events = answerEvents().map((event) => {
+    const row = event as { type: string; index?: number; delta?: unknown };
+    if (row.type === "content_block_delta" && row.index === 1)
+      return { ...row, delta: { type: "input_json_delta", partial_json: "" } };
+    return event;
+  });
+  const upstream = await fakeUpstream(t, { events });
+  const admission = await startAdmission(upstream.url, 5_000);
+  t.after(() => admission.close());
+  await (await post(admission)).text();
+  assert.equal(admission.capture.complete, true);
+  const call = admission.capture.message?.content[1] as { input?: unknown };
+  assert.deepEqual(call.input, {});
+});

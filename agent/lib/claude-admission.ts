@@ -219,7 +219,9 @@ class SseCapture {
     const block = this.message.content[index];
     if (block === undefined) return;
     try {
-      block.input = JSON.parse(partial);
+      // Инструмент без аргументов API стримит пустым `partial_json` (Fable, 22.09.2026):
+      // пустая строка — это `{}`, а не недоклеенный JSON.
+      block.input = partial.trim() === "" ? {} : JSON.parse(partial);
       this.args.delete(index);
     } catch {
       // Недоклеенный JSON — это не целый ответ: запись остаётся в args, и признак целостности
