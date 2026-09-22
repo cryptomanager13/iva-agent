@@ -10,7 +10,7 @@ Iva runs on your server with your keys. Here is every external service it talks 
 | **Ollama Cloud**                  | ~$20/mo                      | ~19 models fetched live — `deepseek-v4-pro` (default), `kimi-k3`, `glm-5.2`, `minimax-m3`, `gpt-oss:120b`…                                       | `gemma4:31b`, override with `OLLAMA_VISION_MODEL`                  |
 | **OpenRouter**                    | pay-as-you-go                | 300+ models across vendors — pick any slug (`vendor/model`)                                                                                      | `google/gemini-2.5-flash`, override with `OPENROUTER_VISION_MODEL` |
 | **OpenAI (ChatGPT subscription)** | your existing Plus/Pro/Team  | the models your plan exposes (`gpt-5.x`, `-codex`), fetched live                                                                                 | same subscription (multimodal), no variable                        |
-| **Claude (Pro/Max subscription)** | your existing Pro/Max plan   | the models your plan exposes (`claude-fable-5-1`, opus, sonnet, haiku), fetched live                                                             | same subscription (multimodal), no variable                        |
+| **Claude (Pro/Max subscription)** | your existing Pro/Max plan   | Fable 5.1, Opus 5, Sonnet 5 (`claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`), the ones the plan's picker has                             | same subscription (multimodal), no variable                        |
 | **Custom (OpenAI-compatible)**    | whatever your endpoint costs | whatever your endpoint serves — the wizard reads `GET {base}/models` when there is one, otherwise you type the id                                | the chat model itself, or a slug in `CUSTOM_VISION_MODEL`          |
 
 The first three are plain API keys, `codex` and `claude` ride subscriptions you already pay for, and `custom` is an address you supply:
@@ -55,7 +55,7 @@ iva config             # pick the provider (option 4) and a model from the subsc
 iva restart
 ```
 
-Notes: the model list comes from the CLI itself, so you see exactly what your plan exposes; `claude auth status` names the plan, and `iva doctor` prints it next to the model. Requests are billed by the CLI — they count as `claude -p` (Agent SDK) usage on your plan. Set `CLAUDE_CONTEXT_WINDOW` to the real window of the model you picked: 1000000 for fable/opus/sonnet, 200000 for haiku. If the CLI is not on the service's `PATH`, point `CLAUDE_COMMAND` at the binary. `/model` → Claude checks the CLI and repeats the check after you sign in there.
+Notes: the screen offers three models — Fable 5.1, Opus 5 and Sonnet 5 — and only those the CLI picker actually has. `.env` stores the canonical id (`claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`), never a picker alias. `claude auth status` names the plan, and `iva doctor` prints it next to the model. Requests are billed by the CLI — they count as `claude -p` (Agent SDK) usage on your plan. `CLAUDE_CONTEXT_WINDOW` for these three is 1000000. If the CLI is not on the service's `PATH`, point `CLAUDE_COMMAND` at the binary. `/model` → Claude checks the CLI and repeats the check after you sign in there.
 
 ### OpenRouter (`openrouter`)
 

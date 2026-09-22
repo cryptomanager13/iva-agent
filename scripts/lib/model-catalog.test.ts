@@ -152,13 +152,13 @@ test("heterogeneous OpenRouter catalog does not invent reasoning choices", async
 test("the claude catalog asks the CLI, and falls back to the pinned list", async () => {
   const live = await fetchModelOptions("claude", undefined, {
     listClaudeCatalog: async () => [
-      { id: "claude-opus-5[1m]", reasoningLevels: [] },
-      { id: "claude-fable-5-1", reasoningLevels: [] },
+      { id: "claude-opus-5", label: "Opus 5", reasoningLevels: [] },
+      { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
     ],
   });
   assert.deepEqual(live, [
-    { id: "claude-opus-5[1m]", reasoningLevels: [] },
-    { id: "claude-fable-5-1", reasoningLevels: [] },
+    { id: "claude-opus-5", label: "Opus 5", reasoningLevels: [] },
+    { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
   ]);
   // Окружение доезжает до рукопожатия: CLAUDE_COMMAND живёт в .env сервиса.
   let seen: unknown;
@@ -180,12 +180,15 @@ test("the claude catalog asks the CLI, and falls back to the pinned list", async
     fallback.map((option) => option.id),
     CATALOG.claude.models,
   );
-  // Вшитый список — те же имена, что названы в контракте вендора.
+  assert.deepEqual(
+    fallback.map((option) => option.label),
+    ["Fable 5.1", "Opus 5", "Sonnet 5"],
+  );
+  // Вшитый список — те же три имени, что у экрана.
   assert.deepEqual(CATALOG.claude.models, [
     "claude-fable-5-1",
     "claude-opus-5",
     "claude-sonnet-5",
-    "claude-haiku-4-5-20251001",
   ]);
   assert.equal(CATALOG.claude.def, "claude-fable-5-1");
 });

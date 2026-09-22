@@ -170,6 +170,22 @@ test("pickFromList: the current item is the default, a number picks, garbage fal
   ]);
 });
 
+test("pickFromList shows a label and returns the id", async () => {
+  const { dialog, screen } = scripted(["1"]);
+  const picked = await dialog.pickFromList(
+    [
+      { id: "claude-fable-5-1", label: "Fable 5.1" },
+      { id: "claude-opus-5", label: "Opus 5" },
+    ],
+    "",
+    "claude-fable-5-1",
+  );
+  assert.equal(picked, "claude-fable-5-1");
+  assert.match(screen[0] ?? "", /Fable 5\.1/u);
+  assert.match(screen[0] ?? "", /★/u);
+  assert.equal((screen[0] ?? "").includes("claude-fable-5-1"), false);
+});
+
 test("pickPort: a free port is taken as typed, Enter keeps the default", async () => {
   const { dialog } = scripted(["9000", ""]);
   assert.equal(await dialog.pickPort("8723"), "9000");

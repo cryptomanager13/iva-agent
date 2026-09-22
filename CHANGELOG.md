@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- 🧠 **Claude: три модели с именами**: экран «Модель · Claude» и мастер показывают Fable 5.1, Opus 5 и Sonnet 5 и пишут в `.env` канонические `claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`. Псевдонимы пикера (`default`, `opus[1m]`, суффикс `[1m]`) и Haiku в список не попадают.
+
 ## [0.4.6] - 2026-09-22
 
 - 🪪 **Claude по подписке Pro/Max** - шестой вендор `MODEL_PROVIDER=claude`: ключа в `.env` нет вовсе, Ива зовёт установленный и залогиненный Claude Code CLI на том же сервере и работает через него как через модель - инструменты, память, напоминания, компактация и `/stop` остаются своими. Модель по умолчанию `claude-fable-5-1`, список моделей приходит живым от самого CLI, поэтому видно ровно то, что открыто подписке; `/model` и `iva config` показывают план из `claude auth status`, а `iva doctor` без бинаря называет `npm install -g @anthropic-ai/claude-code`, без входа - `claude auth login`. Запросы идут по тарифу `claude -p` (Agent SDK) подписки; `CLAUDE_COMMAND` задаёт путь к бинарю, если его нет в `PATH` сервиса, `CLAUDE_CONTEXT_WINDOW` - реальное окно выбранной модели (у haiku 200000, у остальных 1000000). Чужая авторизация и чужой адрес API в `.env` (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_BASE_URL`, любая `CLAUDE_CODE_USE_*`) вендора не включают: доктор и агент называют переменную, потому что с ней запросы ушли бы на чужой счёт или мимо подписки. Инструкции, шаблон `.env` и доки перечисляют шесть вендоров.

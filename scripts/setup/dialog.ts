@@ -219,25 +219,36 @@ async function validated(
   return answer;
 }
 
-// Выбор из списка по номеру (с номером по умолчанию). Возвращает выбранный пункт.
+type ListItem = string | { id: string; label?: string };
+
+const itemId = (item: ListItem): string =>
+  typeof item === "string" ? item : item.id;
+
+const itemLabel = (item: ListItem): string =>
+  typeof item === "string" ? item : (item.label ?? item.id);
+
+// Выбор из списка по номеру (с номером по умолчанию). На экране — подпись, в ответ — id.
 async function pickFromList(
   d: Core,
-  items: string[],
+  items: readonly ListItem[],
   current: string,
   recommended: string,
 ): Promise<string> {
-  items.forEach((id, i) => d.print(listLine(id, i, recommended)));
-  const defNum = defaultNumber(items, current, recommended);
+  const ids = items.map(itemId);
+  items.forEach((item, i) =>
+    d.print(listLine(itemLabel(item), i, itemId(item) === recommended)),
+  );
+  const defNum = defaultNumber(ids, current, recommended);
   const choice = await ask(
     d,
     `\n  ${d.t("Model number", "Номер модели")}`,
     String(defNum),
   );
-  return items[listIndex(choice, items.length, defNum)];
+  return ids[listIndex(choice, ids.length, defNum)];
 }
 
-const listLine = (id: string, i: number, recommended: string) =>
-  `   ${String(i + 1).padStart(2)}. ${id}${id === recommended ? `  ${C.g}★${C.x}` : ""}`;
+const listLine = (text: string, i: number, marked: boolean) =>
+  `   ${String(i + 1).padStart(2)}. ${text}${marked ? `  ${C.g}★${C.x}` : ""}`;
 
 /** Номер пункта по умолчанию: текущий, иначе рекомендованный, иначе первый. */
 export function defaultNumber(

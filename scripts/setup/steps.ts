@@ -17,6 +17,7 @@ import {
   claudeContextWindow,
   type ClaudeStatus,
 } from "../lib/claude-cli-status.ts";
+import { claudeModelLabel } from "../lib/claude-cli-status.ts";
 import type { fetchModels } from "../lib/model-catalog.ts";
 import type {
   listCodexModels,
@@ -62,7 +63,7 @@ export type SetupIo = {
   askRequired: (label: string, options?: AskRequiredOptions) => Promise<string>;
   mask: (value: string) => string;
   pickFromList: (
-    items: string[],
+    items: readonly (string | { id: string; label?: string })[],
     current: string,
     recommended: string,
   ) => Promise<string>;
@@ -433,14 +434,14 @@ async function askClaudeSettings(
       `  ${C.g}${ctx.t("signed in", "вход выполнен")}${status.plan ? ` — ${ctx.t("plan", "план")}: ${status.plan}` : ""}${C.x}`,
     );
   // Список моделей спрашиваем у того же CLI; не ответил — остаётся вшитый список каталога.
+  // На экране — имя, в .env — канонический id.
   const models = await ctx.fetchModels("claude");
   out.CLAUDE_MODEL = await ctx.pickFromList(
-    models,
+    models.map((id) => ({ id, label: claudeModelLabel(id) })),
     out.CLAUDE_MODEL,
     CATALOG.claude.def ?? "",
   );
-  // Окно контекста пишем сразу за моделью: компактация считает порог от него, а у haiku
-  // оно впятеро меньше, чем у остальных моделей подписки.
+  // Окно контекста пишем сразу за моделью: компактация считает порог от него.
   out.CLAUDE_CONTEXT_WINDOW = claudeContextWindow(out.CLAUDE_MODEL);
   ctx.print(
     `  → ${ctx.t("model", "модель")}: ${C.g}${out.CLAUDE_MODEL}${C.x} · ${ctx.t("context window", "окно контекста")}: ${out.CLAUDE_CONTEXT_WINDOW}`,

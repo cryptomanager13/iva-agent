@@ -11,10 +11,29 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 export type ClaudeEnv = Readonly<Record<string, string | undefined>>;
 
 /** Строка модели для экранов и .env — та же форма, что ModelOption каталога: сюда её
- *  приносит чужая рука, чтобы этот модуль не зависел от каталога (цикл импортов). */
+ *  приносит чужая рука, чтобы этот модуль не зависел от каталога (цикл импортов).
+ *  `label` — подпись кнопки; в .env пишется `id`. */
 export interface ClaudeModelOption {
   id: string;
+  label?: string;
   reasoningLevels: string[];
+}
+
+/** Три модели экрана «Модель · Claude», в порядке кнопок. Псевдонимы пикера
+ *  (`default`, `opus[1m]`) и Haiku сюда не входят: в .env только эти id. */
+const CLAUDE_MODEL_CHOICES = [
+  { id: "claude-fable-5-1", label: "Fable 5.1" },
+  { id: "claude-opus-5", label: "Opus 5" },
+  { id: "claude-sonnet-5", label: "Sonnet 5" },
+] as const;
+
+/** Подпись известной модели; чужой id возвращается как есть, чтобы список не врал. */
+export function claudeModelLabel(id: string): string {
+  return CLAUDE_MODEL_CHOICES.find((choice) => choice.id === id)?.label ?? id;
+}
+
+function claudeChoice(id: string): ClaudeModelOption {
+  return { id, label: claudeModelLabel(id), reasoningLevels: [] };
 }
 
 /** Установка и вход живут в шелле сервера: в Telegram их за владельца не сделать. */
@@ -377,32 +396,34 @@ function jsonRows(text: string): Record<string, unknown>[] {
     });
 }
 
-/** Имя модели из строки пикера: сначала `resolvedModel`, потом псевдоним `value`. */
-function pickerId(value: unknown): string | null {
-  const entry = isRecord(value) ? value : {};
-  const id = [entry.resolvedModel, entry.value].find(
-    (candidate) => typeof candidate === "string" && candidate.trim(),
-  );
-  return typeof id === "string" ? id.trim() : null;
+/** Модели из рукопожатия. `null` — ответа пикера нет вовсе (это отказ, не пустой список). */
+function handshakeModels(stdout: string): unknown[] | null {
+  const row = jsonRows(stdout).find((r) => r.type === "control_response");
+  if (!row) return null;
+  const inner = isRecord(row.response) ? row.response : null;
+  const body = isRecord(inner?.response) ? inner.response : null;
+  const models = body?.models;
+  if (!Array.isArray(models)) return [];
+  return models as unknown[];
 }
 
-/** Модели из ответа рукопожатия: `response.response.models[].resolvedModel`. */
-function pickerModels(stdout: string): ClaudeModelOption[] {
-  const row = jsonRows(stdout).find((r) => r.type === "control_response");
-  const inner = isRecord(row?.response) ? row.response : null;
-  const body = isRecord(inner?.response) ? inner.response : null;
-  const models = Array.isArray(body?.models) ? body.models : [];
-  const seen = new Set<string>();
-  const options: ClaudeModelOption[] = [];
+/** Канонический id из `resolvedModel`: суффикс `[1m]` срезается, псевдоним `value` не берётся. */
+function canonicalResolved(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.resolvedModel !== "string") return null;
+  const id = value.resolvedModel.trim().replace(/\[1m\]$/u, "");
+  return CLAUDE_MODEL_CHOICES.some((choice) => choice.id === id) ? id : null;
+}
+
+/** Три модели таблицы, которые пикер реально отдал. Пустое пересечение — вшитые три. */
+function choicesFromPicker(models: readonly unknown[]): ClaudeModelOption[] {
+  const found = new Set<string>();
   for (const value of models) {
-    const id = pickerId(value);
-    // Пикер повторяет одну модель под несколькими псевдонимами («Default (recommended)» и
-    // «Opus (1M context)» — это один claude-opus-5[1m]): показываем её один раз.
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    options.push({ id, reasoningLevels: [] });
+    const id = canonicalResolved(value);
+    if (id) found.add(id);
   }
-  return options;
+  const picked = CLAUDE_MODEL_CHOICES.filter((choice) => found.has(choice.id));
+  const source = picked.length > 0 ? picked : CLAUDE_MODEL_CHOICES;
+  return source.map((choice) => claudeChoice(choice.id));
 }
 
 /**
@@ -422,13 +443,13 @@ export async function listClaudeModels(
       cwd,
     }),
   );
-  const models = result.failed ? [] : pickerModels(result.stdout);
-  if (!models.length)
+  const models = result.failed ? null : handshakeModels(result.stdout);
+  if (!models)
     throw new ClaudeCliError(
       "catalog_unavailable",
       "the CLI answered no model picker",
     );
-  return models;
+  return choicesFromPicker(models);
 }
 
 /** Команда CLI, готового отвечать: не установлен и не вошёл — это отказ с подсказкой. */

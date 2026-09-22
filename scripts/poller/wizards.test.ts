@@ -414,7 +414,7 @@ function fakeClaudeForWizard(t: TestContext): {
       'let input = "";',
       'process.stdin.on("data", (chunk) => { input += chunk; });',
       'process.stdin.on("end", () => {',
-      '  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", response: { models: [{ resolvedModel: "claude-fable-5-1" }, { resolvedModel: "claude-haiku-4-5-20251001" }] } } }) + "\\n");',
+      '  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", response: { models: [{ value: "default", resolvedModel: "claude-opus-5[1m]" }, { value: "claude-fable-5-1[1m]", resolvedModel: "claude-fable-5-1" }, { value: "sonnet", resolvedModel: "claude-sonnet-5" }, { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" }] } } }) + "\\n");',
       "});",
       "",
     ].join("\n"),
@@ -485,7 +485,8 @@ test("the provider screen offers claude, and /model walks it to the CLI commands
     .map((call) => call.text)
     .join("\n");
   assert.match(after, /План: max|Plan: max/u, "план подписки не назван");
-  assert.match(after, /Выбери модель|Choose a live model/u);
+  assert.match(after, /Выбери модель:|Choose a model:/u);
+  assert.doesNotMatch(after, /живого каталога|Choose a live model/u);
 });
 
 // Живой список моделей — пикер самого CLI, а не вшитый список каталога: у подписки
@@ -499,7 +500,7 @@ test("the claude model screen asks the CLI picker", async (t) => {
   );
   const st = flows.start(4102051, "9104221", "model") as unknown as {
     step: string;
-    modelOptions: { id: string }[];
+    modelOptions: { id: string; label?: string }[];
     plan?: string | null;
   };
   st.step = "provider";
@@ -510,6 +511,11 @@ test("the claude model screen asks the CLI picker", async (t) => {
   assert.match(screen, /План: max|Plan: max/u);
   assert.deepEqual(
     st.modelOptions.map((option) => option.id),
-    ["claude-fable-5-1", "claude-haiku-4-5-20251001"],
+    ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
   );
+  assert.deepEqual(
+    st.modelOptions.map((option) => option.label),
+    ["Fable 5.1", "Opus 5", "Sonnet 5"],
+  );
+  assert.doesNotMatch(screen, /haiku|\[1m\]/u);
 });

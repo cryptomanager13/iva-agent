@@ -35,7 +35,11 @@ function makeContext(overrides: Partial<SetupContext> = {}): SetupContext {
     askYesNo: async () => false,
     askRequired: async () => "value",
     mask: (value: string) => value,
-    pickFromList: async (items: string[]) => items[0] ?? "",
+    pickFromList: async (items) => {
+      const first = items[0];
+      if (!first) return "";
+      return typeof first === "string" ? first : first.id;
+    },
     pickPort: async (def: string) => def,
     head: () => undefined,
     hr: () => undefined,
@@ -83,8 +87,12 @@ test("шаг провайдера: happy — ключ, модель и vision п
       captured.push((await options?.validate?.("ollama-key")) ?? null);
       return "ollama-key";
     },
-    pickFromList: async (items, _current, recommended) =>
-      items.includes(recommended) ? recommended : items[0],
+    pickFromList: async (items, _current, recommended) => {
+      const ids = items.map((item) =>
+        typeof item === "string" ? item : item.id,
+      );
+      return ids.includes(recommended) ? recommended : (ids[0] ?? "");
+    },
   });
   const s = state("ollama");
   await askProviderSettings(s, ctx);
@@ -309,18 +317,27 @@ test("шаг записи .env: failure — отказ проверки моде
 
 // ─── claude: ключа нет, вход в чужом CLI ─────────────────────────────────────────────
 // Шаг проверяет то, что мастер может проверить (статус CLI), называет команды для
-// сервера и повторяет проверку. Окно контекста пишется сразу за моделью: у haiku оно
-// впятеро меньше, и завышенное окно сдвинуло бы порог компактации.
-test("the claude step writes the model and the window that belongs to it", async () => {
+// сервера и повторяет проверку. На экране — имя модели, в .env — её id.
+test("the claude step shows the name and writes the canonical id", async () => {
+  let shown: readonly (string | { id: string; label?: string })[] = [];
   const out = await askProviderSettings(
     { existing: {}, out: {}, provider: "claude" },
     makeContext({
-      fetchModels: async () => ["claude-haiku-4-5-20251001"],
-      pickFromList: async (items: string[]) => items[0] ?? "",
+      fetchModels: async () => ["claude-sonnet-5", "claude-fable-5-1"],
+      pickFromList: async (items) => {
+        shown = items;
+        const first = items[0];
+        if (!first) return "";
+        return typeof first === "string" ? first : first.id;
+      },
     }),
   );
-  assert.equal(out.CLAUDE_MODEL, "claude-haiku-4-5-20251001");
-  assert.equal(out.CLAUDE_CONTEXT_WINDOW, "200000");
+  assert.deepEqual(shown, [
+    { id: "claude-sonnet-5", label: "Sonnet 5" },
+    { id: "claude-fable-5-1", label: "Fable 5.1" },
+  ]);
+  assert.equal(out.CLAUDE_MODEL, "claude-sonnet-5");
+  assert.equal(out.CLAUDE_CONTEXT_WINDOW, "1000000");
 });
 
 test("a CLI that is not ready is named, and the check can be repeated", async () => {

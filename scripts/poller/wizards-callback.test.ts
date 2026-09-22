@@ -149,7 +149,7 @@ test("nokey у key-optional провайдера ведёт на экран мо
     assert.equal(st.step, "models");
     const last = edits().at(-1);
     assert.ok(last);
-    assert.match(last.text, /Choose a live model/u);
+    assert.match(last.text, /Choose a model:/u);
   } finally {
     if (previousFetch) globalThis.fetch = previousFetch;
   }

@@ -11,6 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -195,22 +196,66 @@ test("both halves refuse the same variables, and the same values", () => {
     );
 });
 
-test("the model list is the CLI picker, deduplicated", async (t) => {
+const CLAUDE_THREE = [
+  { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
+  { id: "claude-opus-5", label: "Opus 5", reasoningLevels: [] },
+  { id: "claude-sonnet-5", label: "Sonnet 5", reasoningLevels: [] },
+];
+
+test("the model list is the three named models, aliases and haiku dropped", async (t) => {
   const models = await listClaudeModels(envWith(t, "handshake"));
-  assert.deepEqual(
-    models.map((option) => option.id),
-    [
-      "claude-opus-5[1m]",
-      "claude-fable-5-1",
-      "claude-sonnet-5",
-      "claude-haiku-4-5-20251001",
-      // Строка без resolvedModel остаётся под своим псевдонимом: CLI принимает и его, а
-      // терять модель из-за непривычной формы ответа нельзя.
-      "anonymous",
-    ],
+  assert.deepEqual(models, CLAUDE_THREE);
+  assert.equal(
+    models.some((option) => option.id.includes("haiku")),
+    false,
   );
-  // Уровней размышлений эта подписка не обещает: их приносит только модель рантайма.
-  assert.ok(models.every((option) => option.reasoningLevels.length === 0));
+});
+
+test("the c1 handshake fixture yields Fable, Opus and Sonnet", async (t) => {
+  const fixture = readFileSync(
+    fileURLToPath(
+      new URL("../fixtures/claude/c1-handshake.jsonl", import.meta.url),
+    ),
+    "utf8",
+  );
+  const models = await listClaudeModels(
+    envWith(t, "handshake", { FAKE_CLAUDE_PICKER: fixture.trim() }),
+  );
+  assert.deepEqual(models, CLAUDE_THREE);
+});
+
+test("a picker without Fable omits it, and an empty picker uses the pinned three", async (t) => {
+  const picker = (rows: unknown[]) =>
+    JSON.stringify({
+      type: "control_response",
+      response: { subtype: "success", response: { models: rows } },
+    });
+  const withoutFable = await listClaudeModels(
+    envWith(t, "handshake", {
+      FAKE_CLAUDE_PICKER: picker([
+        { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]" },
+        { value: "sonnet", resolvedModel: "claude-sonnet-5" },
+        { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" },
+      ]),
+    }),
+  );
+  assert.deepEqual(
+    withoutFable.map((option) => option.id),
+    ["claude-opus-5", "claude-sonnet-5"],
+  );
+  const empty = await listClaudeModels(
+    envWith(t, "handshake", { FAKE_CLAUDE_PICKER: picker([]) }),
+  );
+  assert.deepEqual(empty, CLAUDE_THREE);
+  // В пикере есть строки, но ни одна не из таблицы — тот же вшитый список, не пустой экран.
+  const onlyHaiku = await listClaudeModels(
+    envWith(t, "handshake", {
+      FAKE_CLAUDE_PICKER: picker([
+        { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" },
+      ]),
+    }),
+  );
+  assert.deepEqual(onlyHaiku, CLAUDE_THREE);
 });
 
 type ClaudeCall = { argv: string[]; extra: string | null };

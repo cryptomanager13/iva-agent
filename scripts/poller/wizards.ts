@@ -217,6 +217,24 @@ export function selectWizardEffort(st: WizardSnapshot, value: string): boolean {
   return true;
 }
 
+/** Claude держит порядок Fable → Opus → Sonnet. Остальные каталоги поднимают текущую модель. */
+function wizardModelOptions(
+  provider: string,
+  options: ModelOption[],
+  current: string | undefined,
+): ModelOption[] {
+  if (provider === "claude") return options;
+  return selectableWizardOptions(options, current ?? "");
+}
+
+function modelPrompt(): string {
+  return tr("Choose a model:", "Выбери модель:");
+}
+
+function modelButtonLabel(option: ModelOption): string {
+  return option.label ?? option.id;
+}
+
 export function selectableWizardOptions(
   options: unknown,
   current: string,
@@ -772,22 +790,17 @@ async function showModelScreen(st: WizardState) {
   }
   const options = loaded.value;
   const current = env[cat.modelVar];
-  st.modelOptions = selectableWizardOptions(options, current);
+  st.modelOptions = wizardModelOptions(st.provider, options, current);
   st.step = "models";
   const lines = [
     `# ${tr("🧠 Model", "🧠 Модель")} · ${escapeRichText(cat.label)}`,
     ...modelScreenNotes(st, current),
   ];
-  lines.push(
-    tr(
-      `Choose a live model (${cat.label}):`,
-      `Выбери модель из живого каталога (${cat.label}):`,
-    ),
-  );
+  lines.push(modelPrompt());
   // Модели — равноправные варианты без пояснений, но id бывают длинными: по одной в строке.
   lines.push(
     ...st.modelOptions.map((option, i) =>
-      button(option.id, `iva_model:m:${i}`),
+      button(modelButtonLabel(option), `iva_model:m:${i}`),
     ),
   );
   lines.push(cancelLine());

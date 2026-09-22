@@ -3,6 +3,7 @@
 // a successful live response. Codex also returns model-specific reasoning levels.
 import { listCodexModelCatalog } from "./codex-oauth.ts";
 import {
+  claudeModelLabel,
   claudeStatus,
   listClaudeModels,
   type ClaudeEnv,
@@ -36,6 +37,8 @@ export interface ProviderCatalogEntry {
 
 export interface ModelOption {
   id: string;
+  /** Подпись кнопки. Нет — кнопка показывает `id`. */
+  label?: string;
   reasoningLevels: string[];
 }
 
@@ -155,13 +158,9 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     visionVar: null,
     visionDef: null,
     // Вшитый список — запасной путь: живой приходит рукопожатием CLI (fetchModelOptions),
-    // а он может не состояться (нет бинаря, нет входа, чужой вывод).
-    models: [
-      "claude-fable-5-1",
-      "claude-opus-5",
-      "claude-sonnet-5",
-      "claude-haiku-4-5-20251001",
-    ],
+    // а он может не состояться (нет бинаря, нет входа, чужой вывод). Те же три id,
+    // что у пикера: Haiku в экран не входит.
+    models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
   },
   openrouter: {
     label: "OpenRouter",
@@ -292,10 +291,14 @@ const optionsFor = (
   provider: string,
   models: readonly string[],
 ): ModelOption[] =>
-  models.map((id) => ({
-    id,
-    reasoningLevels: providerFallbackReasoningLevels(provider),
-  }));
+  models.map((id) => {
+    const label = provider === "claude" ? claudeModelLabel(id) : "";
+    return {
+      id,
+      ...(label && label !== id ? { label } : {}),
+      reasoningLevels: providerFallbackReasoningLevels(provider),
+    };
+  });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object";
@@ -416,7 +419,11 @@ async function claudeCatalog(
   env: ClaudeEnv,
 ): Promise<ModelOption[] | null> {
   try {
-    return validOptions("claude", await list(env));
+    return (await list(env)).map((option) => ({
+      id: option.id,
+      ...(option.label ? { label: option.label } : {}),
+      reasoningLevels: [...option.reasoningLevels],
+    }));
   } catch {
     return null;
   }
