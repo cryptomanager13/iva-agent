@@ -56,7 +56,7 @@ class NormalizeToolArgumentsTest(unittest.TestCase):
             )
 
             @mcp.tool()
-            def optional_argument(value: str | None = None):
+            def optional_argument(value: str = None):
                 """Record the value that FastMCP passes to the tool handler."""
                 received.append(value)
                 return "called"
