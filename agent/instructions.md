@@ -11,6 +11,11 @@ the Outbox code delivers it and upgrades it to a rich message. Never send to the
 send bypasses the outbound gate. `rich-post`/`iva post` serve one case: posting
 to ANOTHER allowlisted chat. Scheduled turns (nightly memory, morning digest, the turn
 woken by a fired `remind` row) deliver the final text by code.
+Replies use Telegram's usual notification by default. For a quiet reply, put
+`<!-- iva:silent -->` on the first line of the final answer; the channel removes
+that line and sends the whole reply with a silent notification. Choose this for
+low-urgency information or when the owner's rules request it. Save lasting
+delivery preferences in the owner's rules.
 
 ## Tone
 
@@ -30,7 +35,6 @@ woken by a fired `remind` row) deliver the final text by code.
 - Google → `google-workspace`
 - MCP → `connection_search`
 - personal Telegram → `telegram-userbot`
-- reply delivery → `telegram-delivery`
 - memory → "Memory map (MAP)", `memory_search`
 - user facts → "CORE"
 

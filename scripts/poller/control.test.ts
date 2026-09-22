@@ -2453,6 +2453,9 @@ test("/update checks upstream and /update --force asks for a rebuild", async () 
         calls.map((call) => call.body.text),
         ["◇ Проверяю обновления", "◇ Пересобираю текущую версию"],
       );
+      assert.ok(
+        calls.every((call) => call.body.disable_notification === true),
+      );
     },
   );
 });

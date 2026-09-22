@@ -98,11 +98,16 @@ async function downloadTelegramFile(fileId: string, maxBytes: number) {
     return null;
   }
 }
-async function reply(chatId: number | string, text: string) {
+async function reply(
+  chatId: number | string,
+  text: string,
+  { silent = false }: { silent?: boolean } = {},
+) {
   try {
     const data = (await tg("sendMessage", {
       chat_id: chatId,
       text,
+      ...(silent ? { disable_notification: true } : {}),
     })) as TelegramResponse;
     if (!data.ok)
       throw new Error(String(data.description || "sendMessage failed"));
