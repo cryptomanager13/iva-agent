@@ -3,6 +3,7 @@ import {
   ModelCatalogError,
   fetchModelOptions,
 } from "./model-catalog.ts";
+import { ClaudeCliError, probeClaudeModel } from "./claude-cli-status.ts";
 
 type OpenRouterErrorReason = (body: unknown, status: number) => unknown;
 type ModelSelection = {
@@ -18,6 +19,10 @@ type ValidationOptions = {
   listCodexCatalog?: (options?: {
     dataDir?: string;
   }) => Promise<{ id: string; reasoningLevels: string[] }[]>;
+  /** Живая проба вендора claude; по умолчанию — один запрос через чужой CLI. */
+  probeClaude?: (
+    model: string,
+  ) => Promise<{ id: string; reasoningLevels: string[]; answered?: boolean }>;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -161,8 +166,28 @@ export async function probeOpenRouterModel(
 
 export async function validateModelSelection(
   { provider, model, key, dataDir, base }: ModelSelection,
-  { fetchFn = fetch, listCodexCatalog }: ValidationOptions = {},
+  { fetchFn = fetch, listCodexCatalog, probeClaude }: ValidationOptions = {},
 ): Promise<{ id: string; reasoningLevels: string[]; answered?: boolean }> {
+  const selected = selectionOf(provider, model);
+  if (provider === "openrouter")
+    return probeOpenRouterModel({ model: selected, key }, { fetchFn });
+  // У вендора без ключа проверка одна: живой запрос через CLI на этой же машине.
+  if (provider === "claude")
+    return await probeClaudeSelection(selected, probeClaude);
+  assertBase(provider, base);
+  return await validateFromCatalog({
+    provider,
+    model: selected,
+    key,
+    dataDir,
+    base,
+    fetchFn,
+    listCodexCatalog,
+  });
+}
+
+/** Имя провайдера из каталога и однострочная модель: всё остальное — отказ выбора. */
+function selectionOf(provider: unknown, model: unknown): string {
   if (
     typeof provider !== "string" ||
     !Object.hasOwn(CATALOG, provider) ||
@@ -175,17 +200,31 @@ export async function validateModelSelection(
       "invalid provider or model selection",
     );
   }
-  const selected = model.trim();
-  if (provider === "openrouter") {
-    return probeOpenRouterModel({ model: selected, key }, { fetchFn });
-  }
-  // Свой эндпоинт без адреса проверять негде — и это отказ конфигурации, а не сети.
-  if (CATALOG[provider].baseVar && !base) {
-    throw new ModelValidationError(
-      "base_missing",
-      `${CATALOG[provider].baseVar} is not set`,
-    );
-  }
+  return model.trim();
+}
+
+/** Свой эндпоинт без адреса проверять негде — и это отказ конфигурации, а не сети. */
+function assertBase(provider: string, base: string | undefined): void {
+  const { baseVar } = CATALOG[provider];
+  if (baseVar && !base)
+    throw new ModelValidationError("base_missing", `${baseVar} is not set`);
+}
+
+/** Каталог живой — значит он и есть правда: имени, которого в нём нет, в .env делать нечего. */
+async function validateFromCatalog({
+  provider,
+  model,
+  key,
+  dataDir,
+  base,
+  fetchFn,
+  listCodexCatalog,
+}: ModelSelection & {
+  provider: string;
+  model: string;
+  fetchFn: typeof fetch;
+  listCodexCatalog: ValidationOptions["listCodexCatalog"];
+}): Promise<{ id: string; reasoningLevels: string[]; answered?: boolean }> {
   let options;
   try {
     options = await fetchModelOptions(provider, key, {
@@ -201,16 +240,39 @@ export async function validateModelSelection(
     // и тогда принимается имя модели, которое владелец ввёл сам. Та же мягкая политика,
     // что у checkKey: сетевой сбой не повод объявить рабочую конфигурацию битой.
     if (CATALOG[provider].baseVar && failure.code !== "auth_rejected")
-      return { id: selected, reasoningLevels: [] };
+      return { id: model, reasoningLevels: [] };
     throw failure;
   }
-  // Каталог живой — значит он и есть правда: имени, которого в нём нет, в .env делать нечего.
-  const match = options.find((option) => option.id === selected);
+  const match = options.find((option) => option.id === model);
   if (!match) {
     throw new ModelValidationError(
       "model_unavailable",
-      `${selected} is not present in the live ${CATALOG[provider].label} catalog`,
+      `${model} is not present in the live ${CATALOG[provider].label} catalog`,
     );
   }
   return match;
+}
+
+/** Проба вендора claude: один запрос через чужой CLI (см. scripts/lib/claude-cli-status.ts).
+ *  Подставлена ради теста: живой CLI в тестах не поднимается. */
+async function probeClaudeSelection(
+  model: string,
+  probe?: ValidationOptions["probeClaude"],
+): Promise<{ id: string; reasoningLevels: string[]; answered?: boolean }> {
+  const run = probe ?? ((candidate: string) => probeClaudeModel(candidate));
+  try {
+    return await run(model);
+  } catch (error) {
+    throw claudeFailure(error);
+  }
+}
+
+/** Отказы CLI становятся отказами выбора: «не вошёл» — тот же отказ по доступу, что 401. */
+function claudeFailure(error: unknown): ModelValidationError {
+  if (!(error instanceof ClaudeCliError)) return validationError(error);
+  return new ModelValidationError(
+    error.code === "not_logged_in" ? "auth_rejected" : error.code,
+    error.message,
+    { cause: error },
+  );
 }

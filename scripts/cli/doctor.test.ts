@@ -2,8 +2,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -1144,6 +1146,20 @@ test("doctor keeps every referenced version while an update is unfinished", asyn
   assert.equal(store.list().length, 3);
 });
 
+// Вендор claude вливается половинами: каталог (scripts/) уже знает его, рантайм (agent/)
+// — ещё нет. Расхождение ровно одно, и живёт оно в списке имён: доктор печатает имена
+// каталога, а рантайм — свои. Пока половины не сошлись, ожидание строится из предложения
+// рантайма с вставленным вендором; после слияния лота A вставка не делает ничего и строки
+// сравниваются посимвольно.
+const PENDING_RUNTIME = "claude";
+
+function refusedMessage(value: string): string {
+  const runtime: string[] = [...MODEL_PROVIDER_NAMES];
+  const sentence = invalidModelProviderMessage(value);
+  if (runtime.includes(PENDING_RUNTIME)) return sentence;
+  return sentence.replace("codex, ", `codex, ${PENDING_RUNTIME}, `);
+}
+
 test("doctor rejects an invalid model provider instead of diagnosing Ollama", async (t) => {
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "MODEL_PROVIDER=ollmaa\n");
@@ -1164,10 +1180,7 @@ test("doctor rejects an invalid model provider instead of diagnosing Ollama", as
     exit: () => undefined,
   })();
 
-  assert.equal(
-    failures[0],
-    'Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, openrouter, custom — run: iva config',
-  );
+  assert.equal(failures[0], refusedMessage("ollmaa"));
   assert.equal(
     failures.some((message) => message.includes("OLLAMA_")),
     false,
@@ -1219,7 +1232,7 @@ test("doctor accepts exactly the provider names the runtime accepts", async (t) 
   ]) {
     assert.equal(
       (await diagnose(value))[0],
-      invalidModelProviderMessage(value),
+      refusedMessage(value),
       JSON.stringify(value),
     );
   }
@@ -2008,5 +2021,108 @@ test("rollup-status старый и с провалом — строки пре�
         /memory-daily schedule's last run exited 1/u.test(message),
     ),
     `нет warn-строки кода провала: ${JSON.stringify(events)}`,
+  );
+});
+
+// ─── вендор claude: ключа нет, вход живёт в чужом CLI ────────────────────────────────
+// Ключа в .env у него нет вовсе, поэтому «заполнено» — ещё не «работает»: доктор обязан
+// назвать команду установки, команду входа и план из `claude auth status`. Фейковый CLI
+// стоит на месте настоящего: контракт у них один — `auth status` отвечает JSON.
+
+/** Фейковый `claude`: на `auth status` печатает заданный JSON, на остальное молчит. */
+function fakeClaude(t: TestContext, body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "iva-fake-claude-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "claude");
+  writeFileSync(
+    file,
+    `#!/usr/bin/env node\nif (process.argv[2] === "auth") process.stdout.write(${JSON.stringify(body)});\n`,
+  );
+  chmodSync(file, 0o755);
+  return file;
+}
+
+async function diagnoseClaude(
+  t: TestContext,
+  env: Record<string, string>,
+): Promise<{ bad: string[]; ok: string[] }> {
+  const root = await sandbox(t);
+  writeFileSync(join(root, ".env"), "MODEL_PROVIDER=claude\n");
+  const bad: string[] = [];
+  const ok: string[] = [];
+  const runtime: CliRuntime = {
+    ...createCliRuntime(root),
+    C: NO_COLOR,
+    ok: (message) => ok.push(message),
+    warn: () => undefined,
+    bad: (message) => bad.push(message),
+    readEnv: () => ({
+      ...completeEnv(),
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: "claude-fable-5-1",
+      ...env,
+    }),
+    hasSystemd: () => false,
+  };
+  await createDoctorCommand(runtime, lifecycle(), {
+    nodeVersion: "24.0.0",
+    log: () => undefined,
+    exit: () => undefined,
+  })();
+  return { bad, ok };
+}
+
+test("doctor sends a claude installation to the CLI install and to its login", async (t) => {
+  const missing = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: "/nonexistent/claude",
+  });
+  assert.equal(
+    missing.bad.filter((message) => message.includes("Claude Code CLI")).length,
+    1,
+    JSON.stringify(missing),
+  );
+  assert.match(
+    missing.bad.join("\n"),
+    /npm install -g @anthropic-ai\/claude-code/u,
+  );
+
+  const loggedOut = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: fakeClaude(t, '{"loggedIn":false}'),
+  });
+  assert.match(loggedOut.bad.join("\n"), /claude auth login/u);
+  assert.equal(
+    loggedOut.bad.some((message) => message.includes("npm install")),
+    false,
+    "установленный CLI объявлен неустановленным",
+  );
+});
+
+test("doctor reports the plan of a signed-in claude CLI", async (t) => {
+  const ready = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: fakeClaude(t, '{"loggedIn":true,"subscriptionType":"max"}'),
+  });
+  assert.deepEqual(
+    ready.ok.filter((message) => message.includes("Claude Code CLI")),
+    ["Claude Code CLI: signed in (plan: max)"],
+  );
+  assert.equal(
+    ready.bad.some((message) => message.includes("Claude")),
+    false,
+  );
+});
+
+// Чужая авторизация в .env увела бы подписку на чужой счёт, поэтому доктор называет её
+// так же, как рантайм: имя переменной, без значения.
+test("doctor names a foreign auth variable instead of reporting claude as healthy", async (t) => {
+  const poisoned = await diagnoseClaude(t, {
+    ANTHROPIC_API_KEY: "sk-ant-not-printed",
+    CLAUDE_COMMAND: fakeClaude(t, '{"loggedIn":true,"subscriptionType":"max"}'),
+  });
+  const joined = poisoned.bad.join("\n");
+  assert.match(joined, /ANTHROPIC_API_KEY/u);
+  assert.equal(
+    joined.includes("sk-ant-not-printed"),
+    false,
+    "значение утекло в отчёт",
   );
 });

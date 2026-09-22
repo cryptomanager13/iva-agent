@@ -83,6 +83,15 @@ function wizard(
     opencodeModels: () => Promise.resolve(["deepseek-v4-pro"]),
     openrouterKeyCheck: () => Promise.resolve(null),
     openrouterModelCheck: () => Promise.resolve(null),
+    claudeCli: () =>
+      Promise.resolve({
+        installed: true,
+        loggedIn: true,
+        plan: "max",
+        conflict: null,
+        ready: true,
+        hint: "",
+      }),
     deepgramCheck: () => Promise.resolve(null),
     telegramGetMe: () => Promise.resolve({ username: "ivabot" }),
     fetchTelegramUserIds: () => Promise.resolve([{ id: "5", name: "Ann" }]),
@@ -192,7 +201,7 @@ test("failure: an invalid provider is named and the wizard walks the steps", asy
   });
   await assert.rejects(
     h.run(),
-    /no answer for:\s+Provider \(1\/2\/3\/4\/5\) \[1\]: /u,
+    /no answer for:\s+Provider \(1\/2\/3\/4\/5\/6\) \[1\]: /u,
   );
   assert.ok(
     h.screen.some((line) => /MODEL_PROVIDER is invalid \(ollmaa\)/u.test(line)),
@@ -252,24 +261,22 @@ test("abortReason: the error message, or the thrown value itself", () => {
 });
 
 test(`provider menu: the default number picks the current provider back; any choice is a provider (seed ${SEED})`, () => {
-  for (const provider of [
+  const providers = [
     "ollama",
     "opencode",
     "codex",
+    "claude",
     "openrouter",
     "custom",
-  ])
+  ];
+  for (const provider of providers)
     assert.equal(providerFor(Number(providerDefault(provider))), provider);
   assert.equal(providerDefault("ollmaa"), "1");
   fc.assert(
     fc.property(fc.option(fc.integer(), { nil: null }), (choice) => {
       const provider = providerFor(choice);
-      assert.ok(
-        ["ollama", "opencode", "codex", "openrouter", "custom"].includes(
-          provider,
-        ),
-      );
-      if (choice === null || choice < 2 || choice > 5)
+      assert.ok(providers.includes(provider));
+      if (choice === null || choice < 2 || choice > providers.length)
         assert.equal(provider, "ollama");
     }),
     { seed: SEED, numRuns: 300 },

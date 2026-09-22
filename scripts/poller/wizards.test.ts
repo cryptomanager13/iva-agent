@@ -1,5 +1,8 @@
 /* eslint-disable @typescript-eslint/no-floating-promises, @typescript-eslint/require-await -- Node owns test registration; the async request double preserves the wizard boundary. */
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { ContextWindowConfigurationError } from "../../agent/lib/context-window.ts";
 import { MODEL_PROVIDER_NAMES } from "#lib/model-provider.ts";
@@ -19,6 +22,7 @@ import {
   selectableWizardOptions,
   validateAndSaveWizard,
   wizardActionAllowed,
+  wizardPickProvider,
 } from "./wizards.ts";
 
 test("reset copy rejects an invalid context window with the typed error", () => {
@@ -384,4 +388,128 @@ test("/think still works on a provider the runtime accepts", async (t) => {
   const texts = sent.map((call) => call.text).join("\n");
   assert.doesNotMatch(texts, /invalid \(/u);
   assert.match(texts, /Loading thinking levels|deepseek-v4-pro/u);
+});
+
+// ─── claude: вендор без ключа, вход живёт в чужом CLI ────────────────────────────────
+// Мастер не может ни поставить npm-пакет, ни войти в подписку за владельца, поэтому
+// вместо экрана ключа он называет две команды для сервера и даёт перечитать статус.
+// CLI подменён скриптом с тем же контрактом: `auth status` читает ответ из файла.
+
+function fakeClaudeForWizard(t: TestContext): {
+  command: string;
+  authFile: string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "iva-wizard-claude-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const command = join(dir, "claude");
+  const authFile = join(dir, "auth.json");
+  writeFileSync(authFile, JSON.stringify({ loggedIn: false }));
+  writeFileSync(
+    command,
+    [
+      "#!/usr/bin/env node",
+      'import { readFileSync } from "node:fs";',
+      "const args = process.argv.slice(2);",
+      'if (args[0] === "auth") { process.stdout.write(readFileSync(process.env.FAKE_CLAUDE_AUTH_FILE, "utf8"), () => process.exit(0)); }',
+      'let input = "";',
+      'process.stdin.on("data", (chunk) => { input += chunk; });',
+      'process.stdin.on("end", () => {',
+      '  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", response: { models: [{ resolvedModel: "claude-fable-5-1" }, { resolvedModel: "claude-haiku-4-5-20251001" }] } } }) + "\\n");',
+      "});",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(command, 0o755);
+  return { command, authFile };
+}
+
+function useWizardClaude(t: TestContext): {
+  command: string;
+  authFile: string;
+} {
+  const fake = fakeClaudeForWizard(t);
+  const previous = {
+    CLAUDE_COMMAND: process.env.CLAUDE_COMMAND,
+    FAKE_CLAUDE_AUTH_FILE: process.env.FAKE_CLAUDE_AUTH_FILE,
+  };
+  process.env.CLAUDE_COMMAND = fake.command;
+  process.env.FAKE_CLAUDE_AUTH_FILE = fake.authFile;
+  t.after(() => {
+    process.env.CLAUDE_COMMAND = previous.CLAUDE_COMMAND;
+    process.env.FAKE_CLAUDE_AUTH_FILE = previous.FAKE_CLAUDE_AUTH_FILE;
+  });
+  return fake;
+}
+
+test("the provider screen offers claude, and /model walks it to the CLI commands", async (t) => {
+  const sent = telegramSpy(t);
+  const fake = useWizardClaude(t);
+  const st = flows.start(4102050, "9104220", "model") as unknown as {
+    step: string;
+    msgId: number | null;
+    plan?: string | null;
+  };
+  st.step = "provider";
+
+  await wizardPickProvider(st as never, "claude");
+  const screen = sent.map((call) => call.text).join("\n");
+  // Ни ключа, ни каталога: сначала две команды для сервера и кнопка перечитать статус.
+  assert.match(screen, /npm install -g @anthropic-ai\/claude-code/u);
+  assert.match(screen, /claude auth login/u);
+  // Кнопка «Проверить снова» живёт ровно на этом шаге: иначе тап по ней молча ничего
+  // не сделал бы (wizardActionAllowed).
+  assert.match(screen, /Проверить снова|Check again/u);
+  assert.equal(wizardActionAllowed({ step: "cli_status" }, "retry"), true);
+  assert.equal(wizardActionAllowed({ step: "model_error" }, "retry"), true);
+  assert.equal(wizardActionAllowed({ step: "models" }, "retry"), false);
+  assert.equal(
+    /Выбери модель/u.test(screen),
+    false,
+    "модели показаны без входа",
+  );
+  assert.equal(
+    st.plan ?? null,
+    null,
+    "план подписки при отказе не выдумывается",
+  );
+
+  // Владелец вошёл в CLI и нажал «Проверить снова» — тот же шаг читает статус заново.
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+  const before = sent.length;
+  await wizardPickProvider(st as never, "claude");
+  const after = sent
+    .slice(before)
+    .map((call) => call.text)
+    .join("\n");
+  assert.match(after, /План: max|Plan: max/u, "план подписки не назван");
+  assert.match(after, /Выбери модель|Choose a live model/u);
+});
+
+// Живой список моделей — пикер самого CLI, а не вшитый список каталога: у подписки
+// набор зависит от плана. Здесь показан план из `claude auth status`.
+test("the claude model screen asks the CLI picker", async (t) => {
+  const sent = telegramSpy(t);
+  const fake = useWizardClaude(t);
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+  const st = flows.start(4102051, "9104221", "model") as unknown as {
+    step: string;
+    modelOptions: { id: string }[];
+    plan?: string | null;
+  };
+  st.step = "provider";
+
+  await wizardPickProvider(st as never, "claude");
+  const screen = sent.map((call) => call.text).join("\n");
+  // Модели — кнопки: в тексте экрана стоят план подписки и приглашение выбрать.
+  assert.match(screen, /План: max|Plan: max/u);
+  assert.deepEqual(
+    st.modelOptions.map((option) => option.id),
+    ["claude-fable-5-1", "claude-haiku-4-5-20251001"],
+  );
 });

@@ -269,6 +269,21 @@ await test(`записанное процесс отдаёт дословно, �
   );
 });
 
+// Ключи вендора claude пишет и мастер установки, и `iva config`: имя модели, окно
+// контекста и путь к CLI — обычные строки, а не секреты, и процесс должен прочитать их
+// ровно теми, какими их записали.
+await test("ключи claude доезжают до процесса как есть", () => {
+  const values = {
+    CLAUDE_MODEL: "claude-fable-5-1",
+    CLAUDE_CONTEXT_WINDOW: "1000000",
+    CLAUDE_COMMAND: "/opt/claude/bin/claude",
+  };
+  const text = Object.entries(values)
+    .map(([key, value]) => formatEnvLine(key, value))
+    .join("\n");
+  assert.deepEqual(valuesInProcess(`${text}\n`, Object.keys(values)), values);
+});
+
 await test("iva userbot creds: значение вне подмножества отвергается, файл не тронут", () => {
   const root = mkdtempSync(join(tmpdir(), "env-agreement-creds-"));
   const envPath = join(root, ".env");

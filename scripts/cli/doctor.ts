@@ -23,6 +23,7 @@ import {
   catalogProvider,
   providerEnvKeys,
 } from "../lib/model-catalog.ts";
+import { claudeStatus } from "../lib/claude-cli-status.ts";
 import { classifyRoot } from "../lib/version-layout.ts";
 import {
   acquireUpdateLock,
@@ -294,7 +295,7 @@ export function createDoctorCommand(
     if (bearerChanged) ctx.fix();
 
     checkNode(ctx);
-    if (checkEnvFile(ctx)) checkEnvOptions(ctx);
+    if (await checkEnvFile(ctx)) checkEnvOptions(ctx);
     checkBuild(ctx);
     ctx.install = checkVersionState(ctx);
     await checkScheduleFacts(ctx);
@@ -465,7 +466,7 @@ function checkNode(ctx: DoctorContext): void {
  * True возвращается, когда .env есть: только тогда имеет смысл необязательный хвост
  * раздела (checkEnvOptions), как и было в монолите.
  */
-function checkEnvFile(ctx: DoctorContext): boolean {
+async function checkEnvFile(ctx: DoctorContext): Promise<boolean> {
   if (!existsSync(ctx.envPath)) {
     ctx.fail(".env missing — run: iva config");
     return false;
@@ -502,7 +503,23 @@ function checkEnvFile(ctx: DoctorContext): boolean {
       `.env incomplete, missing: ${missing.join(", ")} — run: iva config`,
     );
   }
+  // Вендора без ключа в .env доктор проверяет там же, где живёт его вход: в чужом CLI
+  // на этой же машине. Молчать об этом значило бы объявить .env здоровым перед
+  // отказом агента на старте.
+  if (provider.auth === "cli") await checkClaudeCli(ctx);
   return true;
+}
+
+/** Статус Claude Code CLI: имя плана при входе и подсказка вместо него при отказе. */
+async function checkClaudeCli(ctx: DoctorContext): Promise<void> {
+  // PATH берём у процесса, значения — из .env: юнит несёт EnvironmentFile, а бинарь
+  // ищется по PATH сервиса, не по строке в файле.
+  const status = await claudeStatus({ ...process.env, ...ctx.env });
+  if (status.ready) {
+    ctx.ok(`Claude Code CLI: signed in (plan: ${status.plan || "unnamed"})`);
+    return;
+  }
+  ctx.fail(status.hint);
 }
 
 /** Хвост раздела .env: двусмысленные строки, миграция порта, необязательные поиск и память. */

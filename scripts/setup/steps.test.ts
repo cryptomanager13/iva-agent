@@ -15,6 +15,16 @@ import {
   type SetupState,
 } from "./steps.ts";
 
+/** Вход в чужой CLI есть: подписка, план и отсутствие чужой авторизации. */
+const readyClaude = {
+  installed: true,
+  loggedIn: true,
+  plan: "max",
+  conflict: null,
+  ready: true,
+  hint: "",
+};
+
 function makeContext(overrides: Partial<SetupContext> = {}): SetupContext {
   return {
     t: (en: string) => en,
@@ -50,6 +60,7 @@ function makeContext(overrides: Partial<SetupContext> = {}): SetupContext {
     opencodeModels: async () => ["deepseek-v4-pro"],
     openrouterKeyCheck: async () => null,
     openrouterModelCheck: async () => null,
+    claudeCli: async () => readyClaude,
     deepgramCheck: async () => null,
     telegramGetMe: async () => ({ username: "ivabot" }),
     fetchTelegramUserIds: async () => [],
@@ -294,4 +305,92 @@ test("шаг записи .env: failure — отказ проверки моде
     /model is not available/u,
   );
   assert.equal(writes, 0, ".env не должен писаться при отказе проверки");
+});
+
+// ─── claude: ключа нет, вход в чужом CLI ─────────────────────────────────────────────
+// Шаг проверяет то, что мастер может проверить (статус CLI), называет команды для
+// сервера и повторяет проверку. Окно контекста пишется сразу за моделью: у haiku оно
+// впятеро меньше, и завышенное окно сдвинуло бы порог компактации.
+test("the claude step writes the model and the window that belongs to it", async () => {
+  const out = await askProviderSettings(
+    { existing: {}, out: {}, provider: "claude" },
+    makeContext({
+      fetchModels: async () => ["claude-haiku-4-5-20251001"],
+      pickFromList: async (items: string[]) => items[0] ?? "",
+    }),
+  );
+  assert.equal(out.CLAUDE_MODEL, "claude-haiku-4-5-20251001");
+  assert.equal(out.CLAUDE_CONTEXT_WINDOW, "200000");
+});
+
+test("a CLI that is not ready is named, and the check can be repeated", async () => {
+  const printed: string[] = [];
+  let asked = 0;
+  let checks = 0;
+  const ctx = makeContext({
+    print: (...args: unknown[]) => printed.push(args.map(String).join(" ")),
+    askYesNo: async () => {
+      asked += 1;
+      return true;
+    },
+    claudeCli: async () => {
+      checks += 1;
+      return checks === 1
+        ? {
+            installed: false,
+            loggedIn: false,
+            plan: "",
+            conflict: null,
+            ready: false,
+            hint: `Claude Code CLI not found — install it on the server: npm install -g @anthropic-ai/claude-code`,
+          }
+        : readyClaude;
+    },
+    fetchModels: async () => ["claude-fable-5-1"],
+  });
+
+  const out = await askProviderSettings(
+    { existing: {}, out: {}, provider: "claude" },
+    ctx,
+  );
+  assert.equal(asked, 1);
+  assert.equal(checks, 2);
+  const screen = printed.join("\n");
+  assert.match(screen, /npm install -g @anthropic-ai\/claude-code/u);
+  assert.match(screen, /max/u, "план подписки не назван после входа");
+  assert.equal(out.CLAUDE_MODEL, "claude-fable-5-1");
+});
+
+test("the setup summary and the final check know the claude vendor", async () => {
+  const written: Record<string, string>[] = [];
+  const validated: unknown[] = [];
+  const out = await writeSetupEnv(
+    {
+      existing: {},
+      out: { MODEL_PROVIDER: "claude", CLAUDE_MODEL: "claude-fable-5-1" },
+      provider: "claude",
+    },
+    makeContext({
+      writeEnv: async (env: Env) => {
+        written.push({ ...env });
+      },
+      validateModelSelection: async (selection: unknown) => {
+        validated.push(selection);
+        return { id: "claude-fable-5-1", reasoningLevels: [] };
+      },
+    }),
+    false,
+  );
+  assert.deepEqual(validated, [
+    {
+      provider: "claude",
+      model: "claude-fable-5-1",
+      key: undefined,
+      dataDir: "/data",
+      // Адреса у этого вендора нет вовсе: он ходит через CLI, а не в сеть.
+      base: undefined,
+    },
+  ]);
+  assert.equal(written.length, 1);
+  assert.equal(out.CLAUDE_MODEL, "claude-fable-5-1");
 });

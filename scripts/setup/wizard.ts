@@ -58,7 +58,16 @@ type Progress = {
 /** Шаг мастера: false — мастер закончен, следующие шаги не идут. */
 type Step = (p: Progress) => Promise<boolean>;
 
-const PROVIDER_MENU = ["ollama", "opencode", "codex", "openrouter", "custom"];
+// Порядок тот же, что у имён рантайма (agent/lib/model-provider.ts): claude идёт сразу за
+// codex, потому что оба — подписка без ключа, и номера пунктов читаются вместе с ним.
+const PROVIDER_MENU = [
+  "ollama",
+  "opencode",
+  "codex",
+  "claude",
+  "openrouter",
+  "custom",
+];
 const LANGUAGES = new Set(["en", "ru"]);
 
 const STEPS: readonly Step[] = [
@@ -312,7 +321,7 @@ async function chooseProvider(p: Progress): Promise<boolean> {
   );
   printProviderMenu(ctx);
   const choice = await ctx.ask(
-    `  ${ctx.t("Provider", "Провайдер")} (1/2/3/4/5)`,
+    `  ${ctx.t("Provider", "Провайдер")} (1/2/3/4/5/6)`,
     providerDefault(p.config.prov0),
   );
   p.provider = providerFor(menuChoice(choice));
@@ -344,10 +353,13 @@ function printProviderMenu(ctx: SetupContext): void {
     `    3) OpenAI ${ctx.t("(ChatGPT subscription)", "(подписка ChatGPT)")} — ${C.c}chatgpt.com${C.x} ${ctx.t("(sign in, no API key)", "(вход по подписке, без API-ключа)")}`,
   );
   ctx.print(
-    `    4) OpenRouter — ${C.c}https://openrouter.ai${C.x} ${ctx.t("(one key → 300+ models, pay-as-you-go)", "(один ключ → 300+ моделей, оплата по факту)")}`,
+    `    4) Claude ${ctx.t("(Pro/Max subscription)", "(подписка Pro/Max)")} — ${C.c}claude.ai${C.x} ${ctx.t("(the claude CLI signed in on this server, no API key)", "(CLI claude, залогиненный на этом сервере, без API-ключа)")}`,
   );
   ctx.print(
-    `    5) ${ctx.t("Custom — your own OpenAI-compatible endpoint", "Custom — свой OpenAI-совместимый эндпоинт")} ${ctx.t("(proxy, vLLM, LiteLLM, a vendor plan)", "(прокси, vLLM, LiteLLM, вендорская подписка)")}`,
+    `    5) OpenRouter — ${C.c}https://openrouter.ai${C.x} ${ctx.t("(one key → 300+ models, pay-as-you-go)", "(один ключ → 300+ моделей, оплата по факту)")}`,
+  );
+  ctx.print(
+    `    6) ${ctx.t("Custom — your own OpenAI-compatible endpoint", "Custom — свой OpenAI-совместимый эндпоинт")} ${ctx.t("(proxy, vLLM, LiteLLM, a vendor plan)", "(прокси, vLLM, LiteLLM, вендорская подписка)")}`,
   );
 }
 
