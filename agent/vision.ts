@@ -6,6 +6,7 @@ import {
   makeCodexModel,
   makeTextModel,
 } from "./provider.ts";
+import { makeClaudeCliModel } from "./lib/claude-cli.ts";
 
 const PROMPT =
   "Опиши изображение детально и по делу: что на нём, дословный текст (OCR), важные детали и цифры. " +
@@ -18,44 +19,36 @@ export async function describeImage(
   bytes: ArrayBuffer,
   mimeType?: string,
 ): Promise<string> {
-  // codex-подписка: Responses API мультимодален — гоним картинку через ту же модель/токен.
-  // ВАЖНО: бэкенд подписки принимает ТОЛЬКО stream:true → streamText, не generateText (иначе 400).
-  if (providerName === "codex") {
-    const result = streamText({
-      model: makeCodexModel(providerConfig.visionModel),
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: PROMPT },
-            // file-part (не устаревший image-part): AI SDK кодирует его в input_image для Responses.
-            {
-              type: "file",
-              data: new Uint8Array(bytes),
-              mediaType: mimeType || "image/jpeg",
-            },
-          ],
-        },
-      ],
-    });
-    let out = "";
-    for await (const chunk of result.textStream) out += chunk;
-    return out.trim();
-  }
+  // Подписки (codex, claude) мультимодальны — гоним картинку через ту же модель, что ведёт
+  // ход: у codex это Responses API подписки, у claude — тот же Claude Code CLI.
+  if (providerName === "codex" || providerName === "claude")
+    return await describeWithSubscription(bytes, mimeType);
 
   const { baseURL, apiKey, visionModel } = providerConfig;
   if (!apiKey || !visionModel) return "";
-  const b64 = Buffer.from(bytes).toString("base64");
-  const res = await fetch(`${baseURL}/chat/completions`, {
+  return await describeWithCompatible(bytes, mimeType, {
+    baseURL,
+    apiKey,
+    visionModel,
+  });
+}
+
+/** OpenAI-совместимый chat/completions: картинка уходит data-URL в поле image_url. */
+async function describeWithCompatible(
+  bytes: ArrayBuffer,
+  mimeType: string | undefined,
+  target: { baseURL: string; apiKey: string; visionModel: string },
+): Promise<string> {
+  const res = await fetch(`${target.baseURL}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${target.apiKey}`,
       "Content-Type": "application/json",
       // Go без ID диалога и User-Agent отвечает 4xx; у остальных провайдеров тут пусто.
       ...(providerRequestHeaders() ?? {}),
     },
     body: JSON.stringify({
-      model: visionModel,
+      model: target.visionModel,
       max_tokens: 700,
       messages: [
         {
@@ -65,7 +58,7 @@ export async function describeImage(
             {
               type: "image_url",
               image_url: {
-                url: `data:${mimeType || "image/jpeg"};base64,${b64}`,
+                url: `data:${mimeType || "image/jpeg"};base64,${Buffer.from(bytes).toString("base64")}`,
               },
             },
           ],
@@ -81,6 +74,40 @@ export async function describeImage(
     choices?: Array<{ message?: { content?: string } }>;
   };
   return (json.choices?.[0]?.message?.content ?? "").trim();
+}
+
+/**
+ * Картинка моделью подписки: у codex это Responses API, у claude — тот же CLI, что ведёт ход.
+ * ВАЖНО: бэкенд подписок принимает ТОЛЬКО stream:true → streamText, не generateText (иначе 400).
+ */
+async function describeWithSubscription(
+  bytes: ArrayBuffer,
+  mimeType?: string,
+): Promise<string> {
+  const model =
+    providerName === "codex"
+      ? makeCodexModel(providerConfig.visionModel)
+      : makeClaudeCliModel(providerConfig.visionModel);
+  const result = streamText({
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: PROMPT },
+          // file-part (не устаревший image-part): AI SDK кодирует его для провайдера сам.
+          {
+            type: "file",
+            data: new Uint8Array(bytes),
+            mediaType: mimeType || "image/jpeg",
+          },
+        ],
+      },
+    ],
+  });
+  let out = "";
+  for await (const chunk of result.textStream) out += chunk;
+  return out.trim();
 }
 
 // --- Видит ли картинки САМА модель чата -----------------------------------------------------
@@ -209,8 +236,9 @@ const probe = makeVisionProbe(
   () => providerConfig.textModel,
 );
 
-/** Принимает ли текстовая модель картинки. codex — да без сети: подписка мультимодальна. */
+/** Принимает ли текстовая модель картинки. codex и claude — да без сети: подписки мультимодальны. */
 export function chatModelSeesImages(): Promise<boolean> {
-  if (providerName === "codex") return Promise.resolve(true);
+  if (providerName === "codex" || providerName === "claude")
+    return Promise.resolve(true);
   return probe();
 }

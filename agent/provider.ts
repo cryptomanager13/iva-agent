@@ -16,6 +16,7 @@ import {
   MAX_IMAGE_BYTES,
 } from "./lib/attachment-ref.ts";
 import { resolveAttachmentPath } from "./lib/telegram-media-cache.ts";
+import { claudeContextWindow, makeClaudeCliModel } from "./lib/claude-cli.ts";
 import {
   CODEX_BASE_URL,
   codexAuthHeaders,
@@ -45,7 +46,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // MODEL_PROVIDER валит загрузку модуля здесь же, до первого запроса к провайдеру.
 // ollama/opencode/openrouter — OpenAI-совместимы (chat/completions, статичный ключ из .env).
 // codex — личная подписка OpenAI (ChatGPT): Responses API + OAuth-токен (data/codex-auth.json,
-// `iva login`). custom — тот же OpenAI-совместимый провод, но адрес задаёт владелец
+// `iva login`). claude — подписка Claude Pro/Max через установленный Claude Code CLI: ни
+// адреса, ни ключа, ход уходит процессу `claude` (agent/lib/claude-cli.ts).
+// custom — тот же OpenAI-совместимый провод, но адрес задаёт владелец
 // (CUSTOM_BASE_URL): чужой прокси, vLLM, LiteLLM, вендорская подписка. Имена моделей и их
 // дефолты живут в agent/lib/model-provider.ts (там же и переменные *_VISION_MODEL); здесь
 // остаётся то, что из .env не задаётся ни у кого: адрес, ключ и окно контекста.
@@ -77,6 +80,15 @@ const PROVIDERS = {
     baseURL: CODEX_BASE_URL,
     apiKey: undefined, // авторизация — OAuth-токен подписки, не статичный ключ (см. codexFetch)
     contextWindow: 272000,
+  },
+  claude: {
+    // Адрес никто не открывает: модель — процесс `claude`, и строка называет вендора в
+    // журнале и в провайдер-опциях. Ключа нет намеренно: авторизацию держит CLI (подписка
+    // владельца), и ключ в .env увёл бы ход мимо подписки — agent/lib/claude-cli.ts такой
+    // .env отвергает, а не молча берёт его.
+    baseURL: "process://claude",
+    apiKey: undefined,
+    contextWindow: claudeContextWindow(selected.model),
   },
   custom: {
     // Адрес целиком задаёт владелец, вместе с суффиксом вида /v1 — как у ollama
@@ -724,8 +736,12 @@ export function makeTextModel(options: {
 
 function makeBareTextModel(sessionId?: string) {
   // Codex-подписка говорит на Responses API — отдельная модель-фабрика (@ai-sdk/openai).
+  // Claude-подписка — тоже своя модель: рукописная LanguageModelV4 поверх Claude Code CLI
+  // (stream-json), потому что API-адреса у неё нет вовсе.
   // Остальные провайдеры — OpenAI-совместимый chat/completions через openai-compatible.
   if (providerName === "codex") return makeCodexModel();
+  if (providerName === "claude")
+    return makeClaudeCliModel(providerConfig.textModel);
   return createOpenAICompatible({
     name: `iva-${providerName}`,
     baseURL: providerConfig.baseURL,

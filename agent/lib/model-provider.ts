@@ -27,6 +27,7 @@ export const MODEL_PROVIDER_NAMES = [
   "ollama",
   "opencode",
   "codex",
+  "claude",
   "openrouter",
   "custom",
 ] as const;
@@ -85,6 +86,19 @@ export const MODEL_PROVIDERS = {
     // gpt-5* мультимодальны — картинки идут через ту же подписку (agent/vision.ts гонит их
     // по Responses API), поэтому отдельной переменной нет вовсе: vision-модель подписки —
     // это и есть выбранная текстовая.
+    visionModelVar: null,
+    defaultVisionModel: null,
+  },
+  claude: {
+    // Ключа нет: модель — установленный и залогиненный Claude Code CLI на той же машине
+    // (agent/lib/claude-cli.ts). Имя модели — то, которое вернул живой список аккаунта
+    // (scripts/lib/model-catalog.ts просит его рукопожатием CLI), поэтому здесь кандидаты, а
+    // не единственно верное имя: fable, opus, sonnet — 1M контекста, haiku — 200k.
+    modelVar: "CLAUDE_MODEL",
+    defaultModel: "claude-fable-5-1",
+    compatibleReasoning: false,
+    // Подписка мультимодальна — как у codex, отдельной vision-модели нет: картинку смотрит
+    // та же модель, что ведёт ход (agent/vision.ts гонит её через тот же CLI).
     visionModelVar: null,
     defaultVisionModel: null,
   },

@@ -111,6 +111,29 @@ test("model provider selection preserves each supported provider identity", () =
       compatibleReasoning: false,
     },
   );
+  assert.deepEqual(
+    resolveModelProvider({
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: "claude-opus-5",
+    }),
+    {
+      name: "claude",
+      model: "claude-opus-5",
+      // Подписка Claude Pro/Max мультимодальна, как codex: отдельной vision-модели нет.
+      visionModel: "claude-opus-5",
+      // reasoning уезжает не полем запроса, а output_config.effort внутри CLI.
+      compatibleReasoning: false,
+    },
+  );
+  // Чужая vision-переменная в claude не заезжает: своей у подписки нет вовсе.
+  assert.equal(
+    resolveModelProvider({
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: "claude-haiku-4-5-20251001",
+      OLLAMA_VISION_MODEL: "nope",
+    }).visionModel,
+    "claude-haiku-4-5-20251001",
+  );
 });
 
 test("every supported provider keeps its own default model", () => {
@@ -118,7 +141,13 @@ test("every supported provider keeps its own default model", () => {
     NAMES_WITH_DEFAULT.map(
       (name) => resolveModelProvider({ MODEL_PROVIDER: name }).model,
     ),
-    ["deepseek-v4-pro", "deepseek-v4-pro", "gpt-5.5", "openai/gpt-5.1"],
+    [
+      "deepseek-v4-pro",
+      "deepseek-v4-pro",
+      "gpt-5.5",
+      "claude-fable-5-1",
+      "openai/gpt-5.1",
+    ],
   );
 });
 
@@ -194,8 +223,14 @@ test("every supported provider keeps its own default vision model", () => {
     NAMES_WITH_DEFAULT.map(
       (name) => resolveModelProvider({ MODEL_PROVIDER: name }).visionModel,
     ),
-    // codex — без своей переменной: у него это дефолтная текстовая модель подписки.
-    ["gemma4:31b", "qwen3.7-plus", "gpt-5.5", "google/gemini-2.5-flash"],
+    // codex и claude — без своей переменной: у подписок это их же текстовая модель.
+    [
+      "gemma4:31b",
+      "qwen3.7-plus",
+      "gpt-5.5",
+      "claude-fable-5-1",
+      "google/gemini-2.5-flash",
+    ],
   );
 });
 
@@ -314,7 +349,7 @@ test("only OpenCode loses the wizard prefix from a configured model", () => {
 test("model provider selection rejects values that would split runtime identity", () => {
   assert.deepEqual(
     [...MODEL_PROVIDER_NAMES],
-    ["ollama", "opencode", "codex", "openrouter", "custom"],
+    ["ollama", "opencode", "codex", "claude", "openrouter", "custom"],
   );
   const garbage = [
     "ollmaa", // опечатка из issue #161
@@ -351,7 +386,7 @@ test("the refusal names the bad value, every accepted name and the fix", () => {
   const message = invalidModelProviderMessage("ollmaa");
   assert.equal(
     message,
-    'Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, openrouter, custom — run: iva config',
+    'Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, claude, openrouter, custom — run: iva config',
   );
   for (const name of MODEL_PROVIDER_NAMES)
     assert.match(message, new RegExp(name));
@@ -460,7 +495,7 @@ test("runtime startup rejects an invalid provider before choosing a config", () 
     assert.notEqual(result.status, 0, module);
     assert.match(
       result.stderr,
-      /Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, openrouter, custom — run: iva config/,
+      /Invalid MODEL_PROVIDER "ollmaa"; expected one of: ollama, opencode, codex, claude, openrouter, custom — run: iva config/,
       module,
     );
   }
@@ -472,6 +507,7 @@ test("runtime startup rejects an invalid context window", () => {
     ["opencode", "OPENCODE_CONTEXT_WINDOW"],
     ["openrouter", "OPENROUTER_CONTEXT_WINDOW"],
     ["codex", "CODEX_CONTEXT_WINDOW"],
+    ["claude", "CLAUDE_CONTEXT_WINDOW"],
   ] as const;
   for (const [provider, variable] of cases) {
     for (const value of ["NaN", "0", "-7", "1.5"]) {
@@ -552,6 +588,59 @@ test("runtime startup rejects custom without a base URL and starts with one", ()
   });
   assert.notEqual(badWindow.status, 0);
   assert.match(badWindow.stderr, /CUSTOM_CONTEXT_WINDOW/u);
+});
+
+// Claude-подписка: адреса нет вовсе (ход уходит процессу `claude`), а окно зависит от модели —
+// у haiku 200k, у fable/opus/sonnet 1M. Считает его agent/provider.ts из имени модели, и
+// CLAUDE_CONTEXT_WINDOW переопределяет результат как у всех вендоров.
+function windowOf(stdout: string): unknown {
+  return (JSON.parse(stdout.trim()) as { window: unknown }).window;
+}
+
+test("runtime gives claude the subscription transport and the model's context window", () => {
+  const load = (env: Record<string, string>) =>
+    runInRepo(
+      `
+        await import("./scripts/lib/ts-esm-hooks.ts");
+        const provider = await import("./agent/provider.ts");
+        console.log(JSON.stringify({
+          name: provider.providerName,
+          base: provider.providerConfig.baseURL,
+          key: provider.providerConfig.apiKey ?? null,
+          model: provider.providerConfig.textModel,
+          vision: provider.providerConfig.visionModel,
+          window: provider.providerConfig.contextWindow,
+        }));
+      `,
+      env,
+    );
+
+  const fable = load({ MODEL_PROVIDER: "claude" });
+  assert.equal(fable.status, 0, fable.stderr);
+  assert.deepEqual(JSON.parse(fable.stdout.trim()), {
+    name: "claude",
+    base: "process://claude",
+    key: null,
+    model: "claude-fable-5-1",
+    // Подписка мультимодальна: картинку смотрит та же модель.
+    vision: "claude-fable-5-1",
+    window: 1_000_000,
+  });
+
+  const haiku = load({
+    MODEL_PROVIDER: "claude",
+    CLAUDE_MODEL: "claude-haiku-4-5-20251001",
+  });
+  assert.equal(haiku.status, 0, haiku.stderr);
+  assert.equal(windowOf(haiku.stdout), 200_000);
+
+  const overridden = load({
+    MODEL_PROVIDER: "claude",
+    CLAUDE_MODEL: "claude-haiku-4-5-20251001",
+    CLAUDE_CONTEXT_WINDOW: "150000",
+  });
+  assert.equal(overridden.status, 0, overridden.stderr);
+  assert.equal(windowOf(overridden.stdout), 150_000);
 });
 
 test("runtime validates only the selected provider context window", () => {
@@ -635,7 +724,7 @@ test("property: every value outside the list is refused, with the list in the re
       // Перечень в отказе — канонический порядок целиком, а не «одно из».
       assert.ok(
         invalidModelProviderMessage(value).includes(
-          "ollama, opencode, codex, openrouter, custom",
+          "ollama, opencode, codex, claude, openrouter, custom",
         ),
       );
     }),

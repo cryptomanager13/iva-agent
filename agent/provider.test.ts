@@ -15,6 +15,7 @@ import type {
   LanguageModelV4StreamResult,
 } from "@ai-sdk/provider";
 import { classifyModelCallError } from "../node_modules/eve/dist/src/harness/model-call-error.js";
+import { ClaudeCliError } from "./lib/claude-cli.ts";
 import { writeAuth, type CodexAuth, TOKEN_URL } from "./lib/codex-auth.ts";
 
 process.env.MODEL_PROVIDER = "ollama";
@@ -118,6 +119,24 @@ function requestUrl(input: RequestInfo | URL): string {
     ? input.url
     : String(input);
 }
+
+// Отказы шага claude рождаются в agent/lib/claude-cli.ts (нет бинаря, обрыв CLI, ошибка API
+// подписки). Смысл проверки тот же, что у codex: ход чинится повтором и не отравляет сессию.
+await test("ошибка шага claude не отравляет сессию", () => {
+  const errors = [
+    new ClaudeCliError(
+      "claude CLI (claude) did not start: spawn claude ENOENT; install it with `npm install -g @anthropic-ai/claude-code`",
+    ),
+    new ClaudeCliError("API Error: 500 internal server error"),
+    new ClaudeCliError("Claude CLI produced nothing for 180s"),
+    new ClaudeCliError(
+      "Claude returned a tool outside the current inventory: Bash",
+    ),
+  ];
+  for (const error of errors) {
+    assert.equal(classifyModelCallError(error), "recoverable", error.message);
+  }
+});
 
 function assertCodexAuthExpired(error: unknown): true {
   assert.ok(error instanceof Error);
