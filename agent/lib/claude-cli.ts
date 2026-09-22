@@ -78,8 +78,8 @@ const INSTALL_HINT =
 const OFF_VALUES = new Set(["", "0", "false", "no", "off"]);
 /**
  * Переменные, при которых ход ушёл бы мимо подписки владельца. Ключи уводят CLI на платный
- * ключ; `ANTHROPIC_BASE_URL` — на чужой адрес, и молча подменять его на адрес реле значило бы
- * тихо отменять настройку владельца (его прокси перестал бы работать без единого слова).
+ * ключ; `ANTHROPIC_BASE_URL` — на чужой адрес, и молча подменять его адресом реле значило бы
+ * тихо отменять настройку владельца: его прокси перестал бы работать, не сказав ни слова.
  */
 const AUTH_CONFLICTS = [
   "ANTHROPIC_API_KEY",
@@ -87,11 +87,7 @@ const AUTH_CONFLICTS = [
   "ANTHROPIC_FOUNDRY_API_KEY",
   "ANTHROPIC_BASE_URL",
 ];
-/**
- * Любой чужой бэкенд объявляется одной и той же приставкой (`CLAUDE_CODE_USE_BEDROCK`,
- * `_VERTEX`, `_FOUNDRY` и тот, который Anthropic назовёт завтра). Перечень имён устарел бы
- * молча и увёл бы ход мимо подписки, поэтому смотрим приставку, а не список.
- */
+/** Префикс переменных, которыми CLI уходит на другой бэкенд: bedrock, vertex, foundry и новые. */
 const BACKEND_PREFIX = "CLAUDE_CODE_USE_";
 /**
  * Что CLI обязан видеть с этими значениями. Телеметрия и необязательный трафик выключены:
@@ -718,15 +714,15 @@ export function claudeEnv(
   for (const [key, value] of Object.entries(source))
     if (value !== undefined) env[key] = value;
   // Унаследованное тело запроса — чужие инструменты и чужой потолок вывода поверх наших:
-  // своё мы кладём в приватный settings.json и другого источника не признаём.
+  // своё Iva кладёт в приватный settings.json и другого источника не признаёт.
   delete env.CLAUDE_CODE_EXTRA_BODY;
   const child: Record<string, string> = {
     ...env,
     ...CLAUDE_ENV,
     ANTHROPIC_BASE_URL: relayUrl,
   };
-  // Потолок вывода CLI знает и сам, до запроса: без этой переменной он подставляет свой и
-  // просит у модели больше, чем разрешила eve.
+  // Потолок вывода CLI знает и сам, до запроса: без этой переменной он подставит свой и
+  // попросит у модели больше, чем разрешила eve.
   if (maxOutputTokens !== undefined)
     child.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(maxOutputTokens);
   return child;
@@ -737,6 +733,8 @@ export function claudeConflicts(
   source: Readonly<Record<string, string | undefined>>,
 ): string[] {
   const names = AUTH_CONFLICTS.filter((key) => (source[key] ?? "").length > 0);
+  // Бэкенды ищутся по префиксу, а не по списку трёх имён: следующий бэкенд Anthropic проехал бы
+  // по списку молча и увёл ход мимо подписки — то есть ровно туда, куда ход идти не должен.
   const backends = Object.keys(source)
     .filter(
       (key) =>
@@ -839,6 +837,7 @@ class ClaudeSession {
   tempDir: string;
   private child: ChildProcess | undefined;
   private admission: Admission | undefined;
+  private closed = false;
 
   constructor() {
     this.tempDir = mkdtempSync(join(tmpdir(), "iva-claude-"));
@@ -860,7 +859,10 @@ class ClaudeSession {
     killTree(this.child);
   }
 
+  /** Закрытие идемпотентно: runCall убирает за собой до конца шага, а `finally` — следом. */
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     this.abort();
     await this.admission?.close();
     rmSync(this.tempDir, { recursive: true, force: true });
@@ -970,15 +972,15 @@ type ClaudeSettings = {
   /** Тишина CLI до отказа; в тестах — доли секунды, в бою CLAUDE_SILENCE_TIMEOUT_MS. */
   readonly silenceTimeoutMs?: number;
   /**
-   * Куда реле пропускает единственный запрос. В бою — api.anthropic.com; параметр существует
-   * ради тестов, где на его месте стоит loopback-заглушка: без неё боевая ветка «ответ пойман
-   * реле» проверялась бы только живым CLI и настоящей подпиской владельца.
+   * Адрес API, на который реле пересылает шаг. В бою — api.anthropic.com; в тестах — заглушка:
+   * без подмены боевая ветка «ответ поймало реле» не наблюдаема вовсе, а в ней живут и расход,
+   * и блоки ответа, и сверка напечатанного CLI с полученным.
    */
   readonly upstream?: string;
 };
 
-/** Что одинаково у всех шагов этой модели: порог тишины и адрес, куда ходит реле. */
-type CallSettings = {
+/** Что шаг берёт из настроек модели: тишина CLI и адрес, куда реле пересылает запрос. */
+type ClaudeRun = {
   readonly silenceMs: number;
   readonly upstream: string;
 };
@@ -988,7 +990,7 @@ export function makeClaudeCliModel(
   model: string,
   settings: ClaudeSettings = {},
 ): LanguageModelV4 {
-  const call: CallSettings = {
+  const run: ClaudeRun = {
     silenceMs: settings.silenceTimeoutMs ?? CLAUDE_SILENCE_TIMEOUT_MS,
     upstream: settings.upstream ?? CLAUDE_UPSTREAM,
   };
@@ -999,52 +1001,22 @@ export function makeClaudeCliModel(
     // Картинки едут только base64: URL пришлось бы скачивать, а у CLI нет для этого канала.
     supportedUrls: {},
     doStream: (options: LanguageModelV4CallOptions) =>
-      Promise.resolve(streamCall(model, options, call)),
+      Promise.resolve(streamCall(model, options, run)),
     doGenerate: (options: LanguageModelV4CallOptions) =>
-      generateCall(model, options, call),
+      generateCall(model, options, run),
   };
 }
 
 /**
- * Ход, отменённый ДО первого события. Слушатель `abort` на уже отменённом сигнале не
- * сработает никогда, поэтому без этой проверки Iva подняла бы `claude`, оплатила запрос по
- * подписке и ждала бы его молчания до порога тишины — ради ответа, который никто не ждёт.
+ * Шаг модели. Ход, отменённый ДО старта, не поднимает ничего: ни процесса CLI, ни реле, ни
+ * временной папки. Одного слушателя `abort` тут мало — на уже отменённом сигнале он не
+ * срабатывает никогда, и ход оплачивал бы запрос к API, а `claude -p` висел бы до таймаута
+ * тишины (QA: 8116 мс при пороге 8 с, в бою было бы 180 с).
  */
-function abortedStream(
-  options: LanguageModelV4CallOptions,
-): LanguageModelV4StreamResult {
-  const signal = options.abortSignal;
-  const reason: unknown = signal?.reason;
-  const error =
-    reason instanceof Error
-      ? reason
-      : new ClaudeCliError("the turn was cancelled before Claude CLI started");
-  return {
-    stream: new ReadableStream<LanguageModelV4StreamPart>({
-      start(controller) {
-        controller.enqueue({
-          type: "stream-start",
-          warnings: claudeWarnings(options),
-        });
-        controller.error(error);
-      },
-    }),
-  };
-}
-
-/** Отменённый ход дальше не идёт: ни запуска CLI, ни запроса к api.anthropic.com. */
-function assertLive(options: LanguageModelV4CallOptions): void {
-  if (options.abortSignal?.aborted !== true) return;
-  const reason: unknown = options.abortSignal.reason;
-  throw reason instanceof Error
-    ? reason
-    : new ClaudeCliError("the turn was cancelled while Claude CLI was running");
-}
-
 function streamCall(
   model: string,
   options: LanguageModelV4CallOptions,
-  call: CallSettings,
+  run: ClaudeRun,
 ): LanguageModelV4StreamResult {
   if (options.abortSignal?.aborted === true) return abortedStream(options);
   const session = new ClaudeSession();
@@ -1058,7 +1030,7 @@ function streamCall(
         type: "stream-start",
         warnings: claudeWarnings(options),
       });
-      void runCall({ model, options, session, controller, call })
+      void runCall({ model, options, session, controller, run })
         .catch((error: unknown) => {
           try {
             controller.error(asClaudeError(error));
@@ -1078,42 +1050,62 @@ function streamCall(
   return { stream };
 }
 
+/** Отменённый до старта ход: поток кончается отказом, и ни один процесс не запускается. */
+function abortedStream(
+  options: LanguageModelV4CallOptions,
+): LanguageModelV4StreamResult {
+  return {
+    stream: new ReadableStream<LanguageModelV4StreamPart>({
+      start(controller) {
+        controller.enqueue({
+          type: "stream-start",
+          warnings: claudeWarnings(options),
+        });
+        controller.error(abortReason(options.abortSignal));
+      },
+    }),
+  };
+}
+
+/**
+ * Причина отмены, а не своя выдумка на её месте: eve отменяет ход своей ошибкой и по ней же
+ * узнаёт отмену (`isTurnCancellation`). Подмени её на ошибку CLI — и отменённый ход поехал
+ * бы у eve как поправимый отказ модели, то есть повтором того, что владелец только что снял.
+ */
+function abortReason(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
+  return reason instanceof Error
+    ? reason
+    : new ClaudeCliError("Claude CLI step was aborted before it started");
+}
+
+/** Отменённый ход дальше не идёт: ни запроса к api.anthropic.com, ни запуска CLI. */
+function assertLive(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw abortReason(signal);
+}
+
 type RunContext = {
   readonly model: string;
   readonly options: LanguageModelV4CallOptions;
   readonly session: ClaudeSession;
   readonly controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>;
-  readonly call: CallSettings;
+  readonly run: ClaudeRun;
 };
 
-/**
- * Шаг целиком: сначала ход доигрывается и за собой убирается, и только потом закрывается
- * поток наружу. Порядок важен: закрой поток раньше — и потребитель, получивший `finish`,
- * вправе тут же остановить Иву, оставив на диске временную папку с системным промптом.
- */
 async function runCall(context: RunContext): Promise<void> {
+  const { model, options, session, controller, run } = context;
   const text = new TextStream();
-  const { completion, admission } = await produce(context, text);
-  emit(completion, text, admission, context.controller);
-  report(context.model, completion, admission);
-}
-
-async function produce(
-  context: RunContext,
-  text: TextStream,
-): Promise<{ completion: ClaudeCompletion; admission: Admission }> {
-  const { model, options, session, controller, call } = context;
   try {
     const prepared = prepareCall(model, options, session);
-    assertLive(options);
-    const admission = await startAdmission(call.upstream, call.silenceMs);
+    assertLive(options.abortSignal);
+    const admission = await startAdmission(run.upstream, run.silenceMs);
     session.adopt(admission);
     const env = claudeEnv(
       process.env,
       admission.url,
       options.maxOutputTokens ?? undefined,
     );
-    assertLive(options);
+    assertLive(options.abortSignal);
     const child = await spawnClaude(claudeCommand(env), prepared.argv, {
       cwd: session.tempDir,
       env,
@@ -1125,15 +1117,22 @@ async function produce(
     session.attach(child);
     if (child.stdout === null)
       throw new ClaudeCliError("Claude CLI started without a stdout pipe");
-    const events = silentFor(jsonLines(child.stdout), call.silenceMs);
+    const events = silentFor(jsonLines(child.stdout), run.silenceMs);
     await writeFrames(child, prepared.frames, events);
     const seen = await collect(events, text, controller);
     const exit = await waitForExit(child);
-    assertLive(options);
-    return {
-      completion: complete(admission, seen, exit, prepared.names),
-      admission,
-    };
+    // Ход, снятый пока CLI отвечал, наружу не едет: eve его уже не ждёт, а убитый процесс
+    // оставил бы огрызок ответа, который выглядел бы как настоящий.
+    assertLive(options.abortSignal);
+    const completion = complete(admission, seen, exit, prepared.names);
+    // Уборка ДО первой части ответа: ни `finish`, ни `process.exit` по нему не должны обгонять
+    // удаление системного промпта хода — иначе падение или рестарт сразу после шага оставляют
+    // его в /tmp (QA: четыре папки после четырёх пробников). Ответ уже собран: ни реле, ни
+    // временная папка дальше не нужны.
+    await session.close();
+    emit(completion, text, admission, controller);
+    report(model, completion, admission);
+    controller.close();
   } finally {
     await session.close();
   }
@@ -1295,10 +1294,9 @@ async function waitForExit(child: ChildProcess): Promise<number | null> {
 /**
  * Что считать ответом модели. Реле запомнило настоящий ответ целиком — он и есть правда:
  * CLI мог его обрезать, а его собственный второй поход в API отбит реле. Без запомненного
- * ответа верим CLI. В обоих случаях требуем целостности хода: один `result`, хоть одно
- * сообщение ассистента и увиденный конец ответа. Отдельные штатные границы — `error_max_turns`
- * с вызовами инструментов и кодом выхода 1 (конец шага после tool_use) и разобранный ниже
- * «провал, о котором мы и просили»: отбитый второй запрос CLI и отказ самой модели.
+ * ответа верим CLI, но требуем целостности: один `result`, хоть одно сообщение ассистента
+ * и увиденный `message_stop`. Отдельная граница — `error_max_turns` с вызовами инструментов
+ * и кодом выхода 1: это штатный конец хода после tool_use, а не отказ.
  */
 function complete(
   admission: Admission,
@@ -1308,8 +1306,10 @@ function complete(
 ): ClaudeCompletion {
   const captured = capturedMessage(admission, seen);
   const assistants = captured === null ? seen.assistants : [captured];
-  const handled = failureExpected(admission, captured);
-  if (seen.nativeError !== undefined && !handled)
+  const expected = failureExpected(admission, captured);
+  // Ошибку, которую CLI назвал сам (assistant с `error` или текстом `API Error`), не глотаем —
+  // кроме той, о которой мы и просили: см. failureExpected.
+  if (seen.nativeError !== undefined && !expected)
     throw new ClaudeCliError(`${seen.nativeError}${upstreamNote(admission)}`);
   const result = onlyResult(
     seen,
@@ -1322,15 +1322,15 @@ function complete(
     names,
     captured === null ? asRecord(result?.usage) : captured.usage,
   );
-  if (!handled && !isToolBoundary(completion, result, exit))
+  if (!expected && !isToolBoundary(completion, result, exit))
     assertSuite(result, exit);
   return completion;
 }
 
 /**
- * Ответ, пойманный реле. Если реле пропустило запрос, а целого ответа из него не собралось
- * (не 200, обрыв SSE посреди блока) — верить пересказу CLI нельзя: ход оборвался на настоящем
- * запросе, и это надо назвать, а не подменять тем, что CLI успел напечатать.
+ * Ответ, пойманный реле. Реле пропустило запрос, а целого ответа из него не собралось (не 200,
+ * обрыв SSE посреди блока) — значит, ход оборвался на настоящем запросе. Это надо назвать, а не
+ * подменять тем, что CLI успел напечатать: у него в такие минуты своя версия событий.
  */
 function capturedMessage(
   admission: Admission,
@@ -1351,9 +1351,9 @@ function capturedMessage(
 }
 
 /**
- * Провал CLI, о котором мы и просили. Отбитый второй запрос — это работа реле: ответ уже
+ * Провал CLI, о котором Iva и просила. Отбитый второй запрос — это работа реле: ответ уже
  * получен, а ненулевой код выхода и `API Error` в выводе рассказывают о попытке CLI продолжить
- * ход за eve. Отказ модели (`refusal`) — тоже ответ: его текст уезжает владельцу как есть.
+ * ход за eve. Отказ модели (`refusal`) — тоже ответ, и он уезжает владельцу как есть.
  */
 function failureExpected(
   admission: Admission,
@@ -1422,7 +1422,10 @@ function upstreamNote(admission: Admission): string {
     : "";
 }
 
-/** Отдаёт шаг наружу: текст, вызовы инструментов, расход и причина остановки. */
+/**
+ * Отдаёт шаг наружу: текст, вызовы инструментов, расход и причина остановки. Уборка уже
+ * позади, а поток закрывает вызывающий (см. runCall).
+ */
 function emit(
   completion: ClaudeCompletion,
   text: TextStream,
@@ -1451,7 +1454,6 @@ function emit(
       },
     },
   });
-  controller.close();
 }
 
 /** Хвост ответа, не доехавший дельтами: реле могло получить больше, чем CLI успел напечатать. */
@@ -1499,9 +1501,9 @@ function report(
 async function generateCall(
   model: string,
   options: LanguageModelV4CallOptions,
-  call: CallSettings,
+  run: ClaudeRun,
 ): Promise<LanguageModelV4GenerateResult> {
-  const { stream } = streamCall(model, options, call);
+  const { stream } = streamCall(model, options, run);
   const reader = stream.getReader();
   const content: LanguageModelV4Content[] = [];
   const warnings: SharedV4Warning[] = [];
