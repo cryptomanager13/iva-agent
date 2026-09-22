@@ -15,7 +15,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { readdirSync } from "node:fs";
+import { once } from "node:events";
 import test, { type TestContext } from "node:test";
 import type {
   LanguageModelV4FunctionTool,
@@ -77,7 +79,31 @@ function dump(extra) {
   writeFileSync(dumpPath, JSON.stringify({ argv, settings, system: readFileSync(arg("--system-prompt-file"), "utf8"), frames, pid: process.pid, ...extra }));
 }
 
-function scenario() {
+async function scenario() {
+  if (mode === "relay" || mode === "relay-mismatch") {
+    // Подделка ходит в реле так же, как настоящий CLI: POST на ANTHROPIC_BASE_URL с query,
+    // своими заголовками (в том числе секретным) и без ожидания второго ответа.
+    const answer = await fetch(process.env.ANTHROPIC_BASE_URL + "/v1/messages?beta=true", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + (process.env.FAKE_CLAUDE_TOKEN ?? "") },
+      body: JSON.stringify({ model: arg("--model"), stream: true, messages: [{ role: "user", content: "привет" }] }),
+    });
+    const body = await answer.text();
+    const received = body
+      .split("\\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => JSON.parse(line.slice(5)))
+      .filter((event) => event.delta?.type === "text_delta")
+      .map((event) => event.delta.text)
+      .join("");
+    const printed = mode === "relay-mismatch" ? "другой ответ" : (process.env.FAKE_CLAUDE_PRINT ?? received);
+    dump({ answer: answer.status, received, printed });
+    streamText([printed]);
+    send({ type: "assistant", message: message([textBlock(printed)], "end_turn", { input_tokens: 999, output_tokens: 999 }) });
+    send({ type: "stream_event", event: { type: "message_stop" } });
+    send({ type: "result", subtype: "success", is_error: false, num_turns: 1, usage: { input_tokens: 999, output_tokens: 999 } });
+    process.exit(0);
+  }
   if (mode === "text") {
     dump({});
     streamText(["Го", "тово"]);
@@ -212,7 +238,7 @@ process.stdin.on("data", (chunk) => {
       send({ type: "result", subtype: "success", is_error: false, num_turns: 0, usage: {} });
       continue;
     }
-    if (frame.type === "user") scenario();
+    if (frame.type === "user") void scenario();
   }
 });
 `;
@@ -267,6 +293,120 @@ function fakeCli(
     read: () =>
       JSON.parse(readFileSync(dump, "utf8")) as Record<string, unknown>,
   };
+}
+
+// ─── Заглушка api.anthropic.com ─────────────────────────────────────────────────────────
+// Реле пересылает шаг наружу, и на верёвочке из двух подделок (CLI + API) видно то, что в бою
+// не видно глазами: расход и блоки берутся из ПОЙМАННОГО ответа, а не из рассказа CLI о нём.
+
+function sse(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/** Ответ Anthropic: текст двумя дельтами, вызов инструмента и расход в двух местах. */
+function relayAnswer(text: string): string[] {
+  return [
+    sse("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_relay",
+        type: "message",
+        role: "assistant",
+        content: [],
+        stop_reason: null,
+        usage: {
+          input_tokens: 11,
+          cache_creation_input_tokens: 800,
+          cache_read_input_tokens: 0,
+          output_tokens: 1,
+        },
+      },
+    }),
+    sse("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    }),
+    sse("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: text.slice(0, 11) },
+    }),
+    sse("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: text.slice(11) },
+    }),
+    sse("content_block_stop", { type: "content_block_stop", index: 0 }),
+    sse("content_block_start", {
+      type: "content_block_start",
+      index: 1,
+      content_block: {
+        type: "tool_use",
+        id: "toolu_relay",
+        name: `${CLAUDE_TOOL_PREFIX}weather`,
+        input: {},
+      },
+    }),
+    sse("content_block_delta", {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "input_json_delta", partial_json: '{"city":"Ташкент"}' },
+    }),
+    sse("content_block_stop", { type: "content_block_stop", index: 1 }),
+    sse("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use", stop_sequence: null },
+      usage: {
+        output_tokens: 12,
+        output_tokens_details: { thinking_tokens: 5 },
+      },
+    }),
+    sse("message_stop", { type: "message_stop" }),
+  ];
+}
+
+/** Что заглушка API увидела от реле: адрес запроса и заголовки хода. */
+type SeenRequest = {
+  readonly url: string | undefined;
+  readonly authorization: string | undefined;
+  readonly acceptEncoding: string | undefined;
+  readonly transferEncoding: string | undefined;
+  readonly contentLength: string | undefined;
+  /** Длина тела, которое заглушка прочитала: с ней сверяется объявленная длина. */
+  readonly body: number;
+};
+
+/** Поднимает заглушку API: адрес получает реле как upstream, запросы — тест. */
+async function stubApi(
+  t: TestContext,
+  events: readonly string[],
+): Promise<{ url: string; seen: SeenRequest[] }> {
+  const seen: SeenRequest[] = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      seen.push({
+        url: request.url,
+        authorization: request.headers.authorization,
+        acceptEncoding: request.headers["accept-encoding"],
+        transferEncoding: request.headers["transfer-encoding"],
+        contentLength: request.headers["content-length"],
+        body: Buffer.concat(chunks).length,
+      });
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      for (const event of events) response.write(event);
+      response.end();
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  const port =
+    typeof address === "object" && address !== null ? address.port : 0;
+  return { url: `http://127.0.0.1:${String(port)}`, seen };
 }
 
 /** Временные папки хода: по ним видно, поднимались ли процесс и реле. */
@@ -661,6 +801,85 @@ test("шаг с отменённым сигналом доезжает до от
     }),
   );
   assert.match(error.message, /aborted before it started/u);
+});
+
+test("реле отдаёт наружу пойманный ответ: и текст, и блоки, и расход — из него", async (t) => {
+  const upstream = await stubApi(t, relayAnswer("В Ташкенте +31"));
+  const api = upstream;
+  // Подделка CLI напечатала только голову ответа и выдумала свой расход: и то и другое
+  // должно быть отброшено в пользу ответа, который поймало реле.
+  const fake = fakeCli(t, "relay", {
+    FAKE_CLAUDE_PRINT: "В Ташкенте ",
+    FAKE_CLAUDE_TOKEN: "subscription-secret",
+  });
+  const model = makeClaudeCliModel(MODEL, {
+    silenceTimeoutMs: 10_000,
+    upstream: api.url,
+  });
+  const parts = await drain(
+    await model.doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+  );
+
+  assert.equal(fake.read().answer, 200, "реле пропустило запрос к API");
+  // Что именно доехало до API: адрес вместе со строкой запроса (её прибавляет CLI — по ней в
+  // прошлом раунде и ломался ход), заголовок CLI как есть и расжатый ответ. Тело реле
+  // пересобирает из прочитанного: длина посчитана заново и совпадает с телом.
+  const [seen] = api.seen;
+  assert.equal(seen?.url, "/v1/messages?beta=true");
+  assert.equal(seen?.authorization, "Bearer subscription-secret");
+  assert.equal(seen?.acceptEncoding, "identity");
+  assert.equal(seen?.contentLength, String(seen?.body));
+  assert.equal(
+    textOf(parts),
+    "В Ташкенте +31",
+    "хвост, не доехавший от CLI, дописан из пойманного ответа",
+  );
+  // Вызов инструмента подделка не печатала вовсе: он приехал из блока ответа API.
+  const calls = partsOfType(parts, "tool-call");
+  assert.deepEqual(
+    calls.map((call) => [call.toolName, call.input]),
+    [["weather", '{"city":"Ташкент"}']],
+  );
+  const finish = finishOf(parts);
+  assert.deepEqual(finish.finishReason, {
+    unified: "tool-calls",
+    raw: "tool_use",
+  });
+  // Расход — из ответа API (11 + 800 кэша, 12 выходных и 5 думающих), а не из рассказа CLI
+  // о себе: подделка называла 999/999 в своём `assistant` и своём `result`.
+  assert.deepEqual(finish.usage.inputTokens, {
+    total: 811,
+    noCache: 11,
+    cacheRead: 0,
+    cacheWrite: 800,
+  });
+  assert.equal(finish.usage.outputTokens.total, 12);
+  assert.equal(finish.usage.outputTokens.reasoning, 5);
+  const relay = finish.providerMetadata?.["iva-claude"] as {
+    upstreamRequests?: number;
+    deniedRequests?: number;
+    cacheWriteTokens?: number;
+  };
+  assert.equal(relay.upstreamRequests, 1, "ход — это ровно один запрос к API");
+  assert.equal(relay.deniedRequests, 0);
+  assert.equal(relay.cacheWriteTokens, 800);
+});
+
+test("текст CLI, не совпавший с пойманным ответом, валит ход с понятной причиной", async (t) => {
+  const upstream = await stubApi(t, relayAnswer("В Ташкенте +31"));
+  fakeCli(t, "relay-mismatch", { FAKE_CLAUDE_PRINT: "" });
+  const model = makeClaudeCliModel(MODEL, {
+    silenceTimeoutMs: 10_000,
+    upstream: upstream.url,
+  });
+  const error = await failureOf(async () =>
+    drain(await model.doStream({ prompt: userPrompt(), tools: [WEATHER] })),
+  );
+  assert.equal(error.name, "ClaudeCliError");
+  assert.match(
+    error.message,
+    /printed text that differs from the response it received/u,
+  );
 });
 
 test("нет бинаря — отказ с командой установки, а не молчание", async (t) => {

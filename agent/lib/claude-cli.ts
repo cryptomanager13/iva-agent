@@ -940,6 +940,18 @@ async function* silentFor(
 type ClaudeSettings = {
   /** Тишина CLI до отказа; в тестах — доли секунды, в бою CLAUDE_SILENCE_TIMEOUT_MS. */
   readonly silenceTimeoutMs?: number;
+  /**
+   * Адрес API, на который реле пересылает шаг. В бою — api.anthropic.com; в тестах — заглушка:
+   * без подмены боевая ветка «ответ поймало реле» не наблюдаема вовсе, а в ней живут и расход,
+   * и блоки ответа, и сверка напечатанного CLI с полученным.
+   */
+  readonly upstream?: string;
+};
+
+/** Что шаг берёт из настроек модели: тишина CLI и адрес, куда реле пересылает запрос. */
+type ClaudeRun = {
+  readonly silenceMs: number;
+  readonly upstream: string;
 };
 
 /** Рукописная LanguageModelV4: шаг модели — это один запуск Claude Code CLI. */
@@ -947,7 +959,10 @@ export function makeClaudeCliModel(
   model: string,
   settings: ClaudeSettings = {},
 ): LanguageModelV4 {
-  const silenceMs = settings.silenceTimeoutMs ?? CLAUDE_SILENCE_TIMEOUT_MS;
+  const run: ClaudeRun = {
+    silenceMs: settings.silenceTimeoutMs ?? CLAUDE_SILENCE_TIMEOUT_MS,
+    upstream: settings.upstream ?? CLAUDE_UPSTREAM,
+  };
   return {
     specificationVersion: "v4",
     provider: CLAUDE_PROVIDER_ID,
@@ -955,9 +970,9 @@ export function makeClaudeCliModel(
     // Картинки едут только base64: URL пришлось бы скачивать, а у CLI нет для этого канала.
     supportedUrls: {},
     doStream: (options: LanguageModelV4CallOptions) =>
-      Promise.resolve(streamCall(model, options, silenceMs)),
+      Promise.resolve(streamCall(model, options, run)),
     doGenerate: (options: LanguageModelV4CallOptions) =>
-      generateCall(model, options, silenceMs),
+      generateCall(model, options, run),
   };
 }
 
@@ -970,7 +985,7 @@ export function makeClaudeCliModel(
 function streamCall(
   model: string,
   options: LanguageModelV4CallOptions,
-  silenceMs: number,
+  run: ClaudeRun,
 ): LanguageModelV4StreamResult {
   if (options.abortSignal?.aborted === true) return abortedStream();
   const session = new ClaudeSession();
@@ -984,7 +999,7 @@ function streamCall(
         type: "stream-start",
         warnings: claudeWarnings(options),
       });
-      void runCall({ model, options, session, controller, silenceMs })
+      void runCall({ model, options, session, controller, run })
         .catch((error: unknown) => {
           try {
             controller.error(asClaudeError(error));
@@ -1022,15 +1037,15 @@ type RunContext = {
   readonly options: LanguageModelV4CallOptions;
   readonly session: ClaudeSession;
   readonly controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>;
-  readonly silenceMs: number;
+  readonly run: ClaudeRun;
 };
 
 async function runCall(context: RunContext): Promise<void> {
-  const { model, options, session, controller, silenceMs } = context;
+  const { model, options, session, controller, run } = context;
   const text = new TextStream();
   try {
     const prepared = prepareCall(model, options, session);
-    const admission = await startAdmission(CLAUDE_UPSTREAM, silenceMs);
+    const admission = await startAdmission(run.upstream, run.silenceMs);
     session.adopt(admission);
     const env = claudeEnv(process.env, admission.url);
     const child = await spawnClaude(claudeCommand(env), prepared.argv, {
@@ -1043,7 +1058,7 @@ async function runCall(context: RunContext): Promise<void> {
     session.attach(child);
     if (child.stdout === null)
       throw new ClaudeCliError("Claude CLI started without a stdout pipe");
-    const events = silentFor(jsonLines(child.stdout), silenceMs);
+    const events = silentFor(jsonLines(child.stdout), run.silenceMs);
     await writeFrames(child, prepared.frames, events);
     const seen = await collect(events, text, controller);
     const exit = await waitForExit(child);
@@ -1364,9 +1379,9 @@ function report(
 async function generateCall(
   model: string,
   options: LanguageModelV4CallOptions,
-  silenceMs: number,
+  run: ClaudeRun,
 ): Promise<LanguageModelV4GenerateResult> {
-  const { stream } = streamCall(model, options, silenceMs);
+  const { stream } = streamCall(model, options, run);
   const reader = stream.getReader();
   const content: LanguageModelV4Content[] = [];
   const warnings: SharedV4Warning[] = [];
