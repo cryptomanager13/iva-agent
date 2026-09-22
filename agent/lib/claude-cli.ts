@@ -961,11 +961,18 @@ export function makeClaudeCliModel(
   };
 }
 
+/**
+ * Шаг модели. Ход, отменённый ДО старта, не поднимает ничего: ни процесса CLI, ни реле, ни
+ * временной папки. Одного слушателя `abort` тут мало — на уже отменённом сигнале он не
+ * срабатывает никогда, и ход оплачивал бы запрос к API, а `claude -p` висел бы до таймаута
+ * тишины (QA: 8116 мс при пороге 8 с, в бою было бы 180 с).
+ */
 function streamCall(
   model: string,
   options: LanguageModelV4CallOptions,
   silenceMs: number,
 ): LanguageModelV4StreamResult {
+  if (options.abortSignal?.aborted === true) return abortedStream();
   const session = new ClaudeSession();
   const onAbort = () => {
     session.abort();
@@ -995,6 +1002,19 @@ function streamCall(
     },
   });
   return { stream };
+}
+
+/** Отменённый до старта ход: поток кончается отказом, и ни один процесс не запускается. */
+function abortedStream(): LanguageModelV4StreamResult {
+  return {
+    stream: new ReadableStream<LanguageModelV4StreamPart>({
+      start(controller) {
+        controller.error(
+          new ClaudeCliError("Claude CLI step was aborted before it started"),
+        );
+      },
+    }),
+  };
 }
 
 type RunContext = {

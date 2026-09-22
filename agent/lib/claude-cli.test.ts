@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readdirSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import type {
   LanguageModelV4FunctionTool,
@@ -266,6 +267,13 @@ function fakeCli(
     read: () =>
       JSON.parse(readFileSync(dump, "utf8")) as Record<string, unknown>,
   };
+}
+
+/** Временные папки хода: по ним видно, поднимались ли процесс и реле. */
+function tempDirs(): string[] {
+  return readdirSync(tmpdir())
+    .filter((name) => name.startsWith("iva-claude-"))
+    .sort();
 }
 
 function userPrompt(text = "привет"): LanguageModelV4Prompt {
@@ -615,6 +623,44 @@ test("AbortSignal убивает claude и всех его детей", async (t
   assert.equal(error.name, "ClaudeCliError");
   await waitForExit(pid);
   assert.throws(() => process.kill(pid, 0), /ESRCH|EPERM/u);
+});
+
+test("отменённый до старта ход не поднимает ни CLI, ни реле, ни временной папки", async (t) => {
+  const fake = fakeCli(t, "text");
+  const model = makeClaudeCliModel(MODEL, { silenceTimeoutMs: 8_000 });
+  const controller = new AbortController();
+  controller.abort();
+  const before = tempDirs();
+  const started = Date.now();
+  const error = await failureOf(async () =>
+    drain(
+      await model.doStream({
+        prompt: userPrompt(),
+        abortSignal: controller.signal,
+      }),
+    ),
+  );
+  assert.equal(error.name, "ClaudeCliError");
+  assert.match(error.message, /aborted before it started/u);
+  assert.equal(classifyModelCallError(error), "recoverable");
+  assert.ok(
+    Date.now() - started < 1_000,
+    "отказ мгновенный, а не по таймауту тишины",
+  );
+  assert.equal(existsSync(fake.dump), false, "процесс CLI не поднимался");
+  assert.deepEqual(tempDirs(), before, "временной папки не появилось");
+});
+
+test("шаг с отменённым сигналом доезжает до отмены и на doGenerate", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const error = await failureOf(async () =>
+    makeClaudeCliModel(MODEL).doGenerate({
+      prompt: userPrompt(),
+      abortSignal: controller.signal,
+    }),
+  );
+  assert.match(error.message, /aborted before it started/u);
 });
 
 test("нет бинаря — отказ с командой установки, а не молчание", async (t) => {
