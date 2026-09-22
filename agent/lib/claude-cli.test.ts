@@ -1218,6 +1218,31 @@ test("имя инструмента — только ASCII до 50 символ�
   );
 });
 
+// Предупреждение — не украшение: вызывающий, попросивший строгий JSON или обязательный
+// вызов инструмента, обязан узнать, что подписка этого не обещает.
+test("непереданные гарантии названы предупреждением, а не потеряны", () => {
+  const warnings = claudeWarnings({
+    prompt: [],
+    temperature: 0.7,
+    toolChoice: { type: "required" },
+    responseFormat: { type: "json" },
+  });
+  assert.deepEqual(
+    warnings.map((warning) =>
+      warning.type === "unsupported" ? warning.feature : warning.type,
+    ),
+    ["temperature", "toolChoice", "responseFormat"],
+  );
+  assert.deepEqual(
+    claudeWarnings({
+      prompt: [],
+      toolChoice: { type: "auto" },
+      responseFormat: { type: "text" },
+    }),
+    [],
+  );
+});
+
 test("усилие уходит только из принятого списка", () => {
   assert.equal(claudeEffort("low"), "low");
   assert.equal(claudeEffort(" MAX "), "max");

@@ -371,6 +371,24 @@ export function claudeWarnings(
         feature: field,
         details: SAMPLING_DETAILS,
       });
+  // Принуждение к инструменту и строгий JSON на выходе Claude Code не передаёт: ход идёт
+  // через его собственный запрос, и чужие поля тела в него не попадают. Молча потерять
+  // их нельзя — вызывающий ждал бы гарантии, которой нет.
+  if (options.toolChoice !== undefined && options.toolChoice.type !== "auto")
+    warnings.push({
+      type: "unsupported",
+      feature: "toolChoice",
+      details: `Claude by subscription always chooses tools itself, ${options.toolChoice.type} is ignored`,
+    });
+  if (
+    options.responseFormat !== undefined &&
+    options.responseFormat.type !== "text"
+  )
+    warnings.push({
+      type: "unsupported",
+      feature: "responseFormat",
+      details: "Claude by subscription answers in text, not in a given schema",
+    });
   return warnings;
 }
 
