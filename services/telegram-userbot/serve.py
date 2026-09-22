@@ -41,12 +41,14 @@ SESSION_SIDECARS = ("-journal", "-wal", "-shm")
 def _normalize_tool_arguments(body: bytes) -> bytes:
     """Represent JSON null tool arguments as omitted optional arguments.
 
-    telegram-mcp 2.0.1 exposes several optional Python ``str = None`` arguments
+    telegram-mcp 3.2.0 exposes several optional Python ``str = None`` arguments
     as JSON Schema strings with a ``null`` default.  Tool clients therefore send
     ``null`` as the schema advertises, while FastMCP rejects it before the handler
     receives the call.  Python's omitted optional argument has the intended
     ``None`` value, so normalizing at the proxy boundary preserves the tool's
-    semantics and keeps the upstream proxy isolated.
+    semantics and keeps the upstream proxy isolated. Remove this boundary adapter
+    when telegram-mcp publishes nullable optional arguments as
+    ``anyOf: [string, null]`` in its tool schemas.
     """
     try:
         request = json.loads(body)
