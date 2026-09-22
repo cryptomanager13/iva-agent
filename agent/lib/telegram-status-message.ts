@@ -67,10 +67,11 @@ function workingMarkdown({
   const loader = animated
     ? `<tg-emoji emoji-id="${WORK_LOADER.customEmojiId}">${WORK_LOADER.alt}</tg-emoji>`
     : WORK_LOADER.fallback;
-  const line = `${loader} ${tr("Working", "Работаю")}`;
+  const line = loader;
   // Кнопка рядом-блоком, не в строке: inline-кнопки Android-клиент рисует криво (13.09.2026).
+  // Telegram не умеет поставить inline-кнопку в одну строку с текстом, поэтому она остаётся рядом под строкой.
   return withStop
-    ? `${line}\n<tg-button-row><tg-button type="callback_data" style="danger" data="${TELEGRAM_STOP_CALLBACK}">${tr("⏹ Stop", "⏹ Стоп")}</tg-button></tg-button-row>`
+    ? `${line}\n<tg-button-row><tg-button type="callback_data" style="danger" data="${TELEGRAM_STOP_CALLBACK}">⏹</tg-button></tg-button-row>`
     : line;
 }
 
@@ -107,7 +108,7 @@ const stopKeyboard = () => ({
   inline_keyboard: [
     [
       {
-        text: tr("⏹ Stop", "⏹ Стоп"),
+        text: "⏹",
         callback_data: TELEGRAM_STOP_CALLBACK,
         style: "danger",
       },
@@ -126,7 +127,7 @@ async function sendClassicWorkingStatus(
   if (workLoaderSupported) {
     const res = await tg.request("sendMessage", {
       ...base,
-      text: `${WORK_LOADER.alt} ${tr("Working", "Работаю")}`,
+      text: WORK_LOADER.alt,
       entities: [
         {
           type: "custom_emoji",
@@ -141,7 +142,7 @@ async function sendClassicWorkingStatus(
   }
   const res = await tg.request("sendMessage", {
     ...base,
-    text: `${WORK_LOADER.fallback} ${tr("Working", "Работаю")}`,
+    text: WORK_LOADER.fallback,
   });
   return res.ok ? messageIdFromResponse(res) : null;
 }
