@@ -1146,20 +1146,6 @@ test("doctor keeps every referenced version while an update is unfinished", asyn
   assert.equal(store.list().length, 3);
 });
 
-// Вендор claude вливается половинами: каталог (scripts/) уже знает его, рантайм (agent/)
-// — ещё нет. Расхождение ровно одно, и живёт оно в списке имён: доктор печатает имена
-// каталога, а рантайм — свои. Пока половины не сошлись, ожидание строится из предложения
-// рантайма с вставленным вендором; после слияния лота A вставка не делает ничего и строки
-// сравниваются посимвольно.
-const PENDING_RUNTIME = "claude";
-
-function refusedMessage(value: string): string {
-  const runtime: string[] = [...MODEL_PROVIDER_NAMES];
-  const sentence = invalidModelProviderMessage(value);
-  if (runtime.includes(PENDING_RUNTIME)) return sentence;
-  return sentence.replace("codex, ", `codex, ${PENDING_RUNTIME}, `);
-}
-
 test("doctor rejects an invalid model provider instead of diagnosing Ollama", async (t) => {
   const root = await sandbox(t);
   writeFileSync(join(root, ".env"), "MODEL_PROVIDER=ollmaa\n");
@@ -1180,7 +1166,7 @@ test("doctor rejects an invalid model provider instead of diagnosing Ollama", as
     exit: () => undefined,
   })();
 
-  assert.equal(failures[0], refusedMessage("ollmaa"));
+  assert.equal(failures[0], invalidModelProviderMessage("ollmaa"));
   assert.equal(
     failures.some((message) => message.includes("OLLAMA_")),
     false,
@@ -1232,7 +1218,7 @@ test("doctor accepts exactly the provider names the runtime accepts", async (t) 
   ]) {
     assert.equal(
       (await diagnose(value))[0],
-      refusedMessage(value),
+      invalidModelProviderMessage(value),
       JSON.stringify(value),
     );
   }

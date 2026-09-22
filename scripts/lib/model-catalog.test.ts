@@ -26,20 +26,8 @@ import { modelSummary } from "./model-summary.ts";
 // authored-резолвер. Разъедься перечни — мастер предложил бы провайдера, на котором
 // рантайм откажется стартовать, или доктор объявил бы .env здоровым перед отказом.
 // Порядок тоже общий: он же задаёт порядок имён в сообщении об отказе.
-const PENDING_RUNTIME = "claude";
-
-/** Имена так, как их ждёт рантайм: вендор, чья половина рантайма ещё не влита, стоит
- *  там, где его назвал MODEL_PROVIDER_NAMES (после codex). После слияния лота A функция
- *  возвращает ровно MODEL_PROVIDER_NAMES, и проверка становится посимвольной. */
-function runtimeNames(): string[] {
-  const names: string[] = [...MODEL_PROVIDER_NAMES];
-  if (names.includes(PENDING_RUNTIME)) return names;
-  const after = names.indexOf("codex") + 1;
-  return [...names.slice(0, after), PENDING_RUNTIME, ...names.slice(after)];
-}
-
 test("both trees accept exactly the same provider names, in the same order", () => {
-  assert.deepEqual(Object.keys(CATALOG), runtimeNames());
+  assert.deepEqual(Object.keys(CATALOG), [...MODEL_PROVIDER_NAMES]);
 });
 
 // Имён мало — разъехаться могут и значения. Каталог показывает дефолтную модель в мастере
@@ -73,7 +61,8 @@ test("both trees name the same model variable and the same default model", () =>
 
 // Vision-модель — вторая модель того же провайдера, и разъехаться ей нельзя ровно по той же
 // причине: мастер предложил бы одну модель для фото, а описывала бы картинку другая.
-// codex своей переменной не имеет — обе половины обязаны молчать об этом одинаково.
+// Подписки (codex, claude) своей переменной не имеют — обе половины обязаны молчать об этом
+// одинаково: картинку смотрит та же модель, что ведёт ход.
 test("both trees name the same vision variable and the same vision default", () => {
   for (const name of MODEL_PROVIDER_NAMES) {
     const catalog = CATALOG[name];
@@ -95,10 +84,10 @@ test("both trees name the same vision variable and the same vision default", () 
       .visionModel,
     "chat",
   );
-  // null стоит ровно у codex — иначе «нет переменной» тихо расползлось бы по таблице.
+  // null стоит ровно у двух подписок — иначе «нет переменной» тихо расползлось бы по таблице.
   assert.deepEqual(
     MODEL_PROVIDER_NAMES.filter((name) => CATALOG[name].visionVar === null),
-    ["codex"],
+    ["codex", "claude"],
   );
 });
 
