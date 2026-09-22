@@ -18,6 +18,7 @@ import {
   fixtureProbe,
   fixtureRunner,
 } from "../fixtures/version-update-harness.ts";
+import { MODEL_PROVIDER_NAMES } from "#lib/model-provider.ts";
 import { createVersionStore, layoutFor, releaseOf } from "./version-store.ts";
 import {
   runVersionUpdate,
@@ -1900,7 +1901,11 @@ test("the new version refuses to build on an invalid MODEL_PROVIDER", async (t) 
       new RegExp(`Invalid MODEL_PROVIDER "${value}"`),
       value,
     );
-    assert.match(outcome.message ?? "", /ollama, opencode, codex, openrouter/u);
+    // Список имён берётся у рантайма: вписанный сюда рукой устаревает на первом вендоре.
+    assert.ok(
+      (outcome.message ?? "").includes(MODEL_PROVIDER_NAMES.join(", ")),
+      value,
+    );
     assert.match(outcome.message ?? "", /iva config/u);
     // Ни замка, ни установки версии: до сборки дело не дошло.
     assert.equal(existsSync(join(home, "versions")), false, value);

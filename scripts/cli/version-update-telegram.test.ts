@@ -331,7 +331,11 @@ test("the managed update refuses an invalid MODEL_PROVIDER before it touches any
   const refusal = iva.finals().at(-1) ?? "";
   assert.match(refusal, /Fix MODEL_PROVIDER in \.env first \(iva config\)/u);
   assert.match(refusal, /"ollmaa"/u);
-  assert.match(refusal, /ollama, opencode, codex, openrouter/u);
+  // Список имён берётся у рантайма: вписанный сюда рукой устаревает на первом же вендоре.
+  assert.ok(
+    refusal.includes(MODEL_PROVIDER_NAMES.join(", ")),
+    `${refusal} перечисляет имена рантайма`,
+  );
   // Ни зеркала, ни хендоффа, ни версий: установка ровно та же, что была.
   assert.equal(
     iva.lines().some((line) => line.startsWith("handoff")),

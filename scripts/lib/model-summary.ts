@@ -13,6 +13,7 @@ const PROVIDERS: Record<string, { label: string; context: string }> = {
   opencode: { label: "OpenCode", context: "OPENCODE_CONTEXT_WINDOW" },
   openrouter: { label: "OpenRouter", context: "OPENROUTER_CONTEXT_WINDOW" },
   codex: { label: "OpenAI", context: "CODEX_CONTEXT_WINDOW" },
+  claude: { label: "Claude", context: "CLAUDE_CONTEXT_WINDOW" },
   custom: { label: "Custom", context: "CUSTOM_CONTEXT_WINDOW" },
 };
 
