@@ -97,17 +97,37 @@ async function scenario() {
       .map((event) => event.delta.text)
       .join("");
     const printed = mode === "relay-mismatch" ? "другой ответ" : (process.env.FAKE_CLAUDE_PRINT ?? received);
-    dump({ answer: answer.status, received, printed });
+    // Второй поход — то, что настоящий CLI делает сам, чтобы дописать ход за eve. Реле его
+    // отбивает, CLI объявляет ошибку API и выходит единицей: ровно так ведёт себя Fable.
+    let second = null;
+    if (process.env.FAKE_CLAUDE_SECOND === "1") {
+      const retry = await fetch(process.env.ANTHROPIC_BASE_URL + "/v1/messages?beta=true", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: arg("--model"), stream: true, messages: [] }),
+      });
+      second = { status: retry.status, body: await retry.text() };
+    }
+    dump({ answer: answer.status, second, received, printed });
     streamText([printed]);
     send({ type: "assistant", message: message([textBlock(printed)], "end_turn", { input_tokens: 999, output_tokens: 999 }) });
     send({ type: "stream_event", event: { type: "message_stop" } });
+    if (second !== null) {
+      send({ type: "assistant", error: { type: "api_error" }, message: message([textBlock("API Error: 400 " + second.body)], "end_turn", {}) });
+      send({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 1, usage: {} });
+      process.exit(1);
+    }
     send({ type: "result", subtype: "success", is_error: false, num_turns: 1, usage: { input_tokens: 999, output_tokens: 999 } });
     process.exit(0);
   }
   if (mode === "text") {
     dump({});
+    // Причина остановки и расход самого CLI задаются снаружи: без реле шаг верит его итогу,
+    // и разойтись эти два числа должны именно в тесте.
+    const stop = process.env.FAKE_CLAUDE_STOP ?? "end_turn";
+    const own = process.env.FAKE_CLAUDE_ASSISTANT_USAGE;
     streamText(["Го", "тово"]);
-    send({ type: "assistant", message: message([textBlock("Готово")], "end_turn", usage) });
+    send({ type: "assistant", message: message([textBlock("Готово")], stop, own === undefined ? usage : JSON.parse(own)) });
     send({ type: "stream_event", event: { type: "message_stop" } });
     send({ type: "result", subtype: "success", is_error: false, num_turns: 1, usage });
     process.exit(0);
@@ -200,7 +220,7 @@ async function scenario() {
         buffer = buffer.slice(end + 1);
         answers.push(JSON.parse(line));
         end = buffer.indexOf("\\n");
-        if (answers.length === 3) finish();
+        if (answers.length === 4) finish();
       }
     });
     const finish = () => {
@@ -216,6 +236,7 @@ async function scenario() {
     ask({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     ask({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     ask({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "weather" } });
+    ask({ jsonrpc: "2.0", id: 4, method: "resources/list" });
     return;
   }
   dump({});
@@ -628,7 +649,7 @@ test("муляж MCP отдаёт список инструментов и от�
   const parts = await drain(
     await model.doStream({ prompt: userPrompt(), tools: [WEATHER] }),
   );
-  const [initialized, listed, called] = JSON.parse(textOf(parts)) as {
+  const [initialized, listed, called, unknown] = JSON.parse(textOf(parts)) as {
     tools?: { name: string }[];
     isError?: boolean;
     content?: { text: string }[];
@@ -643,6 +664,9 @@ test("муляж MCP отдаёт список инструментов и от�
   ]);
   assert.equal(called?.isError, true);
   assert.match(String(called?.content?.[0]?.text), /Denied/u);
+  // Отказ — только на исполнение. Незнакомый метод (CLI спрашивает и про ресурсы, и про
+  // промпты) получает пустой ответ: объявлять ошибкой то, чего у нас просто нет, незачем.
+  assert.deepEqual(unknown, {});
 });
 
 // ─── Инструменты и границы хода ─────────────────────────────────────────────────────────
@@ -911,6 +935,55 @@ test("реле отдаёт наружу пойманный ответ: и те�
   assert.equal(relay.cacheWriteTokens, 800);
 });
 
+// Боевая ветка Fable: CLI, получив ответ, идёт за продолжением сам. Реле его отбивает, CLI
+// объявляет ошибку API и выходит единицей — и всё это НЕ провал шага, а его работа по плану.
+test("отбитый второй запрос CLI — не провал хода, а работа реле", async (t) => {
+  const upstream = await stubApi(t, relayAnswer("В Ташкенте +31"));
+  const fake = fakeCli(t, "relay", {
+    FAKE_CLAUDE_SECOND: "1",
+    FAKE_CLAUDE_PRINT: "В Ташкенте +31",
+  });
+  const model = makeClaudeCliModel(MODEL, {
+    silenceTimeoutMs: 10_000,
+    upstream: upstream.url,
+  });
+  const parts = await drain(
+    await model.doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+  );
+
+  const second = fake.read().second as { status: number; body: string };
+  assert.equal(second.status, 400, "второй запрос CLI не ушёл наружу");
+  assert.match(second.body, /IVA_MODEL_ADMISSION_CONSUMED/u);
+  assert.equal(upstream.seen.length, 1, "к API ушёл ровно один запрос");
+  assert.equal(textOf(parts), "В Ташкенте +31");
+  const finish = finishOf(parts);
+  assert.equal(finish.finishReason.unified, "tool-calls");
+  assert.equal(finish.usage.inputTokens.total, 811);
+  const relay = finish.providerMetadata?.["iva-claude"] as {
+    upstreamRequests?: number;
+    deniedRequests?: number;
+  };
+  assert.equal(relay.upstreamRequests, 1);
+  assert.equal(relay.deniedRequests, 1);
+});
+
+// Обратная сторона той же ветки: реле запрос пропустило, а целого ответа не собралось.
+// Верить пересказу CLI тут нельзя — ход оборвался на настоящем запросе, и так и надо сказать.
+test("оборванный ответ API не подменяется рассказом CLI о нём", async (t) => {
+  const upstream = await stubApi(t, relayAnswer("В Ташкенте +31").slice(0, 5));
+  fakeCli(t, "relay", { FAKE_CLAUDE_PRINT: "В Ташкенте" });
+  const model = makeClaudeCliModel(MODEL, {
+    silenceTimeoutMs: 10_000,
+    upstream: upstream.url,
+  });
+  const error = await failureOf(async () =>
+    drain(await model.doStream({ prompt: userPrompt(), tools: [WEATHER] })),
+  );
+  assert.equal(error.name, "ClaudeCliError");
+  assert.match(error.message, /did not finish the response/u);
+  assert.equal(classifyModelCallError(error), "recoverable");
+});
+
 test("текст CLI, не совпавший с пойманным ответом, валит ход с понятной причиной", async (t) => {
   const upstream = await stubApi(t, relayAnswer("В Ташкенте +31"));
   fakeCli(t, "relay-mismatch", { FAKE_CLAUDE_PRINT: "" });
@@ -926,6 +999,35 @@ test("текст CLI, не совпавший с пойманным ответо
     error.message,
     /printed text that differs from the response it received/u,
   );
+});
+
+// Без пойманного ответа расход берётся из итога CLI, а не из его же сообщения ассистента:
+// итог — это то, что CLI насчитал за весь запуск, и другого источника у шага нет.
+test("расход без реле берётся из итога CLI", async (t) => {
+  fakeCli(t, "text", {
+    FAKE_CLAUDE_ASSISTANT_USAGE: JSON.stringify({
+      input_tokens: 1,
+      output_tokens: 1,
+    }),
+  });
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL).doStream({ prompt: userPrompt() }),
+  );
+  assert.equal(finishOf(parts).usage.inputTokens.total, 16);
+  assert.equal(finishOf(parts).usage.outputTokens.total, 4);
+});
+
+// Переполненное окно модель называет своим словом, а eve обязана увидеть ту же стену, что и
+// на потолке вывода: иначе обрезанный ответ уедет владельцу как законченный.
+test("переполненное окно — это оборванный ответ, а не законченный", async (t) => {
+  fakeCli(t, "text", { FAKE_CLAUDE_STOP: "model_context_window_exceeded" });
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL).doStream({ prompt: userPrompt() }),
+  );
+  assert.deepEqual(finishOf(parts).finishReason, {
+    unified: "length",
+    raw: "model_context_window_exceeded",
+  });
 });
 
 test("нет бинаря — отказ с командой установки, а не молчание", async (t) => {
@@ -1029,6 +1131,15 @@ test("ключ API в окружении — отказ с именем пере
   assert.deepEqual(claudeConflicts({ ANTHROPIC_AUTH_TOKEN: "x" }), [
     "ANTHROPIC_AUTH_TOKEN",
   ]);
+  // Чужой адрес API Iva не отменяет молча: ход всё равно ушёл бы через реле на
+  // api.anthropic.com, и настройка владельца исчезла бы без единого слова.
+  assert.deepEqual(
+    claudeConflicts({
+      ANTHROPIC_BASE_URL: "https://proxy.example",
+      ANTHROPIC_FOUNDRY_API_KEY: "k",
+    }),
+    ["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_BASE_URL"],
+  );
   // Выключенный бэкенд — не конфликт: `0`, `false` и пустое значение значат «нет».
   for (const value of ["", "0", "false", "no", "off", "OFF"])
     assert.deepEqual(claudeConflicts({ CLAUDE_CODE_USE_BEDROCK: value }), []);
@@ -1061,6 +1172,21 @@ test("окружение CLI получает адрес реле и выклю�
   // Чужой каталог настроек CLI не трогаем: там его логин.
   assert.equal(env.CLAUDE_CONFIG_DIR, "/home/iva/.claude");
   assert.equal("EMPTY" in env, false);
+  // Унаследованное тело запроса — чужие инструменты поверх наших; своё едет в settings.json.
+  assert.equal(
+    "CLAUDE_CODE_EXTRA_BODY" in
+      claudeEnv(
+        { CLAUDE_CODE_EXTRA_BODY: '{"tools":[]}' },
+        "http://127.0.0.1:1/x",
+      ),
+    false,
+  );
+  // Потолок вывода CLI обязан знать до запроса: иначе попросит у модели свой.
+  assert.equal(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, undefined);
+  assert.equal(
+    claudeEnv({}, "http://127.0.0.1:1/x", 2000).CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+    "2000",
+  );
 });
 
 test("команда CLI берётся из CLAUDE_COMMAND, иначе из PATH", () => {

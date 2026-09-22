@@ -286,6 +286,14 @@ test("чужие пути и методы реле не обслуживает",
   assert.equal((await post(admission, "/v2/messages")).status, 404);
   const get = await fetch(admission.url, { method: "GET" });
   assert.equal(get.status, 404);
+  // Origin ставит браузер, а не CLI: со страницы, угадавшей порт и путь, ход не начинают —
+  // иначе открытая вкладка тратила бы подписку владельца его же токеном.
+  const page = await fetch(`${admission.url}/v1/messages`, {
+    method: "POST",
+    headers: { origin: "https://example.com" },
+    body: "{}",
+  });
+  assert.equal(page.status, 404);
   assert.equal(admission.used, false);
   assert.equal(upstream.bodies.length, 0);
 });
