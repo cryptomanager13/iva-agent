@@ -791,6 +791,26 @@ test("отменённый до старта ход не поднимает ни
   assert.deepEqual(tempDirs(), before, "временной папки не появилось");
 });
 
+test("временная папка уходит раньше, чем ход отдаёт ответ", async (t) => {
+  fakeCli(t, "text");
+  const model = makeClaudeCliModel(MODEL);
+  const before = tempDirs();
+  const reader = (
+    await model.doStream({ prompt: userPrompt() })
+  ).stream.getReader();
+  for (;;) {
+    const next = await reader.read();
+    if (next.done === true) break;
+    if (next.value.type === "finish")
+      assert.deepEqual(
+        tempDirs(),
+        before,
+        "системный промпт хода уже убран с диска",
+      );
+  }
+  assert.deepEqual(tempDirs(), before);
+});
+
 test("шаг с отменённым сигналом доезжает до отмены и на doGenerate", async () => {
   const controller = new AbortController();
   controller.abort();
@@ -989,6 +1009,14 @@ test("ключ API в окружении — отказ с именем пере
   assert.deepEqual(claudeConflicts({ CLAUDE_CODE_USE_BEDROCK: "1" }), [
     "CLAUDE_CODE_USE_BEDROCK",
   ]);
+  // Незнакомый бэкенд — тоже конфликт: имена вендор добавляет, а список имён стареет.
+  assert.deepEqual(
+    claudeConflicts({
+      CLAUDE_CODE_USE_SOMETHING_NEW: "1",
+      CLAUDE_CODE_USE_VERTEX: "",
+    }),
+    ["CLAUDE_CODE_USE_SOMETHING_NEW"],
+  );
 });
 
 test("окружение CLI получает адрес реле и выключенный лишний трафик", () => {

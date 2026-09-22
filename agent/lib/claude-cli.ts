@@ -77,11 +77,8 @@ const INSTALL_HINT =
 /** Значения, при которых переменная означает «не включено». */
 const OFF_VALUES = new Set(["", "0", "false", "no", "off"]);
 const AUTH_CONFLICTS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-const BACKEND_CONFLICTS = [
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-];
+/** Префикс переменных, которыми CLI уходит на другой бэкенд: bedrock, vertex, foundry и новые. */
+const BACKEND_PREFIX = "CLAUDE_CODE_USE_";
 /**
  * Что CLI обязан видеть с этими значениями. Телеметрия и необязательный трафик выключены:
  * они уходят на чужие адреса, а ход — это запрос к api.anthropic.com и ничего больше.
@@ -711,11 +708,16 @@ export function claudeConflicts(
   source: Readonly<Record<string, string | undefined>>,
 ): string[] {
   const names = AUTH_CONFLICTS.filter((key) => (source[key] ?? "").length > 0);
-  return names.concat(
-    BACKEND_CONFLICTS.filter(
-      (key) => !OFF_VALUES.has((source[key] ?? "").toLowerCase()),
-    ),
-  );
+  // Бэкенды ищутся по префиксу, а не по списку трёх имён: следующий бэкенд Anthropic проехал бы
+  // по списку молча и увёл ход мимо подписки — то есть ровно туда, куда ход идти не должен.
+  const backends = Object.keys(source)
+    .filter(
+      (key) =>
+        key.startsWith(BACKEND_PREFIX) &&
+        !OFF_VALUES.has((source[key] ?? "").toLowerCase()),
+    )
+    .sort();
+  return names.concat(backends);
 }
 
 /**
@@ -810,6 +812,7 @@ class ClaudeSession {
   tempDir: string;
   private child: ChildProcess | undefined;
   private admission: Admission | undefined;
+  private closed = false;
 
   constructor() {
     this.tempDir = mkdtempSync(join(tmpdir(), "iva-claude-"));
@@ -831,7 +834,10 @@ class ClaudeSession {
     killTree(this.child);
   }
 
+  /** Закрытие идемпотентно: runCall убирает за собой до конца шага, а `finally` — следом. */
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     this.abort();
     await this.admission?.close();
     rmSync(this.tempDir, { recursive: true, force: true });
@@ -1063,8 +1069,14 @@ async function runCall(context: RunContext): Promise<void> {
     const seen = await collect(events, text, controller);
     const exit = await waitForExit(child);
     const completion = complete(admission, seen, exit, prepared.names);
+    // Уборка ДО первой части ответа: ни `finish`, ни `process.exit` по нему не должны обгонять
+    // удаление системного промпта хода — иначе падение или рестарт сразу после шага оставляют
+    // его в /tmp (QA: четыре папки после четырёх пробников). Ответ уже собран: ни реле, ни
+    // временная папка дальше не нужны.
+    await session.close();
     emit(completion, text, admission, controller);
     report(model, completion, admission);
+    controller.close();
   } finally {
     await session.close();
   }
@@ -1304,7 +1316,10 @@ function upstreamNote(admission: Admission): string {
     : "";
 }
 
-/** Отдаёт шаг наружу: текст, вызовы инструментов, расход и причина остановки. */
+/**
+ * Отдаёт шаг наружу: текст, вызовы инструментов, расход и причина остановки. Уборка уже
+ * позади, а поток закрывает вызывающий (см. runCall).
+ */
 function emit(
   completion: ClaudeCompletion,
   text: TextStream,
@@ -1333,7 +1348,6 @@ function emit(
       },
     },
   });
-  controller.close();
 }
 
 /** Хвост ответа, не доехавший дельтами: реле могло получить больше, чем CLI успел напечатать. */
