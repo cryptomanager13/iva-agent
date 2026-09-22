@@ -32,9 +32,9 @@ const markdownOf = (call: Call): string =>
     (call.body.rich_message as { markdown?: unknown } | undefined)?.markdown,
   );
 
-// Кнопка рядом-блоком под строкой статуса (inline-кнопки Android рисует криво).
+// Кнопка inline в той же строке, что и loader (решение владельца 22.09.2026).
 const STOP_BUTTON =
-  '<tg-button-row><tg-button type="callback_data" style="danger" data="iva_cancel">⏹</tg-button></tg-button-row>';
+  '<tg-button type="callback_data" style="danger" data="iva_cancel">⏹</tg-button>';
 
 function handle(
   reply: (
@@ -66,11 +66,11 @@ await test("статус уходит rich-сообщением с кнопко�
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, "sendRichMessage");
   const markdown = markdownOf(calls[0]);
-  assert.match(
+  assert.equal(
     markdown,
-    /^<tg-emoji emoji-id="5818797194127346654">💬<\/tg-emoji>\n/u,
+    `<tg-emoji emoji-id="5818797194127346654">💬</tg-emoji> ${STOP_BUTTON}`,
   );
-  assert.ok(markdown.endsWith(STOP_BUTTON));
+  assert.equal(markdown.includes("<tg-button-row>"), false);
   assert.equal(calls[0].body.reply_markup, undefined);
 });
 
@@ -84,8 +84,9 @@ await test("отказ Telegram на custom_emoji роняет лоадер на
   assert.equal(await status.sendWorkingStatus(rejectCustom.tg), 501);
   assert.equal(rejectCustom.calls.length, 2);
   // Кнопка живёт в тексте, поэтому падение анимации её не снимает.
-  assert.match(markdownOf(rejectCustom.calls[1]), /^⏳\n/u);
-  assert.ok(markdownOf(rejectCustom.calls[1]).endsWith(STOP_BUTTON));
+  const fallbackMarkdown = markdownOf(rejectCustom.calls[1]);
+  assert.equal(fallbackMarkdown, `⏳ ${STOP_BUTTON}`);
+  assert.equal(fallbackMarkdown.includes("<tg-button-row>"), false);
 
   const next = handle();
   assert.equal(

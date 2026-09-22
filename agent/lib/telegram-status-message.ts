@@ -68,10 +68,13 @@ function workingMarkdown({
     ? `<tg-emoji emoji-id="${WORK_LOADER.customEmojiId}">${WORK_LOADER.alt}</tg-emoji>`
     : WORK_LOADER.fallback;
   const line = loader;
-  // Кнопка рядом-блоком, не в строке: inline-кнопки Android-клиент рисует криво (13.09.2026).
-  // Telegram не умеет поставить inline-кнопку в одну строку с текстом, поэтому она остаётся рядом под строкой.
+  // Кнопка — inline-элемент rich-разметки в той же текстовой строке, что и loader.
+  // Classic-стиль (см. stopKeyboard / sendClassicWorkingStatus ниже) держит
+  // клавиатурный ряд, потому что Bot API reply_markup вообще не живёт внутри текста.
+  // 13.09.2026 уходили в row из-за кривой отрисовки inline-кнопок на Android;
+  // 22.09.2026 владелец вернул кнопку обратно в строку статуса.
   return withStop
-    ? `${line}\n<tg-button-row><tg-button type="callback_data" style="danger" data="${TELEGRAM_STOP_CALLBACK}">⏹</tg-button></tg-button-row>`
+    ? `${line} <tg-button type="callback_data" style="danger" data="${TELEGRAM_STOP_CALLBACK}">⏹</tg-button>`
     : line;
 }
 
