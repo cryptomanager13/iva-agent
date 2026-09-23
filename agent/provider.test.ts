@@ -1400,7 +1400,9 @@ async function codexInput(replay: boolean): Promise<unknown[]> {
     middleware: [reasoningReplayMiddleware(replay), codexProviderOptions],
   });
   // Заглушка отвечает 500: нужен только собранный запрос.
-  await assert.rejects(model.doGenerate({ prompt: replayedHistory }));
+  await assert.rejects(async () =>
+    model.doGenerate({ prompt: replayedHistory }),
+  );
   return body.input as unknown[];
 }
 
