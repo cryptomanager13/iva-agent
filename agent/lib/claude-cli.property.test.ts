@@ -152,6 +152,61 @@ test("история без вопроса в конце отвергается,
   );
 });
 
+// #236: кэш промпта читает историю, только если запрос шага N+1 начинается с запроса шага N
+// байт в байт. Шаг внутри хода дописывает вызов и результат, граница хода — ответ модели,
+// строку времени и новый ввод. Пустой ответ модели кадра не даёт, и тогда время и ввод
+// приклеиваются к последнему user-кадру: для него префикс — это префикс списка блоков.
+test("кадры шага продолжают кадры прошлого шага байт в байт", () => {
+  console.error(`[claude-cli property] seed ${SEED}, прогонов ${RUNS}`);
+  fc.assert(
+    fc.property(
+      turnHistoryArbitrary(),
+      extensionArbitrary(),
+      (history, next) => {
+        const before = claudeHistory(history).frames;
+        const after = claudeHistory([...history, ...next]).frames;
+        for (const frames of [before, after]) {
+          assertFrameShape(frames);
+          const ids = frames
+            .filter((frame) => frame.type === "assistant")
+            .map((frame) => frame.message.id);
+          for (const id of ids)
+            assert.equal(typeof id, "string", "у кадра ассистента есть id");
+          assert.equal(
+            new Set(ids).size,
+            ids.length,
+            "id кадров ассистента разные",
+          );
+        }
+        const last = before.length - 1;
+        for (const [index, frame] of before.entries()) {
+          const same = withoutQuery(after[index]);
+          if (index < last) {
+            assert.deepEqual(
+              same,
+              withoutQuery(frame),
+              `кадр ${index} не изменился`,
+            );
+            continue;
+          }
+          assert.equal(same.type, frame.type);
+          assert.equal(same.message.id, frame.message.id);
+          assert.deepEqual(
+            same.message.content.slice(0, frame.message.content.length),
+            frame.message.content,
+            "последний кадр только дописан",
+          );
+        }
+      },
+    ),
+    SETTINGS,
+  );
+});
+
+function withoutQuery(frame: ClaudeFrame): ClaudeFrame {
+  return { type: frame.type, message: frame.message };
+}
+
 // ─── Генераторы ─────────────────────────────────────────────────────────────────────────
 
 const imageArbitrary = fc.oneof(
@@ -281,6 +336,81 @@ function promptArbitrary(): fc.Arbitrary<LanguageModelV4Prompt> {
     ]);
 }
 
+const turnTextArbitrary = fc.string({ maxLength: 12 });
+const callIdArbitrary = fc.stringMatching(/^toolu_[A-Za-z0-9]{1,6}$/u);
+
+/** Шаг модели внутри хода: текст (или ничего) и вызов, затем результат вызова. */
+function toolStepArbitrary(): fc.Arbitrary<LanguageModelV4Message[]> {
+  return fc
+    .record({
+      text: turnTextArbitrary,
+      id: callIdArbitrary,
+      name: fc.constantFrom("weather", "remind"),
+      value: fc.string({ maxLength: 12 }),
+    })
+    .map(({ text, id, name, value }) => [
+      {
+        role: "assistant" as const,
+        content: [
+          { type: "text" as const, text },
+          {
+            type: "tool-call" as const,
+            toolCallId: id,
+            toolName: name,
+            input: "{}",
+          },
+        ],
+      },
+      {
+        role: "tool" as const,
+        content: [
+          {
+            type: "tool-result" as const,
+            toolCallId: id,
+            toolName: name,
+            output: { type: "text" as const, value },
+          },
+        ],
+      },
+    ]);
+}
+
+/** История хода: system, ввод владельца и шаги с вызовами. */
+function turnHistoryArbitrary(): fc.Arbitrary<LanguageModelV4Prompt> {
+  return fc
+    .record({
+      system: fc.string({ maxLength: 16 }),
+      input: fc.string({ minLength: 1, maxLength: 12 }),
+      steps: fc.array(toolStepArbitrary(), { maxLength: 4 }),
+    })
+    .map(({ system, input, steps }) => [
+      { role: "system" as const, content: system },
+      {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: input }],
+      },
+      ...steps.flat(),
+    ]);
+}
+
+/** Следующий запрос: ещё один шаг хода или граница хода (ответ, время, новый ввод). */
+function extensionArbitrary(): fc.Arbitrary<LanguageModelV4Message[]> {
+  const boundary = fc
+    .record({
+      // Пустой ответ на границе хода порождается явно: это тот случай, где время и ввод
+      // приклеиваются к последнему кадру прошлого шага.
+      answer: fc.oneof(fc.constant(""), turnTextArbitrary),
+      time: fc.string({ minLength: 1, maxLength: 12 }),
+      input: fc.string({ minLength: 1, maxLength: 12 }),
+    })
+    .map(({ answer, time, input }): LanguageModelV4Message[] => [
+      { role: "assistant", content: [{ type: "text", text: answer }] },
+      { role: "user", content: [{ type: "text", text: time }] },
+      { role: "user", content: [{ type: "text", text: input }] },
+    ]);
+  return fc.oneof(toolStepArbitrary(), boundary);
+}
+
 /** Сообщение модели (нативный ответ), каким его собирает реле: блоки, текст, вызовы. */
 function nativeMessageArbitrary(): fc.Arbitrary<{
   message: NativeMessage;
@@ -388,6 +518,11 @@ function assertFrameShape(frames: readonly ClaudeFrame[]): void {
         frame.shouldQuery,
         undefined,
         "у кадров ассистента нет признака",
+      );
+      assert.notEqual(
+        frames[index - 1]?.type,
+        "assistant",
+        "кадры ассистента склеены",
       );
       continue;
     }

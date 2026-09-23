@@ -729,6 +729,45 @@ export const toolSchemaRetryMiddleware: LanguageModelMiddleware = {
   },
 };
 
+// --- Соседние user-сообщения ------------------------------------------------------------------
+// Строка времени (agent/instructions/now.ts) приходит user-сообщением перед вводом владельца, и
+// eve их не склеивает. Часть chat-шаблонов (vLLM, llama.cpp) отвергает две реплики одной роли
+// подряд, поэтому граница с провайдером отдаёт их одним сообщением: всем вендорам, одним правилом.
+type UserMessage = Extract<ModelMessage, { role: "user" }>;
+
+function mergeUserMessages(first: UserMessage, next: UserMessage): UserMessage {
+  const merged: UserMessage = {
+    role: "user",
+    content: [...first.content, ...next.content],
+  };
+  if (first.providerOptions === undefined && next.providerOptions === undefined)
+    return merged;
+  return {
+    ...merged,
+    providerOptions: { ...first.providerOptions, ...next.providerOptions },
+  };
+}
+
+function withAdjacentUserMessagesMerged(prompt: ModelPrompt): ModelPrompt {
+  const merged: ModelMessage[] = [];
+  for (const message of prompt) {
+    const last = merged.at(-1);
+    if (message.role === "user" && last?.role === "user")
+      merged[merged.length - 1] = mergeUserMessages(last, message);
+    else merged.push(message);
+  }
+  return merged;
+}
+
+const adjacentUserMessagesMiddleware: LanguageModelMiddleware = {
+  transformParams({ params }) {
+    return Promise.resolve({
+      ...params,
+      prompt: withAdjacentUserMessagesMerged(params.prompt),
+    });
+  },
+};
+
 /**
  * Текстовая модель активного провайдера. Общая для КАЖДОГО узла графа: корень и субагенты
  * обязаны говорить с одним провайдером, свои createOpenAICompatible/env в субагентах не заводим.
@@ -743,6 +782,7 @@ export function makeTextModel(options: {
       attachImagesMiddleware(options.chatModelSeesImages),
       toolSchemaRetryMiddleware,
       modelFirstChunkDeadlineMiddleware,
+      adjacentUserMessagesMiddleware,
       // Последним, то есть ближе всех к провайдеру: повтор toolSchemaRetryMiddleware идёт
       // через model.doStream и тоже получает проводные имена.
       toolNameWireMiddleware(

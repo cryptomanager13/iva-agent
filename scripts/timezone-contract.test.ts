@@ -98,7 +98,7 @@ test("R1: the dynamic time instruction reports UTC for invalid input", () => {
   const program = [
     `const instruction = (await import(${JSON.stringify(moduleUrl)})).default;`,
     `const result = instruction.events["turn.started"]();`,
-    `process.stdout.write(result.markdown);`,
+    `process.stdout.write(result.content);`,
   ].join("\n");
   const child = spawnSync(
     process.execPath,

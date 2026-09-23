@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { resolveDataDir } from "@iva/data-dir";
 import { resolveTimeZone } from "@iva/timezone";
 
-// Динамическая инструкция: каждый турн инжектит текущие дату/время в часовом поясе
-// пользователя в системный промпт. Локаль следует за языком интерфейса (кнопка в /menu
+// Динамическая инструкция: каждый ход приносит текущие дату/время в часовом поясе
+// пользователя user-сообщением в историю. Не в system: system входит в кэшируемый префикс
+// запроса, и смена минуты в нём заново записывала бы в кэш весь запрос (#236); строка в
+// истории только дописывается. Локаль следует за языком интерфейса (кнопка в /menu
 // пишет data/settings.json на лету), поэтому язык пересчитывается КАЖДЫЙ турн, а не
 // захватывается на загрузке модуля. Зависит только от eve, локальных пакетов и node fs/path/Intl.
 const TIMEZONE = resolveTimeZone(process.env.ASSISTANT_TIMEZONE);
@@ -53,6 +55,7 @@ function nowMarkdown(): string {
 export default defineDynamic({
   events: {
     // turn.started — пересчитывается на каждом турне, чтобы время и локаль не «застывали».
-    "turn.started": () => defineInstructions({ markdown: nowMarkdown() }),
+    "turn.started": () =>
+      defineInstructions({ content: nowMarkdown(), role: "user" }),
   },
 });

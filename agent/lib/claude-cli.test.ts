@@ -35,6 +35,7 @@ const PRIVATE_TMP = mkdtempSync(join(tmpdir(), "iva-claude-cli-test-"));
 process.env.TMPDIR = PRIVATE_TMP;
 process.on("exit", () => rmSync(PRIVATE_TMP, { recursive: true, force: true }));
 import {
+  CLAUDE_MESSAGE_ID_PREFIX,
   CLAUDE_SILENCE_TIMEOUT_MS,
   claudeModel,
   claudeNativeModel,
@@ -45,6 +46,7 @@ import {
   claudeEffort,
   claudeEnv,
   claudeExtraBody,
+  claudeHistory,
   claudeTools,
   claudeUsage,
   claudeWarnings,
@@ -820,6 +822,45 @@ test("история уезжает кадрами: переигрывание �
     frames[2].message.content.length,
     2,
     "результат инструмента и следующий вопрос склеены в один user-кадр",
+  );
+});
+
+// #236: без message.id CLI склеивает соседние кадры ассистента, и префикс запроса между
+// шагами расходится — кэш промпта не читает историю.
+test("каждый вызов — свой кадр ассистента со своим номером", () => {
+  const call = (id: string): LanguageModelV4Prompt[number] => ({
+    role: "assistant",
+    content: [
+      { type: "tool-call", toolCallId: id, toolName: "weather", input: "{}" },
+    ],
+  });
+  const result = (id: string): LanguageModelV4Prompt[number] => ({
+    role: "tool",
+    content: [
+      {
+        type: "tool-result",
+        toolCallId: id,
+        toolName: "weather",
+        output: { type: "text", value: "+30" },
+      },
+    ],
+  });
+  const { frames } = claudeHistory([
+    { role: "user", content: [{ type: "text", text: "погода?" }] },
+    call("toolu_a"),
+    result("toolu_a"),
+    call("toolu_b"),
+    result("toolu_b"),
+  ]);
+  assert.deepEqual(
+    frames.map((frame) => [frame.type, frame.message.id]),
+    [
+      ["user", undefined],
+      ["assistant", `${CLAUDE_MESSAGE_ID_PREFIX}0`],
+      ["user", undefined],
+      ["assistant", `${CLAUDE_MESSAGE_ID_PREFIX}1`],
+      ["user", undefined],
+    ],
   );
 });
 

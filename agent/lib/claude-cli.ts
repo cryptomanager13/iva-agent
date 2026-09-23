@@ -74,6 +74,14 @@ const CLAUDE_PROVIDER_ID = "iva-claude";
 export const CLAUDE_TOOL_PREFIX = "mcp__iva__";
 /** Предел имени без префикса: на проводе имя с префиксом укладывается в TOOL_NAME_MAX. */
 export const CLAUDE_TOOL_NAME_MAX = TOOL_NAME_MAX - CLAUDE_TOOL_PREFIX.length;
+/**
+ * Префикс message.id кадров ассистента. Кадры без id CLI склеивает в одно сообщение, и запрос
+ * следующего шага перестаёт начинаться с запроса прошлого: кэш промпта не читает историю (#236).
+ * Точка удаления — версия CLI, в которой stream-json не склеивает кадры без id. В 2.1.280 склейка
+ * есть: в бинаре строка «stamped a message.id on id-less assistant entries (pre-#61940
+ * stream-json injection)».
+ */
+export const CLAUDE_MESSAGE_ID_PREFIX = "msg_iva_";
 /** Тишина CLI, после которой ход считается мёртвым. Отсчитывается заново на каждом событии. */
 export const CLAUDE_SILENCE_TIMEOUT_MS = 180_000;
 /** Сколько ждать выхода процесса после того, как он закрыл вывод. */
@@ -274,7 +282,12 @@ type ClaudeBlock = NativeBlock;
 /** Кадр stream-json: сообщение CLI в его собственном формате. */
 export type ClaudeFrame = {
   readonly type: "user" | "assistant";
-  message: { readonly role: "user" | "assistant"; content: ClaudeBlock[] };
+  message: {
+    /** Есть у каждого кадра ассистента: номер по порядку, см. CLAUDE_MESSAGE_ID_PREFIX. */
+    readonly id?: string;
+    readonly role: "user" | "assistant";
+    content: ClaudeBlock[];
+  };
   /** false — переигрывание истории: CLI отвечает `result num_turns:0` и не идёт к модели. */
   readonly shouldQuery?: boolean;
 };
@@ -455,7 +468,10 @@ function messageBlocks(
   return ["user", toolResultBlocks(message.content)];
 }
 
-/** Подряд идущие user-блоки склеиваются в один кадр: у CLI один кадр — один ход истории. */
+/**
+ * Подряд идущие сообщения одной роли склеиваются в один кадр: у CLI один кадр — одно сообщение
+ * истории, и кадры не зависят от того, как CLI склеивает соседей сам.
+ */
 function appendFrame(
   frames: ClaudeFrame[],
   role: Role,
@@ -463,7 +479,7 @@ function appendFrame(
 ): void {
   if (blocks.length === 0) return;
   const last = frames.at(-1);
-  if (role === "user" && last !== undefined && last.type === "user") {
+  if (last !== undefined && last.type === role) {
     last.message.content.push(...blocks);
     return;
   }
@@ -480,11 +496,20 @@ function sealFrames(frames: ClaudeFrame[]): ClaudeFrame[] {
     throw new ClaudeCliError(
       "Claude CLI needs the history to end with a non-empty user or tool-result message (assistant prefill is unsupported)",
     );
-  return frames.map((frame, index) =>
-    frame.type === "user" && index < frames.length - 1
-      ? { ...frame, shouldQuery: false }
-      : frame,
-  );
+  // Номер кадра ассистента по порядку: история только растёт, и у кадра он тот же на каждом
+  // шаге. Хэш содержимого не годится: одинаковые тексты и повторные id вызовов совпали бы.
+  let assistants = 0;
+  return frames.map((frame, index) => {
+    if (frame.type === "assistant")
+      return {
+        ...frame,
+        message: {
+          id: `${CLAUDE_MESSAGE_ID_PREFIX}${assistants++}`,
+          ...frame.message,
+        },
+      };
+    return index < frames.length - 1 ? { ...frame, shouldQuery: false } : frame;
+  });
 }
 
 function userBlocks(

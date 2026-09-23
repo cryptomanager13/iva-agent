@@ -1558,3 +1558,32 @@ void test("повтор после отказа схемы тоже уходит
     assert.match(sent.function.name, /^[A-Za-z0-9_-]{1,64}$/u);
   }
 });
+
+// --- Соседние user-сообщения уходят одним ------------------------------------------------------
+// Строка времени приходит отдельным user-сообщением перед вводом владельца (#236). Часть
+// chat-шаблонов (vLLM, llama.cpp) отвергает две реплики одной роли подряд, поэтому граница
+// провайдера склеивает их для всех вендоров.
+void test("user-сообщение времени и ввод владельца уходят одним user-сообщением", async (t) => {
+  const go = await loadOpencodeProvider();
+  const bodies = captureRequests(t, [() => sse([OK_CHUNK])]);
+  const model = go.makeTextModel({ chatModelSeesImages: blindToImages });
+  const { stream } = await model.doStream({
+    prompt: [
+      { role: "system", content: "Ты Ива." },
+      { role: "user", content: [{ type: "text", text: "раньше" }] },
+      { role: "assistant", content: [{ type: "text", text: "ответ" }] },
+      { role: "user", content: [{ type: "text", text: "время 10:31" }] },
+      { role: "user", content: [{ type: "text", text: "а сейчас?" }] },
+    ],
+  });
+  await stream.pipeTo(new WritableStream());
+  const messages = bodies[0].messages as { role: string; content: unknown }[];
+  assert.deepEqual(
+    messages.map((message) => message.role),
+    ["system", "user", "assistant", "user"],
+  );
+  assert.deepEqual(messages[3].content, [
+    { type: "text", text: "время 10:31" },
+    { type: "text", text: "а сейчас?" },
+  ]);
+});
