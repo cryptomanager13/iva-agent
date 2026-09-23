@@ -32,8 +32,6 @@ const blockArbitrary: fc.Arbitrary<Native> = fc.oneof(
   fc.constant({ type: "redacted_thinking", data: "x" }),
   fc.record({
     type: fc.constant("tool_use"),
-    // Пул id мал нарочно: повтор id за запуск тоже должен встречаться.
-    id: fc.constantFrom("toolu_1", "toolu_2", "toolu_3", ""),
     name: fc.oneof(
       fc
         .stringMatching(/^[a-z_]{1,8}$/u)
@@ -81,6 +79,26 @@ const eventArbitrary: fc.Arbitrary<Native> = fc.oneof(
   },
 );
 
+/**
+ * id вызова — от API и за запуск не повторяется; повтор и пустой id ловит сверка с пойманным
+ * ответом, а не поток блоков. Поэтому id раздаются по месту события.
+ */
+function withToolIds(events: readonly Native[]): Native[] {
+  return events.map((event, at) => {
+    const block = event.content_block as Native | undefined;
+    return block?.type === "tool_use"
+      ? { ...event, content_block: { ...block, id: `toolu_${at}` } }
+      : event;
+  });
+}
+
+function endOf(block: { kind: Kind; id: string }): LanguageModelV4StreamPart {
+  return {
+    type: block.kind === "reasoning" ? "reasoning-end" : "tool-input-end",
+    id: block.id,
+  };
+}
+
 /** Какой блок вправе нести какую дельту и какое её поле. */
 const DELTA_OF: Record<Kind, readonly [string, string]> = {
   reasoning: ["thinking_delta", "thinking"],
@@ -105,13 +123,14 @@ test("поток блоков отдаёт каждую содержательн
   console.error(`[claude-cli stream property] seed ${SEED}, прогонов ${RUNS}`);
   fc.assert(
     fc.property(
-      fc.array(eventArbitrary, { maxLength: 60, size: "max" }),
+      fc.array(eventArbitrary, { maxLength: 60, size: "max" }).map(withToolIds),
       (events) => {
         const parts: LanguageModelV4StreamPart[] = [];
         const blocks = new BlockStream({ enqueue: (part) => parts.push(part) });
         // Модель теста: какой блок сейчас открыт на каком индексе — по тем началам, что вышли.
         const open = new Map<number, { kind: Kind; id: string }>();
-        const toolIds: string[] = [];
+        // Начатые вызовы, с которыми сверка сравнит пойманный ответ.
+        const tools: { id: string; name: string }[] = [];
         for (const event of events) {
           const before = parts.length;
           let thrown: unknown;
@@ -124,49 +143,50 @@ test("поток блоков отдаёт каждую содержательн
           const at = typeof event.index === "number" ? event.index : -1;
           if (event.type === "content_block_start") {
             const block = event.content_block as Native;
+            // Новое начало на занятом индексе сперва закрывает прежний блок.
+            const prior = open.get(at);
+            open.delete(at);
+            const ends = prior === undefined ? [] : [endOf(prior)];
             if (block.type === "tool_use") {
               const name = String(block.name);
               const id = String(block.id);
-              const refused =
-                !name.startsWith(CLAUDE_TOOL_PREFIX) ||
-                id === "" ||
-                toolIds.includes(id);
-              if (refused) {
-                // (d) Имя без префикса (и id пустой или повторный) — отказ шага, и ни одной части.
+              if (!name.startsWith(CLAUDE_TOOL_PREFIX)) {
+                // (d) Имя без префикса — отказ шага, и начала вызова нет.
                 assert.ok(
                   thrown instanceof ClaudeCliError,
                   "отказ — ошибка шага",
                 );
                 assert.deepEqual(
                   emitted,
-                  [],
+                  ends,
                   "отказ не выпускает начала вызова",
                 );
                 break;
               }
               assert.deepEqual(emitted, [
+                ...ends,
                 {
                   type: "tool-input-start",
                   id,
                   toolName: name.slice(CLAUDE_TOOL_PREFIX.length),
                 },
               ]);
-              toolIds.push(id);
               open.set(at, { kind: "tool", id });
+              tools.push({ id, name: name.slice(CLAUDE_TOOL_PREFIX.length) });
             } else if (
               block.type === "thinking" ||
               block.type === "redacted_thinking"
             ) {
-              assert.equal(emitted.length, 1);
-              assert.equal(emitted[0]?.type, "reasoning-start");
-              open.set(at, { kind: "reasoning", id: idOf(emitted[0]) });
+              const start = emitted[emitted.length - 1];
+              assert.deepEqual(emitted.slice(0, -1), ends);
+              assert.equal(start?.type, "reasoning-start");
+              open.set(at, { kind: "reasoning", id: idOf(start) });
             } else {
               assert.deepEqual(
                 emitted,
-                [],
-                "текст и неизвестные блоки частей не дают",
+                ends,
+                "текст и неизвестные блоки своих частей не дают",
               );
-              open.delete(at);
             }
           } else if (event.type === "content_block_delta") {
             const delta = event.delta as Native;
@@ -199,23 +219,16 @@ test("поток блоков отдаёт каждую содержательн
             const block = open.get(at);
             assert.deepEqual(
               emitted,
-              block === undefined
-                ? []
-                : [
-                    {
-                      type:
-                        block.kind === "reasoning"
-                          ? "reasoning-end"
-                          : "tool-input-end",
-                      id: block.id,
-                    },
-                  ],
+              block === undefined ? [] : [endOf(block)],
             );
             open.delete(at);
+          } else if (event.type === "message_start") {
+            // Новое сообщение закрывает блоки прежнего, которые CLI не закрыл, и только их.
+            assert.deepEqual(emitted, [...open.values()].map(endOf));
+            open.clear();
           } else {
-            // (c) ping, message_start, message_* и неизвестные типы частей не дают.
+            // (c) ping, message_* и неизвестные типы частей не дают.
             assert.deepEqual(emitted, []);
-            if (event.type === "message_start") open.clear();
           }
           assert.equal(
             thrown,
@@ -224,6 +237,7 @@ test("поток блоков отдаёт каждую содержательн
           );
         }
         blocks.close();
+        assert.deepEqual(blocks.tools, tools);
         assertLifecycle(parts);
       },
     ),

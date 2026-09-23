@@ -1055,6 +1055,40 @@ test("вызов в потоке, не совпавший с пойманным 
   assert.equal(partsOfType(untimed(parts), "tool-call").length, 0);
 });
 
+// Реле поймало weather#toolu_1; поток, разошедшийся с ним по id или по имени, шаг не проходит.
+for (const [what, id, name] of [
+  ["id", "toolu_other", "weather"],
+  ["имени", "toolu_1", "other"],
+] as const)
+  test(`вызов в потоке, разошедшийся с пойманным ответом по ${what}, валит шаг`, async (t) => {
+    const upstream = await stubApi(t, relayCalls(["toolu_1"]));
+    const wire = CLAUDE_TOOL_PREFIX + name;
+    scriptCli(
+      t,
+      [
+        MESSAGE_START,
+        blockStart(0, toolUse(id, wire, {})),
+        blockStop(0),
+        MESSAGE_STOP,
+        assistantSays([toolUse(id, wire)]),
+        MAX_TURNS,
+      ],
+      { FAKE_CLAUDE_RELAY: "1", FAKE_CLAUDE_EXIT: "1" },
+    );
+    const { parts, error } = await timed(
+      await makeClaudeCliModel(MODEL, {
+        silenceTimeoutMs: 10_000,
+        upstream: upstream.url,
+      }).doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+    );
+    assert.ok(error instanceof ClaudeCliError);
+    assert.equal(
+      error.message,
+      `Claude CLI streamed tool calls [${name}#${id}] that differ from the response it received [weather#toolu_1]`,
+    );
+    assert.equal(partsOfType(untimed(parts), "tool-call").length, 0);
+  });
+
 // CLI оборвал вывод, а реле поймало ответ целиком: недоехавший вызов уходит без начала блока.
 test("вызов, не доехавший до потока, уходит из пойманного ответа", async (t) => {
   const upstream = await stubApi(t, relayCalls(["toolu_a", "toolu_b"]));

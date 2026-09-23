@@ -1135,7 +1135,7 @@ type RunContext = {
 async function runCall(context: RunContext): Promise<void> {
   const { model, options, session, controller, run } = context;
   const step: StepStream = {
-    text: new TextStream(),
+    text: new TextStream(controller),
     blocks: new BlockStream(controller),
     controller,
   };
@@ -1293,7 +1293,7 @@ function applyStreamEvent(
   if (native.type === "message_stop") return true;
   const delta = asRecord(native.delta);
   if (delta?.type === "text_delta" && typeof delta.text === "string")
-    step.text.push(delta.text, step.controller);
+    step.text.push(delta.text);
   else step.blocks.apply(native);
   return false;
 }
@@ -1301,48 +1301,19 @@ function applyStreamEvent(
 /** Приёмник частей: поток шага наружу, а в тесте — запись. */
 type PartSink = { enqueue(part: LanguageModelV4StreamPart): void };
 
-type BlockKind = "reasoning" | "tool";
-
-type OpenBlock = { readonly kind: BlockKind; readonly id: string };
+type OpenBlock = { readonly kind: "reasoning" | "tool"; readonly id: string };
 
 type StreamedCall = { readonly id: string; readonly name: string };
-
-/** Какие блоки ответа идут наружу и каким видом. Текст ведёт TextStream, прочее не идёт. */
-const BLOCK_KINDS: Readonly<Record<string, BlockKind>> = {
-  thinking: "reasoning",
-  redacted_thinking: "reasoning",
-  tool_use: "tool",
-};
-
-/** Какую дельту несёт блок каждого вида и в каком поле. Дельта чужого вида частей не даёт. */
-const BLOCK_DELTAS: Readonly<
-  Record<BlockKind, { readonly type: string; readonly field: string }>
-> = {
-  reasoning: { type: "thinking_delta", field: "thinking" },
-  tool: { type: "input_json_delta", field: "partial_json" },
-};
-
-const BLOCK_PARTS = {
-  reasoning: {
-    delta: "reasoning-delta",
-    end: "reasoning-end",
-  },
-  tool: {
-    delta: "tool-input-delta",
-    end: "tool-input-end",
-  },
-} as const;
 
 /**
  * Блоки рассуждения и вызовов в момент прихода. Начало блока — `reasoning-start` или
  * `tool-input-start`, непустая дельта своего вида — `*-delta`, `content_block_stop` — `*-end`.
- * Индексы блоков в каждом сообщении начинаются с нуля, а сообщений за запуск бывает несколько,
- * поэтому карта индексов сбрасывается на `message_start`; блоки, которые к этому моменту не
- * закрылись, закрывает `close`.
+ * Текст ведёт TextStream, прочие блоки не идут. Индексы блоков в каждом сообщении начинаются
+ * с нуля, а сообщений за запуск бывает несколько: блок, который CLI не закрыл до
+ * `message_start` или до нового начала на том же индексе, закрывается тут же.
  */
 export class BlockStream {
-  private readonly byIndex = new Map<number, OpenBlock>();
-  private readonly unclosed = new Set<OpenBlock>();
+  private readonly open = new Map<number, OpenBlock>();
   private readonly started: StreamedCall[] = [];
   private readonly sink: PartSink;
 
@@ -1356,7 +1327,7 @@ export class BlockStream {
   }
 
   apply(native: Record<string, unknown>): void {
-    if (native.type === "message_start") this.byIndex.clear();
+    if (native.type === "message_start") this.close();
     const index = native.index;
     if (typeof index !== "number") return;
     if (native.type === "content_block_start")
@@ -1368,68 +1339,55 @@ export class BlockStream {
 
   /** Закрывает всё, что не закрыл CLI: перед вызовами шаг обязан закончить блоки. */
   close(): void {
-    for (const block of this.unclosed) this.finish(block);
-    this.byIndex.clear();
+    for (const index of this.open.keys()) this.end(index);
   }
 
   private start(
     index: number,
     block: Record<string, unknown> | undefined,
   ): void {
-    this.byIndex.delete(index);
-    const kind = BLOCK_KINDS[text(block?.type)];
-    if (block === undefined || kind === undefined) return;
-    const open =
-      kind === "tool" ? this.startTool(block) : this.startReasoning();
-    this.byIndex.set(index, open);
-    this.unclosed.add(open);
+    this.end(index);
+    const type = text(block?.type);
+    if (type === "thinking" || type === "redacted_thinking") {
+      const id = `rsn-${randomUUID()}`;
+      this.sink.enqueue({ type: "reasoning-start", id });
+      this.open.set(index, { kind: "reasoning", id });
+    } else if (type === "tool_use") {
+      const toolName = ivaToolName(text(block?.name));
+      const id = text(block?.id);
+      this.started.push({ id, name: toolName });
+      this.sink.enqueue({ type: "tool-input-start", id, toolName });
+      this.open.set(index, { kind: "tool", id });
+    }
   }
 
-  private startReasoning(): OpenBlock {
-    const id = `rsn-${randomUUID()}`;
-    this.sink.enqueue({ type: "reasoning-start", id });
-    return { kind: "reasoning", id };
-  }
-
-  private startTool(block: Record<string, unknown>): OpenBlock {
-    const toolName = ivaToolName(text(block.name));
-    const id = text(block.id);
-    if (id.length === 0 || this.started.some((call) => call.id === id))
-      throw new ClaudeCliError(
-        `Claude streamed a tool call without a unique id: ${JSON.stringify(id)}`,
-      );
-    this.started.push({ id, name: toolName });
-    this.sink.enqueue({ type: "tool-input-start", id, toolName });
-    return { kind: "tool", id };
-  }
-
+  /** Дельта чужого вида и пустая частей не дают. */
   private delta(
     index: number,
     delta: Record<string, unknown> | undefined,
   ): void {
-    const open = this.byIndex.get(index);
+    const open = this.open.get(index);
     if (open === undefined || delta === undefined) return;
-    const expected = BLOCK_DELTAS[open.kind];
-    if (delta.type !== expected.type) return;
-    const chunk = text(delta[expected.field]);
+    const reasoning = open.kind === "reasoning";
+    if (delta.type !== (reasoning ? "thinking_delta" : "input_json_delta"))
+      return;
+    const chunk = text(reasoning ? delta.thinking : delta.partial_json);
     if (chunk.length === 0) return;
     this.sink.enqueue({
-      type: BLOCK_PARTS[open.kind].delta,
+      type: reasoning ? "reasoning-delta" : "tool-input-delta",
       id: open.id,
       delta: chunk,
     });
   }
 
   private end(index: number): void {
-    const open = this.byIndex.get(index);
+    const open = this.open.get(index);
     if (open === undefined) return;
-    this.byIndex.delete(index);
-    this.finish(open);
-  }
-
-  private finish(open: OpenBlock): void {
-    this.unclosed.delete(open);
-    this.sink.enqueue({ type: BLOCK_PARTS[open.kind].end, id: open.id });
+    this.open.delete(index);
+    this.sink.enqueue({
+      type: open.kind === "reasoning" ? "reasoning-end" : "tool-input-end",
+      id: open.id,
+    });
   }
 }
 
@@ -1437,28 +1395,28 @@ export class BlockStream {
 class TextStream {
   private id: string | undefined;
   private written = "";
+  private readonly sink: PartSink;
+
+  constructor(sink: PartSink) {
+    this.sink = sink;
+  }
 
   get emitted(): string {
     return this.written;
   }
 
-  push(
-    delta: string,
-    controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
-  ): void {
+  push(delta: string): void {
     if (delta.length === 0) return;
     this.id ??= `txt-${randomUUID()}`;
     if (this.written.length === 0)
-      controller.enqueue({ type: "text-start", id: this.id });
+      this.sink.enqueue({ type: "text-start", id: this.id });
     this.written += delta;
-    controller.enqueue({ type: "text-delta", id: this.id, delta });
+    this.sink.enqueue({ type: "text-delta", id: this.id, delta });
   }
 
-  close(
-    controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
-  ): void {
+  close(): void {
     if (this.id !== undefined)
-      controller.enqueue({ type: "text-end", id: this.id });
+      this.sink.enqueue({ type: "text-end", id: this.id });
   }
 }
 
@@ -1508,13 +1466,8 @@ function complete(
   // кроме той, о которой мы и просили (см. failureExpected), и кроме целого ответа, пойманного
   // реле: правда в нём, а текст «API Error» в нём — слова модели.
   if (seen.nativeError !== undefined && captured === null && !expected)
-    throw new ClaudeCliError(`${seen.nativeError}${upstreamNote(admission)}`);
-  const result = onlyResult(
-    seen,
-    assistants.length,
-    captured !== null,
-    admission,
-  );
+    throw new ClaudeCliError(seen.nativeError);
+  const result = onlyResult(seen, assistants.length, captured !== null);
   const completion = readCompletion(
     assistants,
     captured === null ? asRecord(result?.usage) : captured.usage,
@@ -1554,8 +1507,7 @@ function capturedMessage(
 /** Что реле видело от api.anthropic.com, когда целого ответа не собралось. */
 function relayWitness(admission: Admission): string {
   if (admission.status === undefined) return "no answer reached the relay";
-  if (admission.status !== 200)
-    return `api.anthropic.com answered HTTP ${admission.status}`;
+  if (admission.status !== 200) return `HTTP ${admission.status}`;
   return "the stream broke off before message_stop";
 }
 
@@ -1576,7 +1528,6 @@ function onlyResult(
   seen: Collected,
   assistants: number,
   captured: boolean,
-  admission: Admission,
 ): Record<string, unknown> | undefined {
   const result = seen.results.at(-1);
   const subtype = text(result?.subtype);
@@ -1586,7 +1537,7 @@ function onlyResult(
     !(captured || seen.stopped)
   )
     throw new ClaudeCliError(
-      `Claude CLI returned an incomplete response (${subtype || "no result"}${upstreamNote(admission)})`,
+      `Claude CLI returned an incomplete response (${subtype || "no result"})`,
     );
   return result;
 }
@@ -1641,12 +1592,6 @@ function resultError(result: Record<string, unknown> | undefined): string {
   return result?.is_error === true ? text(result.result) : "";
 }
 
-function upstreamNote(admission: Admission): string {
-  return admission.status !== undefined && admission.status !== 200
-    ? `, api.anthropic.com answered HTTP ${admission.status}`
-    : "";
-}
-
 /**
  * Отдаёт шаг наружу: хвост текста, конец открытых блоков, вызовы инструментов, расход и
  * причина остановки. Вызовы уходят только здесь, после сверки: eve начинает исполнять вызов,
@@ -1659,8 +1604,8 @@ function emit(
 ): void {
   const { controller } = step;
   matchStreamedCalls(step.blocks.tools, completion.calls);
-  reconcile(step.text, completion.text, controller);
-  step.text.close(controller);
+  reconcile(step.text, completion.text);
+  step.text.close();
   step.blocks.close();
   for (const call of completion.calls)
     controller.enqueue({
@@ -1709,14 +1654,10 @@ function callList(
 }
 
 /** Хвост ответа, не доехавший дельтами: реле могло получить больше, чем CLI успел напечатать. */
-function reconcile(
-  text: TextStream,
-  final: string,
-  controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
-): void {
+function reconcile(text: TextStream, final: string): void {
   if (final === text.emitted) return;
   if (final.startsWith(text.emitted)) {
-    text.push(final.slice(text.emitted.length), controller);
+    text.push(final.slice(text.emitted.length));
     return;
   }
   throw new ClaudeCliError(
