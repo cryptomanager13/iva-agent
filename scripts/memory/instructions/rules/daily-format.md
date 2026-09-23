@@ -41,7 +41,9 @@ Content of the entry
 3. The processor appends **only** processing markers at the very end: a part marker
    `<!-- processed-through: HH:MM -->` after each finished part of a large day (HH:MM is
    the heading of the part's last entry; the rollup resumes after the last one), and,
-   when the day is done, the processed marker:
+   when the day is done, the processed marker. The markers are the file's last lines; only
+   the processed marker makes the day done, and a marker quoted inside an entry does not
+   count:
    ```markdown
    <!-- processed: YYYY-MM-DDTHH:MM -->
 

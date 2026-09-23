@@ -139,12 +139,12 @@ function dailyTask(day: string): string {
   return (
     `Process the raw transcript of the completed day (${VAULT()}/daily/${day}.md): ` +
     `extract entities and create/update autograph cards. ` +
-    `Work through the day in parts and mark each finished part in the transcript, per the ` +
-    `memory-processor skill (${INSTRUCTIONS}/memory-processor/SKILL.md): a cut run resumes from that mark. ` +
+    `Work through the day in parts and mark each finished part in the transcript with a part marker, per the ` +
+    `memory-processor skill (${INSTRUCTIONS}/memory-processor/SKILL.md): a cut run resumes from that marker. ` +
     (resumeAfter === null
       ? ""
       : `Entries up to and including ${resumeAfter} are already processed (the last processed-through ` +
-        `mark): start with the first entry after ${resumeAfter}, and extend the day's existing summary. `) +
+        `marker): start with the first entry after ${resumeAfter}, and extend the day's existing summary. `) +
     `Prefer the write_card tool over write_file ` +
     `for cards — it enforces the schema. For each fact choose one operation: ADD (new), ` +
     `UPDATE (existing subject, compatible new fact), SUPERSEDE (contradicts the Compiled Truth), ` +

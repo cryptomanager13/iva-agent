@@ -81,8 +81,10 @@ raw file, not in the session, so a cut run is resumed instead of started over.
   continue with the first entry after it and extend the existing summary — never redo
   earlier parts.
 - After the last part: the processed marker (`phases/summarize.md` §2), then the mechanical
-  pass. The day counts as done only with the processed marker; a run that returns a report
-  without it leaves the night unfinished.
+  pass. The day counts as done only with the processed marker — a summary without it is an
+  unfinished day, and a run that returns a report without it leaves the night unfinished.
+- Both markers are the last lines of the raw file, each on its own line. The rollup script
+  reads only this trailing block: a marker quoted inside an entry is text, not a marker.
 
 ## Mechanical pass (after writing cards & summary)
 
@@ -111,15 +113,16 @@ Markdown) and let the nightly Brain run the mechanical pass later.
 
 ## Hard rules
 
-- **Never modify existing transcript entries.** Append only a processing marker (see
+- **Never modify existing transcript entries.** Append only the two processing markers —
+  the part marker and the processed marker — to the end of the file (see
   `scripts/memory/instructions/rules/daily-format.md`).
 - **No orphans.** Every card created here must link to a hub and ≥2 neighbors before
   you finish (`phases/link.md`).
 - **description is a search snippet, not the title.** One line, what/why, ~150 chars.
 - **tags:** 2–5, lowercase, kebab-case.
-- **Idempotent.** If the daily file already carries a processing marker and a
-  `summaries/daily/YYYY-MM-DD.md` exists, only reconcile new entries; do not duplicate cards.
-  Entries up to the last part marker are already processed.
+- **Idempotent.** If the daily file ends with the processed marker, the day is done: only
+  reconcile entries after it; do not duplicate cards. Without it, the day is unfinished:
+  entries up to the last part marker are already processed, continue after it.
 - **One structure per card.** Exactly one `## Log` and one `## Related`; never emit
   dated `## Обновление` / `## Update` headings. Pass relations only through the
   `write_card.related` argument, never inside `body`.
