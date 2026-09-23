@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -73,6 +73,52 @@ await test("статус уходит rich-сообщением с кнопко�
   );
   assert.equal(markdown.includes("<tg-button-row>"), false);
   assert.equal(calls[0].body.reply_markup, undefined);
+});
+
+await test("статус и добавление кнопки не зависят от стиля меню", async () => {
+  const results: { direct: Call[]; early: Call[] }[] = [];
+  const settingsPath = join(dataDir, "settings.json");
+  for (const style of ["classic", "rich", null]) {
+    if (style === null) rmSync(settingsPath, { force: true });
+    else writeFileSync(settingsPath, JSON.stringify({ menuStyle: style }));
+    const direct = handle();
+    assert.equal(await status.sendWorkingStatus(direct.tg), 500);
+    const early = handle();
+    assert.equal(
+      await status.sendWorkingStatus(early.tg, { canStop: false }),
+      500,
+    );
+    await status.enableWorkingStatusStop(early.tg, 500);
+    results.push({ direct: direct.calls, early: early.calls });
+  }
+  writeFileSync(settingsPath, JSON.stringify({ menuStyle: "rich" }));
+  assert.deepEqual(results[0], results[1]);
+  assert.deepEqual(results[1], results[2]);
+  for (const { direct, early } of results) {
+    assert.deepEqual(
+      direct.map((call) => call.method),
+      ["sendRichMessage"],
+    );
+    assert.equal(
+      markdownOf(direct[0]),
+      '<tg-emoji emoji-id="5818797194127346654">💬</tg-emoji> ' + STOP_BUTTON,
+    );
+    assert.equal(direct[0].body.reply_markup, undefined);
+    assert.deepEqual(
+      early.map((call) => call.method),
+      ["sendRichMessage", "editMessageText"],
+    );
+    assert.equal(
+      markdownOf(early[0]),
+      '<tg-emoji emoji-id="5818797194127346654">💬</tg-emoji>',
+    );
+    assert.equal(
+      markdownOf(early[1]),
+      '<tg-emoji emoji-id="5818797194127346654">💬</tg-emoji> ' + STOP_BUTTON,
+    );
+    assert.equal(early[0].body.reply_markup, undefined);
+    assert.equal(early[1].body.reply_markup, undefined);
+  }
 });
 
 await test("отказ Telegram на custom_emoji роняет лоадер на ⏳ навсегда", async () => {
@@ -252,7 +298,7 @@ await test("своя сессия гасит статус-сообщение", a
   assert.equal(runStatus.getChatStatus(key)?.status, "idle");
 });
 
-await test("обычный статус и фолбэк rich-статуса отправляются тихо", async () => {
+await test("отказ rich оставляет тихий статус с текстом и без кнопки", async () => {
   const failedRich = handle((call) =>
     call.method === "sendRichMessage"
       ? { ok: false, body: { description: "rich unsupported" } }
@@ -263,13 +309,21 @@ await test("обычный статус и фолбэк rich-статуса от
     failedRich.calls.map((call) => call.body.disable_notification),
     [true, true],
   );
+  assert.deepEqual(
+    failedRich.calls.map((call) => call.method),
+    ["sendRichMessage", "sendMessage"],
+  );
+  assert.equal(failedRich.calls[1].body.text, "⏳ …");
+  assert.equal(failedRich.calls[1].body.reply_markup, undefined);
 
   writeFileSync(
     join(dataDir, "settings.json"),
     JSON.stringify({ menuStyle: "classic" }),
   );
-  const classic = handle();
-  assert.equal(await status.sendWorkingStatus(classic.tg), 500);
-  assert.equal(classic.calls[0].method, "sendMessage");
-  assert.equal(classic.calls[0].body.disable_notification, true);
+  const next = handle();
+  assert.equal(await status.sendWorkingStatus(next.tg), 500);
+  assert.equal(next.calls[0].method, "sendMessage");
+  assert.equal(next.calls[0].body.text, "⏳ …");
+  assert.equal(next.calls[0].body.reply_markup, undefined);
+  assert.equal(next.calls[0].body.disable_notification, true);
 });
