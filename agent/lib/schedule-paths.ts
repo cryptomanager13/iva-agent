@@ -4,6 +4,7 @@
 import { join } from "node:path";
 import { dataDir } from "./data-dir.ts";
 import { jobFactsFile } from "./job-facts.ts";
+import { JOB_STOP_GRACE_MS } from "./schedule-runner.ts";
 
 export interface SchedulePaths {
   readonly root: string;
@@ -40,5 +41,6 @@ export function memoryRollupJob(period: MemoryPeriod) {
     lockPath: memoryLockPath,
     statusPath,
     factsPath,
+    killGraceMs: JOB_STOP_GRACE_MS,
   };
 }

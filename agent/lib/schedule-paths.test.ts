@@ -105,6 +105,8 @@ await test("memoryRollupJob returns the exact command contract for every period"
       lockPath: join(root, ".memory.lock"),
       statusPath: join(root, "schedule-data", "rollup-status.json"),
       factsPath: join(root, "schedule-data", "jobs.json"),
+      // Срок остановки сводки: отмена хода и её подтверждение успевают до SIGKILL.
+      killGraceMs: 90_000,
     });
   }
 });

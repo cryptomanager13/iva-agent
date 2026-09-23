@@ -37,6 +37,7 @@ import {
   writeStatusAtomic,
 } from "./schedule-runner.ts";
 import { addDaysToDate, zonedParts, zonedToUtcMs } from "./zoned-time.ts";
+import { memoryRollupJob } from "./schedule-paths.ts";
 
 type Period = "daily" | "weekly" | "monthly" | "yearly";
 
@@ -260,8 +261,8 @@ export async function runScheduleMigration({
       runJob ??
       ((period: Period) =>
         runScheduledJob({
-          name: statusKey(period),
-          argv: ["scripts/memory/rollup.ts", period],
+          // Задание сводки описано в одном месте; догон подставляет свои пути.
+          ...memoryRollupJob(period),
           root,
           nodeBin,
           lockPath: root ? join(root, ".memory.lock") : undefined,

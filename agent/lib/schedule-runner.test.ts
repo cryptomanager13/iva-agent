@@ -924,7 +924,7 @@ void test("the child reads its stop time from the runner, never from a stale ser
   assert.equal(seen!.env?.IVA_JOB_STOP_AT, String(1_000_000 + 5000 - 1000));
 });
 
-void test("a throwing log still settles the run with both causes", async () => {
+void test("a throwing log still settles the run as a failure", async () => {
   const root = await scaffold();
   await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
   const result = await runScheduledJob({
@@ -937,9 +937,27 @@ void test("a throwing log still settles the run with both causes", async () => {
     },
   });
   assert.equal(result.ok, false);
-  assert.ok(result.error instanceof AggregateError);
-  assert.deepEqual(
-    result.error.errors.map((error: Error) => error.message),
-    ["log is broken", "log is broken"],
-  );
+  assert.ok(result.error instanceof Error);
+  assert.equal(result.error.message, "log is broken");
+});
+
+void test("a job without its own stop grace keeps the short SIGKILL grace", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  let seen: SpawnOptions | null = null;
+  await runScheduledJob({
+    name: "digest",
+    argv: ["ok.ts"],
+    root,
+    nodeBin: process.execPath,
+    timeoutMs: 60_000,
+    now: () => 1_000_000,
+    log: () => {},
+    spawnImpl: (cmd, args, opts) => {
+      seen = opts;
+      return realSpawn(cmd, args, opts);
+    },
+  });
+  // 90 с на остановку нужны только сводке; остальным заданиям — прежние 10 с.
+  assert.equal(seen!.env?.IVA_JOB_STOP_AT, String(1_000_000 + 60_000 - 10_000));
 });

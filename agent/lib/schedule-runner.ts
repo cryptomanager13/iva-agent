@@ -35,10 +35,12 @@ export const DEFAULT_TIMEOUT_MS = 3600_000;
 // Keeping it above DEFAULT_TIMEOUT_MS makes the queue WAIT instead: the runner's own
 // timeout is then the only thing that ends a wedged night, and it kills the whole group.
 const LOCK_WAIT_SECONDS = 3900;
-// Срок остановки: сколько ребёнку дано, чтобы погасить свою работу. Ребёнок получает
-// момент «работу кончить» (JOB_STOP_AT_ENV) ровно за этот срок до SIGTERM и столько же
-// живёт после SIGTERM до SIGKILL — ночная сводка успевает отменить ход на сервере и
-// дождаться подтверждения по любому из двух путей (scripts/lib/rollup-turn.ts).
+const DEFAULT_KILL_GRACE_MS = 10_000;
+// Срок остановки ночной сводки (killGraceMs её задания, agent/lib/schedule-paths.ts):
+// ребёнок получает момент «работу кончить» (JOB_STOP_AT_ENV) ровно за этот срок до SIGTERM
+// и столько же живёт после SIGTERM до SIGKILL — сводка успевает отменить ход на сервере и
+// дождаться подтверждения по любому из двух путей (scripts/lib/rollup-turn.ts). Прочим
+// заданиям гасить нечего, у них прежние 10 с.
 export const JOB_STOP_GRACE_MS = 90_000;
 // Имя переменной с моментом «работу кончить», epoch ms. Её ставит только раннер, поверх
 // окружения сервиса: у ребёнка одно число, и оно выведено из срока запуска.
@@ -346,7 +348,7 @@ function resolveOptions(options: RunScheduledJobOptions): ResolvedOptions {
   ) as RunScheduledJobOptions;
   return {
     timeoutMs: DEFAULT_TIMEOUT_MS,
-    killGraceMs: JOB_STOP_GRACE_MS,
+    killGraceMs: DEFAULT_KILL_GRACE_MS,
     guardMs: GUARD_MS,
     wake: true,
     env: process.env,
@@ -845,8 +847,8 @@ export async function runScheduledJob(
   }
 }
 
-// Неожиданный сбой — провал запуска с причиной. Если бросил и сам журнал, промис всё
-// равно разрешается, а причина несёт обе ошибки.
+// Неожиданный сбой — провал запуска с причиной. Журнал сам не должен выбросить наружу:
+// промис расписания обязан разрешиться.
 function unexpectedFailure(
   o: ResolvedOptions,
   error: unknown,
@@ -856,14 +858,7 @@ function unexpectedFailure(
       `schedule-runner: ${o.name} unexpected failure: ${errorMessage(error)}`,
     );
     return { skipped: false, ok: false, error };
-  } catch (logError) {
-    return {
-      skipped: false,
-      ok: false,
-      error: new AggregateError(
-        [error, logError],
-        "unexpected failure, and the log threw",
-      ),
-    };
+  } catch {
+    return { skipped: false, ok: false, error };
   }
 }
