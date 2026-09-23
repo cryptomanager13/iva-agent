@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { readdirSync } from "node:fs";
 import { once } from "node:events";
@@ -57,7 +58,7 @@ import {
 // но и то, что уехало в CLI.
 const FAKE_CLI = `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, readFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const arg = (name) => {
@@ -115,7 +116,7 @@ async function scenario() {
       });
       second = { status: retry.status, body: await retry.text() };
     }
-    dump({ answer: answer.status, second, received, printed });
+    dump({ answer: answer.status, second, received, printed, fallback: process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK });
     streamText([printed]);
     send({ type: "assistant", message: message([textBlock(printed)], "end_turn", { input_tokens: 999, output_tokens: 999 }) });
     send({ type: "stream_event", event: { type: "message_stop" } });
@@ -126,6 +127,32 @@ async function scenario() {
     }
     send({ type: "result", subtype: "success", is_error: false, num_turns: 1, usage: { input_tokens: 999, output_tokens: 999 } });
     process.exit(0);
+  }
+  if (mode === "script") {
+    // Сценарий по шагам: событие CLI как есть или пауза. С FAKE_CLAUDE_RELAY=1 подделка сначала
+    // сходит в реле, как настоящий CLI, и печатает сценарий уже после ответа API.
+    if (process.env.FAKE_CLAUDE_RELAY === "1") {
+      const answer = await fetch(process.env.ANTHROPIC_BASE_URL + "/v1/messages?beta=true", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: arg("--model"), stream: true, messages: [] }),
+      });
+      await answer.text();
+    }
+    dump({});
+    for (const step of JSON.parse(process.env.FAKE_CLAUDE_SCRIPT)) {
+      if (typeof step.pause === "number") await new Promise((resolve) => setTimeout(resolve, step.pause));
+      else send(step);
+    }
+    const code = Number(process.env.FAKE_CLAUDE_EXIT ?? "0");
+    const linger = process.env.FAKE_CLAUDE_LINGER_MS;
+    if (linger === undefined) process.exit(code);
+    // Вывод закрыт, а процесс ещё жив: так шаг ждёт выхода CLI после конца его вывода.
+    process.stdout.write("", () => {
+      closeSync(1);
+      setTimeout(() => process.exit(code), Number(linger));
+    });
+    return;
   }
   if (mode === "text") {
     dump({});
@@ -536,6 +563,64 @@ async function failureOf(
   return caught;
 }
 
+// ─── Сценарий CLI по шагам ──────────────────────────────────────────────────────────────
+// Режим script печатает события, которые дал тест, с паузами между ними: так видно, КОГДА
+// часть шага уходит наружу, а не только какой она была.
+
+type ScriptStep = Record<string, unknown>;
+
+const STEP_USAGE = { input_tokens: 11, output_tokens: 4 };
+const MESSAGE_START = streamEvent({
+  type: "message_start",
+  message: { id: "msg_1" },
+});
+const MESSAGE_STOP = streamEvent({ type: "message_stop" });
+function streamEvent(event: Record<string, unknown>): ScriptStep {
+  return { type: "stream_event", event };
+}
+
+function blockStart(index: number, block: Record<string, unknown>): ScriptStep {
+  return streamEvent({
+    type: "content_block_start",
+    index,
+    content_block: block,
+  });
+}
+
+function blockDelta(index: number, delta: Record<string, unknown>): ScriptStep {
+  return streamEvent({ type: "content_block_delta", index, delta });
+}
+
+function blockStop(index: number): ScriptStep {
+  return streamEvent({ type: "content_block_stop", index });
+}
+
+function assistantSays(
+  content: Record<string, unknown>[],
+  stop = "tool_use",
+): ScriptStep {
+  return {
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content,
+      stop_reason: stop,
+      usage: STEP_USAGE,
+    },
+  };
+}
+
+function scriptCli(
+  t: TestContext,
+  steps: readonly ScriptStep[],
+  env: Record<string, string> = {},
+): Fake {
+  return fakeCli(t, "script", {
+    FAKE_CLAUDE_SCRIPT: JSON.stringify(steps),
+    ...env,
+  });
+}
+
 // ─── Нормальный ход ─────────────────────────────────────────────────────────────────────
 
 test("текст, расход и причина остановки доезжают из ответа CLI", async (t) => {
@@ -850,6 +935,62 @@ test("временная папка уходит раньше, чем ход о�
   assert.deepEqual(tempDirs(), before);
 });
 
+// CLI закрыл вывод и вышел чуть позже: шаг дождался выхода, и ожидание выхода больше ничего
+// не держит — иначе процесс Iva, поднятый ради одного запуска расписания, жил бы лишние секунды.
+// Шаг идёт в отдельном процессе: таймеры этого файла от прошлых тестов его не касаются.
+test("после выхода CLI ожидание выхода не держит процесс Iva", async (t) => {
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, { type: "text", text: "" }),
+      blockDelta(0, { type: "text_delta", text: "Готово" }),
+      blockStop(0),
+      MESSAGE_STOP,
+      assistantSays([{ type: "text", text: "Готово" }], "end_turn"),
+      {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        num_turns: 1,
+        usage: STEP_USAGE,
+      },
+    ],
+    { FAKE_CLAUDE_LINGER_MS: "300" },
+  );
+  const step = `
+    import { makeClaudeCliModel } from ${JSON.stringify(new URL("./claude-cli.ts", import.meta.url).href)};
+    const { stream } = await makeClaudeCliModel(${JSON.stringify(MODEL)}).doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "привет" }] }],
+    });
+    const reader = stream.getReader();
+    let text = "";
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (next.value.type === "text-delta") text += next.value.delta;
+    }
+    process.stdout.write(text + "\\n");
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", step], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  let printed = "";
+  let drainedAt = 0;
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    printed += chunk;
+    drainedAt = performance.now();
+  });
+  const [code] = (await once(child, "exit")) as [number | null];
+  assert.equal(code, 0);
+  assert.equal(printed, "Готово\n");
+  assert.ok(
+    performance.now() - drainedAt < 2_000,
+    "процесс вышел сразу после шага, а не по таймеру ожидания выхода",
+  );
+});
+
 test("шаг с отменённым сигналом доезжает до отмены и на doGenerate", async () => {
   const controller = new AbortController();
   controller.abort(cancellation());
@@ -989,6 +1130,77 @@ test("оборванный ответ API не подменяется расск
   assert.equal(error.name, "ClaudeCliError");
   assert.match(error.message, /did not finish the response/u);
   assert.equal(classifyModelCallError(error), "recoverable");
+});
+
+// Ночь 22.09 на c1: апстрим оборвал поток, CLI пошёл за ответом вторым, нестриминговым
+// запросом, реле его отбило — и в журнал уехал отказ реле вместо причины обрыва.
+test("обрыв ответа API назван обрывом, а не отказом реле на второй запрос CLI", async (t) => {
+  const upstream = await stubApi(t, relayAnswer("В Ташкенте +31").slice(0, 5));
+  const fake = fakeCli(t, "relay", {
+    FAKE_CLAUDE_SECOND: "1",
+    FAKE_CLAUDE_PRINT: "В Ташкенте",
+  });
+  const error = await failureOf(async () =>
+    drain(
+      await makeClaudeCliModel(MODEL, {
+        silenceTimeoutMs: 10_000,
+        upstream: upstream.url,
+      }).doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+    ),
+  );
+  assert.equal(
+    fake.read().fallback,
+    "1",
+    "CLI не идёт за ответом вторым, нестриминговым запросом",
+  );
+  assert.doesNotMatch(error.message, /IVA_MODEL_ADMISSION_CONSUMED/u);
+  assert.match(error.message, /broke off before message_stop/u);
+});
+
+test("целый ответ API, начатый словами «API Error», — ответ модели, а не отказ", async (t) => {
+  const upstream = await stubApi(
+    t,
+    relayAnswer("API Error: так называется глава"),
+  );
+  fakeCli(t, "relay");
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL, {
+      silenceTimeoutMs: 10_000,
+      upstream: upstream.url,
+    }).doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+  );
+  assert.equal(textOf(parts), "API Error: так называется глава");
+  assert.equal(finishOf(parts).finishReason.unified, "tool-calls");
+});
+
+test("текст ошибки из result CLI доезжает в отказ шага", async (t) => {
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, { type: "text", text: "" }),
+      blockDelta(0, { type: "text_delta", text: "Ответ" }),
+      blockStop(0),
+      MESSAGE_STOP,
+      assistantSays([{ type: "text", text: "Ответ" }], "end_turn"),
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        num_turns: 1,
+        usage: STEP_USAGE,
+        errors: ["Stream idle timeout - partial response received"],
+      },
+    ],
+    { FAKE_CLAUDE_EXIT: "1" },
+  );
+  const error = await failureOf(async () =>
+    drain(await makeClaudeCliModel(MODEL).doStream({ prompt: userPrompt() })),
+  );
+  assert.match(
+    error.message,
+    /error_during_execution \(exit 1\): Stream idle timeout - partial response received/u,
+  );
 });
 
 test("текст CLI, не совпавший с пойманным ответом, валит ход с понятной причиной", async (t) => {

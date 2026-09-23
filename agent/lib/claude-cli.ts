@@ -56,6 +56,7 @@ import type {
   SharedV4Warning,
 } from "@ai-sdk/provider";
 import {
+  ADMISSION_CONSUMED,
   startAdmission,
   type Admission,
   type NativeBlock,
@@ -93,12 +94,15 @@ const BACKEND_PREFIX = "CLAUDE_CODE_USE_";
  * Что CLI обязан видеть с этими значениями. Телеметрия и необязательный трафик выключены:
  * они уходят на чужие адреса, а ход — это запрос к api.anthropic.com и ничего больше.
  * Повторы выключены: реле допуска пропускает ОДИН запрос, и повтор CLI — это второй.
+ * Нестриминговый запрос после сбоя потока выключен по той же причине: это тоже второй POST,
+ * реле его отбивает, и вместо причины обрыва CLI печатает отказ реле.
  * Автосжатие выключено: историю держит eve, а сжатая CLI история ломает кэш подписки.
  */
 const CLAUDE_ENV: Record<string, string> = {
   ENABLE_TOOL_SEARCH: "false",
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
   CLAUDE_CODE_MAX_RETRIES: "0",
+  CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1",
   DISABLE_AUTO_COMPACT: "1",
   DISABLE_COMPACT: "1",
   CLAUDE_CODE_TOTAL_TOKENS_REMINDER: "off",
@@ -1308,8 +1312,9 @@ async function waitForExit(child: ChildProcess): Promise<number | null> {
   const closed = new Promise<void>((resolve) =>
     child.once("close", () => resolve()),
   );
-  const expired = new Promise<never>((_resolve, reject) =>
-    setTimeout(
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
       () =>
         reject(
           new ClaudeCliError(
@@ -1317,9 +1322,14 @@ async function waitForExit(child: ChildProcess): Promise<number | null> {
           ),
         ),
       CLAUDE_EXIT_GRACE_MS,
-    ),
-  );
-  await Promise.race([closed, expired]);
+    );
+  });
+  try {
+    await Promise.race([closed, expired]);
+  } finally {
+    // Процесс вышел — ожидание кончилось: взведённый таймер держал бы процесс Iva ещё 5 с.
+    clearTimeout(timer);
+  }
   return child.exitCode;
 }
 
@@ -1340,8 +1350,9 @@ function complete(
   const assistants = captured === null ? seen.assistants : [captured];
   const expected = failureExpected(admission, captured);
   // Ошибку, которую CLI назвал сам (assistant с `error` или текстом `API Error`), не глотаем —
-  // кроме той, о которой мы и просили: см. failureExpected.
-  if (seen.nativeError !== undefined && !expected)
+  // кроме той, о которой мы и просили (см. failureExpected), и кроме целого ответа, пойманного
+  // реле: правда в нём, а текст «API Error» в нём — слова модели.
+  if (seen.nativeError !== undefined && captured === null && !expected)
     throw new ClaudeCliError(`${seen.nativeError}${upstreamNote(admission)}`);
   const result = onlyResult(
     seen,
@@ -1361,8 +1372,10 @@ function complete(
 
 /**
  * Ответ, пойманный реле. Реле пропустило запрос, а целого ответа из него не собралось (не 200,
- * обрыв SSE посреди блока) — значит, ход оборвался на настоящем запросе. Это надо назвать, а не
- * подменять тем, что CLI успел напечатать: у него в такие минуты своя версия событий.
+ * обрыв SSE посреди блока) — значит, ход оборвался на настоящем запросе. Это надо назвать тем,
+ * что видело реле, а не подменять тем, что CLI успел напечатать: у него в такие минуты своя
+ * версия событий. Отказ реле на второй запрос CLI (ADMISSION_CONSUMED) — не причина обрыва,
+ * а его следствие, и в сообщение он не идёт.
  */
 function capturedMessage(
   admission: Admission,
@@ -1376,10 +1389,20 @@ function capturedMessage(
     captured !== null
   )
     return captured;
-  const detail = seen.nativeError === undefined ? "" : `: ${seen.nativeError}`;
+  const said = seen.nativeError;
+  const detail =
+    said === undefined || said.includes(ADMISSION_CONSUMED) ? "" : `: ${said}`;
   throw new ClaudeCliError(
-    `api.anthropic.com did not finish the response${upstreamNote(admission)}${detail}`,
+    `api.anthropic.com did not finish the response (${relayWitness(admission)})${detail}`,
   );
+}
+
+/** Что реле видело от api.anthropic.com, когда целого ответа не собралось. */
+function relayWitness(admission: Admission): string {
+  if (admission.status === undefined) return "no answer reached the relay";
+  if (admission.status !== 200)
+    return `api.anthropic.com answered HTTP ${admission.status}`;
+  return "the stream broke off before message_stop";
 }
 
 /**
@@ -1443,9 +1466,25 @@ function assertSuite(
 ): void {
   const subtype = text(result?.subtype);
   if (exit === 0 && result?.is_error !== true && subtype === "success") return;
+  const said = resultError(result);
   throw new ClaudeCliError(
-    `Claude CLI failed: ${subtype || "no subtype"}${exit === 0 ? "" : ` (exit ${String(exit)})`}`,
+    `Claude CLI failed: ${subtype || "no subtype"}${exit === 0 ? "" : ` (exit ${String(exit)})`}${said.length > 0 ? `: ${said}` : ""}`,
   );
+}
+
+/**
+ * Текст ошибки, который CLI положил в `result`. У `error_*` он в `errors` (массив строк), у
+ * `success` с `is_error` — в `result` (CLI 2.1.280, cli-2.1.280.strings.txt: `variant:{subtype:
+ * "error_during_execution",errors:…}` и `variant:{subtype:"success",…,result:…}`).
+ */
+function resultError(result: Record<string, unknown> | undefined): string {
+  const errors = Array.isArray(result?.errors)
+    ? result.errors.filter(
+        (entry): entry is string => typeof entry === "string",
+      )
+    : [];
+  if (errors.length > 0) return errors.join("; ");
+  return result?.is_error === true ? text(result.result) : "";
 }
 
 function upstreamNote(admission: Admission): string {

@@ -111,11 +111,17 @@ const SERVER_HEADERS = new Set([
   "date",
 ]);
 
+/**
+ * Имя отказа реле. Его печатает CLI, когда реле отбило второй запрос: по нему шаг отличает
+ * свой отказ от причины, по которой ответ оборвался.
+ */
+export const ADMISSION_CONSUMED = "IVA_MODEL_ADMISSION_CONSUMED";
+
 const DENIED_BODY = JSON.stringify({
   type: "error",
   error: {
     type: "invalid_request_error",
-    message: "IVA_MODEL_ADMISSION_CONSUMED",
+    message: ADMISSION_CONSUMED,
   },
 });
 
