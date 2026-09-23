@@ -19,17 +19,36 @@ export interface ClaudeModelOption {
   reasoningLevels: string[];
 }
 
+interface ClaudeModelChoice {
+  readonly id: string;
+  readonly label: string;
+}
+
 /** Три модели экрана «Модель · Claude», в порядке кнопок. Псевдонимы пикера
- *  (`default`, `opus[1m]`) и Haiku сюда не входят: в .env только эти id. */
-const CLAUDE_MODEL_CHOICES = [
+ *  (`default`, `opus[1m]`) и Haiku сюда не входят: в .env только эти id. `previous` — модель,
+ *  которую отдаёт пикер CLI постарше вместо текущей (CLI 2.1.278 на c1 23.09.2026 знал
+ *  Opus 5, а не 5.5): кнопка встаёт на то же место, пока новой модели в пикере нет. */
+const CLAUDE_MODEL_CHOICES: readonly (ClaudeModelChoice & {
+  readonly previous?: ClaudeModelChoice;
+})[] = [
   { id: "claude-fable-5-1", label: "Fable 5.1" },
-  { id: "claude-opus-5-5", label: "Opus 5.5" },
+  {
+    id: "claude-opus-5-5",
+    label: "Opus 5.5",
+    previous: { id: "claude-opus-5", label: "Opus 5" },
+  },
   { id: "claude-sonnet-5", label: "Sonnet 5" },
-] as const;
+];
+
+/** Каждая модель, которую экран умеет назвать: текущие и их предшественницы. */
+const CLAUDE_KNOWN_MODELS: readonly ClaudeModelChoice[] =
+  CLAUDE_MODEL_CHOICES.flatMap((choice) =>
+    choice.previous ? [choice, choice.previous] : [choice],
+  );
 
 /** Подпись известной модели; чужой id возвращается как есть, чтобы список не врал. */
 export function claudeModelLabel(id: string): string {
-  return CLAUDE_MODEL_CHOICES.find((choice) => choice.id === id)?.label ?? id;
+  return CLAUDE_KNOWN_MODELS.find((choice) => choice.id === id)?.label ?? id;
 }
 
 function claudeChoice(id: string): ClaudeModelOption {
@@ -411,19 +430,28 @@ function handshakeModels(stdout: string): unknown[] | null {
 function canonicalResolved(value: unknown): string | null {
   if (!isRecord(value) || typeof value.resolvedModel !== "string") return null;
   const id = value.resolvedModel.trim().replace(/\[1m\]$/u, "");
-  return CLAUDE_MODEL_CHOICES.some((choice) => choice.id === id) ? id : null;
+  return CLAUDE_KNOWN_MODELS.some((choice) => choice.id === id) ? id : null;
 }
 
-/** Три модели таблицы, которые пикер реально отдал. Пустое пересечение — вшитые три. */
+/** Модели таблицы, которые пикер реально отдал: на месте текущей — она сама, без неё —
+ *  её предшественница. Пустое пересечение — вшитые три. */
 function choicesFromPicker(models: readonly unknown[]): ClaudeModelOption[] {
   const found = new Set<string>();
   for (const value of models) {
     const id = canonicalResolved(value);
     if (id) found.add(id);
   }
-  const picked = CLAUDE_MODEL_CHOICES.filter((choice) => found.has(choice.id));
-  const source = picked.length > 0 ? picked : CLAUDE_MODEL_CHOICES;
-  return source.map((choice) => claudeChoice(choice.id));
+  const picked = CLAUDE_MODEL_CHOICES.flatMap((choice) => {
+    if (found.has(choice.id)) return [choice.id];
+    return choice.previous && found.has(choice.previous.id)
+      ? [choice.previous.id]
+      : [];
+  });
+  const source =
+    picked.length > 0
+      ? picked
+      : CLAUDE_MODEL_CHOICES.map((choice) => choice.id);
+  return source.map((id) => claudeChoice(id));
 }
 
 /**

@@ -224,9 +224,9 @@ test("the live handshake fixture yields Fable, Opus 5.5 and Sonnet", async (t) =
   assert.deepEqual(models, CLAUDE_THREE);
 });
 
-// Пикер c1 от 22.09.2026 ещё отдавал Opus 5: экран не выдаёт его за Opus 5.5 и показывает то,
-// что пикер реально предложил из таблицы.
-test("an older picker with Opus 5 shows Fable and Sonnet only", async (t) => {
+// Пикер CLI постарше (c1: 2.1.278, 22-23.09.2026) отдаёт Opus 5, а не 5.5: кнопка Opus не
+// пропадает, а встаёт на своё место с честной подписью той модели, которую CLI знает.
+test("an older picker with Opus 5 shows Fable, Opus 5 and Sonnet", async (t) => {
   const fixture = readFileSync(
     fileURLToPath(
       new URL("../fixtures/claude/c1-handshake.jsonl", import.meta.url),
@@ -236,10 +236,36 @@ test("an older picker with Opus 5 shows Fable and Sonnet only", async (t) => {
   const models = await listClaudeModels(
     envWith(t, "handshake", { FAKE_CLAUDE_PICKER: fixture.trim() }),
   );
-  assert.deepEqual(
-    models.map((option) => option.id),
-    ["claude-fable-5-1", "claude-sonnet-5"],
+  assert.deepEqual(models, [
+    { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
+    { id: "claude-opus-5", label: "Opus 5", reasoningLevels: [] },
+    { id: "claude-sonnet-5", label: "Sonnet 5", reasoningLevels: [] },
+  ]);
+});
+
+// Пикер, отдавший обе версии Opus, даёт одну кнопку — новую: предшественница нужна только
+// там, где новой нет.
+test("a picker with both Opus 5 and Opus 5.5 shows Opus 5.5 once", async (t) => {
+  const fixture = readFileSync(
+    fileURLToPath(
+      new URL("../fixtures/claude/handshake-2026-09-23.jsonl", import.meta.url),
+    ),
+    "utf8",
   );
+  const handshake = JSON.parse(fixture) as {
+    response: { response: { models: unknown[] } };
+  };
+  handshake.response.response.models.push({
+    value: "claude-opus-5[1m]",
+    resolvedModel: "claude-opus-5[1m]",
+    displayName: "Opus 5",
+  });
+  const models = await listClaudeModels(
+    envWith(t, "handshake", {
+      FAKE_CLAUDE_PICKER: JSON.stringify(handshake),
+    }),
+  );
+  assert.deepEqual(models, CLAUDE_THREE);
 });
 
 test("a picker without Fable omits it, and an empty picker uses the pinned three", async (t) => {
