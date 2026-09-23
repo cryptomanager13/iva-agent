@@ -28,6 +28,8 @@ interface RecordedRequest {
 
 interface RollupRun {
   readonly code: number | null;
+  /** Момент выхода процесса: остановка хода обязана случиться раньше. */
+  readonly exitAt: number;
   readonly stderr: string;
   readonly stdout: string;
 }
@@ -87,6 +89,13 @@ class FakeEve {
   readonly requests: RecordedRequest[] = [];
   readonly server: Server;
   mode: FakeMode = "own";
+  /** Сервер гасит ход не сразу после accepted, а через столько миллисекунд. */
+  confirmDelayMs = 0;
+  /** Ответы потока и отмены приходят с задержкой: медленный сервер. */
+  streamDelayMs = 0;
+  cancelDelayMs = 0;
+  /** Когда сервер реально погасил ход (дописал turn.cancelled). */
+  cancelledAt?: number;
   /** Файловый эффект хода: тест дописывает vault так, как это сделала бы модель. */
   onTurn?: (message: string) => void;
   #nextSession = 1;
@@ -142,14 +151,18 @@ class FakeEve {
 
     const cancel = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)\/cancel$/u);
     if (method === "POST" && cancel) {
+      await new Promise((resolve) => setTimeout(resolve, this.cancelDelayMs));
       const cancelled = decodeURIComponent(cancel[1] ?? "");
       // Отмена идущего хода: eve дописывает конец хода, клиент его дочитывает.
-      if (this.mode === "hang")
-        this.#events.set(cancelled, [
-          ...(this.#events.get(cancelled) ?? []),
-          event("turn.cancelled"),
-          event("session.waiting"),
-        ]);
+      if (this.mode === "hang" && this.cancelledAt === undefined)
+        setTimeout(() => {
+          this.cancelledAt = Date.now();
+          this.#events.set(cancelled, [
+            ...(this.#events.get(cancelled) ?? []),
+            event("turn.cancelled"),
+            event("session.waiting"),
+          ]);
+        }, this.confirmDelayMs);
       sendJson(
         response,
         this.mode === "foreign-cancel-confirmed"
@@ -165,6 +178,7 @@ class FakeEve {
 
     const stream = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)\/stream$/u);
     if (method === "GET" && stream) {
+      await new Promise((resolve) => setTimeout(resolve, this.streamDelayMs));
       const sessionId = decodeURIComponent(stream[1] ?? "");
       const events = this.#events.get(sessionId) ?? [];
       const startIndex = Number(url.searchParams.get("startIndex") ?? "0");
@@ -288,9 +302,13 @@ async function runRollup(
       clearTimeout(timer);
       rejectRun(error);
     });
+    let exitAt = 0;
+    child.once("exit", () => {
+      exitAt = Date.now();
+    });
     child.once("close", (code) => {
       clearTimeout(timer);
-      resolveRun({ code, stderr, stdout });
+      resolveRun({ code, exitAt, stderr, stdout });
     });
   });
 }
@@ -726,4 +744,72 @@ test("a report without the day marked done is a failed night, not a done one", a
 
   assert.equal(run.code, 1, run.stderr);
   assert.match(run.stderr, /not marked done/u);
+});
+
+for (const how of ["stop time", "SIGTERM"] as const) {
+  test(`on ${how} the process exits only after the server confirms the turn stopped`, async (t) => {
+    const fake = new FakeEve();
+    fake.mode = "hang";
+    // accepted приходит сразу, а ход гаснет через 1,5 с: выход раньше — живой писатель.
+    fake.confirmDelayMs = 1500;
+    const host = await fake.start();
+    const paths = makeRunDirectory();
+    t.after(async () => {
+      await fake.stop();
+      rmSync(paths.root, { force: true, recursive: true });
+    });
+    let child: import("node:child_process").ChildProcess | undefined;
+    if (how === "SIGTERM")
+      fake.onTurn = () => {
+        setTimeout(() => child?.kill("SIGTERM"), 300);
+      };
+
+    const run = await runRollup(host, paths, "monthly", {
+      env: {
+        IVA_JOB_STOP_AT: String(
+          Date.now() + (how === "stop time" ? 800 : 60_000),
+        ),
+      },
+      onChild: (spawned) => {
+        child = spawned;
+      },
+    });
+
+    assert.notEqual(run.code, 0);
+    assert.ok(fake.cancelledAt, "the server turn was stopped");
+    assert.ok(
+      fake.cancelledAt <= run.exitAt,
+      "the process exited before the server turn stopped",
+    );
+  });
+}
+
+test("SIGTERM while draining the stream before a send keeps the send from going out", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "hang";
+  fake.streamDelayMs = 600;
+  // Остановка дольше чтения потока: чтение кончится, пока процесс ещё гасит сессию.
+  fake.cancelDelayMs = 1200;
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  writeFileSync(
+    join(paths.data, SESSION_NAME),
+    JSON.stringify({ sessionId: "wrun_saved", createdAt: Date.now() }),
+  );
+  let child: import("node:child_process").ChildProcess | undefined;
+  setTimeout(() => child?.kill("SIGTERM"), 300);
+
+  const run = await runRollup(host, paths, "monthly", {
+    env: { IVA_JOB_STOP_AT: String(Date.now() + 60_000) },
+    onChild: (spawned) => {
+      child = spawned;
+    },
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.deepEqual(prompts(fake), [], "no turn may start after the stop");
 });

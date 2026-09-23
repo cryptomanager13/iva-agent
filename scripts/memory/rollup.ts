@@ -340,6 +340,9 @@ const remainingMs = (): number => STOP_AT - Date.now();
 // ход без отчёта. Выход процесса отпускает .memory.lock, а живой ход писал бы vault дальше.
 let live:
   { session: ClientSession; result?: Promise<MessageResult> } | undefined;
+// Остановка началась: ни один новый ход после неё не уходит на сервер (SIGTERM может
+// прийти, пока ход ещё дочитывает поток перед отправкой).
+let stopping = false;
 
 // Ход целиком (create/send + result) под сроком: резюм припаркованной сессии
 // после рестарта сервера может виснуть молча (vercel/eve#1450).
@@ -352,6 +355,8 @@ const guardedTurn = (
     async () => {
       if (session) live = { session };
       const send = async () => {
+        if (stopping)
+          throw new Error("rollup is stopping — the send is refused");
         const sentNotBefore = sentNotBeforeIso();
         if (session) {
           return {
@@ -389,6 +394,7 @@ const guardedTurn = (
 // Гасит ход на сервере вместе с его задачами и ждёт подтверждения. Без подтверждения
 // сессия брошена и сброшена: второго писателя за ней не будет.
 async function stopLive(reason: string): Promise<void> {
+  stopping = true;
   if (!live) return;
   const { session, result } = live;
   if (await cancelTurnAndConfirmQuietly(session, result)) return;
