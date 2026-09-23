@@ -137,7 +137,7 @@ function requestUrl(input: RequestInfo | URL): string {
 await test("ошибка шага claude не отравляет сессию", () => {
   const errors = [
     new ClaudeCliError(
-      "claude CLI not found on PATH; install it as iva: npm install -g --prefix ~/.local @anthropic-ai/claude-code, or point CLAUDE_COMMAND at the binary",
+      "Claude Code CLI not found (PATH: /usr/bin) — install it on the server as iva: npm install -g --prefix ~/.local @anthropic-ai/claude-code (or point CLAUDE_COMMAND at the binary)",
     ),
     new ClaudeCliError("API Error: 500 internal server error"),
     new ClaudeCliError("Claude CLI produced nothing for 180s"),
@@ -1483,13 +1483,13 @@ void test("claude: имя инструмента длиннее 54 символ�
   } catch (error) {
     failure = error;
   }
-  // Имя прошло claudeTools: вызов дошёл до запуска несуществующего бинаря.
+  // Имя прошло claudeTools: вызов дошёл до поиска бинаря перед запуском.
   assert.ok(
     failure instanceof Error,
     "вызов без CLI не может кончиться успехом",
   );
   assert.doesNotMatch(failure.message, /tool name/u);
-  assert.match(failure.message, /did not start/u);
+  assert.match(failure.message, /is not found or not executable/u);
 });
 
 function sse(chunks: unknown[]): Response {

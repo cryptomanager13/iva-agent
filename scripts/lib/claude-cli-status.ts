@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import {
-  claudeInstallHint,
+  claudeNotFound,
   resolveClaude,
   servicePath,
 } from "../../packages/claude-command/index.ts";
@@ -155,11 +155,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * есть только в шелле, даёт «не найден» — сервис там тоже не найдёт.
  */
 export function claudeBinary(env: ClaudeEnv = process.env): string[] | null {
-  return resolveClaude(
-    env.CLAUDE_COMMAND,
-    servicePath(dirname(process.execPath), homedir()),
-  );
+  return resolveClaude(env.CLAUDE_COMMAND, unitPath());
 }
+
+const unitPath = (): string =>
+  servicePath(dirname(process.execPath), homedir());
 
 /** PATH, которым пользуемся мы: свой плюс каталог node, которым запущен этот процесс. */
 function searchPath(env: ClaudeEnv): ClaudeEnv {
@@ -342,16 +342,16 @@ export async function claudeStatus(
   env: ClaudeEnv = process.env,
   options: ClaudeCliOptions = {},
 ): Promise<ClaudeStatus> {
-  return claudeBinary(env) ? claudeStatusRaw(env, options) : notInstalled();
+  return claudeBinary(env) ? claudeStatusRaw(env, options) : notInstalled(env);
 }
 
-const notInstalled = (): ClaudeStatus => ({
+const notInstalled = (env: ClaudeEnv): ClaudeStatus => ({
   installed: false,
   loggedIn: false,
   plan: "",
   conflict: null,
   ready: false,
-  hint: `Claude Code CLI not found — install it on the server ${claudeInstallHint()} (or point CLAUDE_COMMAND at the binary)`,
+  hint: claudeNotFound(env.CLAUDE_COMMAND, unitPath()),
 });
 
 function hintFor({

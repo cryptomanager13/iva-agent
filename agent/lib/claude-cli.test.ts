@@ -13,7 +13,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -1660,17 +1661,54 @@ test("переполненное окно — это оборванный отв
 
 test("нет бинаря — отказ с командой установки, а не молчание", async (t) => {
   fakeCli(t, "text");
-  process.env.CLAUDE_COMMAND = join(tmpdir(), "iva-no-such-claude");
+  const missing = join(tmpdir(), "iva-no-such-claude");
+  process.env.CLAUDE_COMMAND = missing;
   const model = makeClaudeCliModel(MODEL);
+  const broken = await failureOf(async () =>
+    drain(await model.doStream({ prompt: userPrompt() })),
+  );
+  assert.ok(
+    broken.message.startsWith(
+      `CLAUDE_COMMAND=${missing} is not found or not executable (PATH: `,
+    ),
+    broken.message,
+  );
+  // Без CLAUDE_COMMAND и с пустым PATH — команда установки и PATH, где искали.
+  const emptyDir = mkdtempSync(join(tmpdir(), "iva-empty-path-"));
+  const previousPath = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = previousPath;
+    rmSync(emptyDir, { recursive: true, force: true });
+  });
+  process.env.CLAUDE_COMMAND = "";
+  process.env.PATH = emptyDir;
   const error = await failureOf(async () =>
     drain(await model.doStream({ prompt: userPrompt() })),
   );
-  assert.match(error.message, /not found on PATH/u);
+  assert.ok(error.message.includes(`(PATH: ${emptyDir})`), error.message);
   assert.match(
     error.message,
     /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
   );
   assert.equal(classifyModelCallError(error), "recoverable");
+});
+
+// Подсказка установки зовёт userInfo(), а он бросает у uid без записи в passwd: успешный
+// запуск не должен её собирать.
+test("найденный CLI запускается, даже если userInfo() бросает", async (t) => {
+  fakeCli(t, "text");
+  t.mock.method(os, "userInfo", () => {
+    throw new Error("uv_os_get_passwd returned ENOENT");
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL).doStream({ prompt: userPrompt() }),
+  );
+  assert.equal(finishOf(parts).finishReason.unified, "stop");
 });
 
 test("doGenerate собирает тот же шаг в один результат", async (t) => {

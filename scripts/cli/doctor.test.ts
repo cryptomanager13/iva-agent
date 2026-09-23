@@ -2059,9 +2059,13 @@ async function diagnoseClaude(
 }
 
 test("doctor sends a claude installation to the CLI install and to its login", async (t) => {
-  const missing = await diagnoseClaude(t, {
-    CLAUDE_COMMAND: "/nonexistent/claude",
+  // Пустой HOME: `~/.local/bin` из PATH сервиса пуст, `claude` искать негде.
+  const previousHome = process.env.HOME;
+  process.env.HOME = await sandbox(t);
+  t.after(() => {
+    process.env.HOME = previousHome;
   });
+  const missing = await diagnoseClaude(t, { CLAUDE_COMMAND: "" });
   assert.equal(
     missing.bad.filter((message) => message.includes("Claude Code CLI")).length,
     1,
@@ -2070,6 +2074,18 @@ test("doctor sends a claude installation to the CLI install and to its login", a
   assert.match(
     missing.bad.join("\n"),
     /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
+  // Заданный CLAUDE_COMMAND называется сам: ставить CLI заново тут не поможет.
+  const broken = await diagnoseClaude(t, {
+    CLAUDE_COMMAND: "/nonexistent/claude",
+  });
+  assert.match(
+    broken.bad.join("\n"),
+    /CLAUDE_COMMAND=\/nonexistent\/claude is not found or not executable \(PATH: /u,
+  );
+  assert.equal(
+    broken.bad.some((message) => message.includes("npm install")),
+    false,
   );
 
   const loggedOut = await diagnoseClaude(t, {

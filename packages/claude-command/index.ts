@@ -24,6 +24,21 @@ export function claudeInstallHint(): string {
 }
 
 /**
+ * Почему CLI не найден, с PATH, по которому искали: одна строка для доктора, мастера и
+ * рантайма. Заданный `CLAUDE_COMMAND` называется сам; иначе — подсказка установки.
+ */
+export function claudeNotFound(
+  command: string | undefined,
+  pathValue: string | undefined,
+): string {
+  const configured = (command ?? "").trim();
+  const where = `PATH: ${pathValue ?? ""}`;
+  return configured
+    ? `CLAUDE_COMMAND=${configured} is not found or not executable (${where})`
+    : `Claude Code CLI not found (${where}) — install it on the server ${claudeInstallHint()} (or point CLAUDE_COMMAND at the binary)`;
+}
+
+/**
  * Команда CLI: `CLAUDE_COMMAND` (путь или имя, дальше аргументы через пробел; путь с
  * пробелом не поддерживается) или `claude`. Голова ищется по переданному PATH; не найдена —
  * null.

@@ -148,12 +148,27 @@ test("a logged-out CLI is told from a missing one, each with its own command", a
   );
   assert.equal(garbage.loggedIn, false);
 
-  const missing = await claudeStatus({ CLAUDE_COMMAND: "/nonexistent/claude" });
+  // Пустой HOME: `claude` нет нигде в PATH сервиса, и отказ называет этот PATH.
+  const home = scratch(t, "empty-home");
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    process.env.HOME = previousHome;
+  });
+  const missing = await claudeStatus({});
   assert.equal(missing.installed, false);
   assert.equal(missing.ready, false);
   assert.match(
     missing.hint,
     /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
+  assert.ok(missing.hint.includes(`${home}/.local/bin`), missing.hint);
+
+  const broken = await claudeStatus({ CLAUDE_COMMAND: "/nonexistent/claude" });
+  assert.equal(broken.installed, false);
+  assert.match(
+    broken.hint,
+    /^CLAUDE_COMMAND=\/nonexistent\/claude is not found or not executable \(PATH: /u,
   );
 });
 

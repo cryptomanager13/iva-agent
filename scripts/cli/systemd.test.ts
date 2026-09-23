@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { SERVICE_PATH_TAIL } from "../../packages/claude-command/index.ts";
 import { parseEnv } from "node:util";
 import fc from "fast-check";
 import { isAssistantBearer } from "../lib/assistant-auth.ts";
@@ -172,6 +173,14 @@ test("writeUnits writes every unit with its placeholders filled and closes the s
     assert.match(service, /^Environment=TZ=Europe\/Moscow$/m);
     assert.match(service, new RegExp(`^WorkingDirectory=${fx.project}$`, "m"));
     assert.match(service, /--host 127\.0\.0\.1$/m);
+    // PATH юнита — тот, по которому доктор ищет claude (packages/claude-command).
+    const nodeBin = createCliRuntime(fx.project).NODE_BIN_DIR;
+    assert.ok(
+      service
+        .split("\n")
+        .includes(`Environment=PATH=${nodeBin}:${SERVICE_PATH_TAIL}`),
+      service,
+    );
     assert.equal(
       unit(fx, "iva-brain.timer"),
       "OnCalendar=*-*-* 05:00:00 Europe/Moscow\n",

@@ -69,7 +69,7 @@ import {
 import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
 import { TOOL_NAME_MAX, wireToolName } from "./tool-wire-name.ts";
 import {
-  claudeInstallHint,
+  claudeNotFound,
   resolveClaude,
 } from "../../packages/claude-command/index.ts";
 
@@ -957,9 +957,10 @@ async function spawnClaude(
   argv: string[],
   options: SpawnOptions,
 ): Promise<ChildProcess> {
-  const install = `install it ${claudeInstallHint()}, or point CLAUDE_COMMAND at the binary`;
   if (command === null)
-    throw new ClaudeCliError(`claude CLI not found on PATH; ${install}`);
+    throw new ClaudeCliError(
+      claudeNotFound(options.env?.CLAUDE_COMMAND, options.env?.PATH),
+    );
   const [head, ...args] = command;
   const child = spawn(head, [...args, ...argv], options);
   return await new Promise<ChildProcess>((resolve, reject) => {
@@ -967,7 +968,7 @@ async function spawnClaude(
     child.once("error", (error: Error) =>
       reject(
         new ClaudeCliError(
-          `claude CLI (${head}) did not start: ${error.message}; ${install}`,
+          `claude CLI (${head}) did not start: ${error.message}`,
         ),
       ),
     );
