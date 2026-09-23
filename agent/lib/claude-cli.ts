@@ -15,10 +15,14 @@
 //      (claude-admission.ts). Оно пропускает первый POST /v1/messages и отбивает второй —
 //      поэтому шагов eve ровно столько же, сколько запросов к api.anthropic.com, а
 //      продолжение хода после tool_use делает eve, а не CLI.
-//   4. Наружу (в eve) уезжает то, что вернул настоящий ответ: текст потоком по
-//      stream_event text_delta, в конце — части tool-call, finish с расходом и причиной
-//      остановки. Расход берётся из ПЕРВОГО ответа (реле запомнило его целиком), а не из
-//      `result` CLI: у CLI свои представления о том, сколько он потратил.
+//   4. Наружу (в eve) уезжает то, что вернул настоящий ответ. Каждое событие stream_event с
+//      полезной нагрузкой уходит в момент прихода: text_delta — текстом, начало блока
+//      thinking и tool_use — началом рассуждения и вызова, их непустые дельты — дельтами.
+//      Ничего не копится до выхода CLI: сторож первой части в eve снимается только такой
+//      частью. Части tool-call уходят в конце, после сверки с ответом, который поймало реле,
+//      за ними finish с расходом и причиной остановки. Расход берётся из ПЕРВОГО ответа (реле
+//      запомнило его целиком), а не из `result` CLI: у CLI свои представления о том, сколько
+//      он потратил.
 //
 // Процесс CLI — в своей группе (detached), поэтому отмена хода убивает и его, и детей
 // (`process.kill(-pid)`), и не оставляет за собой висящих запросов. Тишина CLI дольше
@@ -636,7 +640,6 @@ function toolInput(input: unknown): unknown {
 /** Собирает содержимое шага из сообщений модели: текст, вызовы инструментов и расход. */
 export function readCompletion(
   messages: readonly NativeMessage[],
-  names: readonly string[],
   usage: Record<string, unknown> | undefined = messages.at(-1)?.usage,
 ): ClaudeCompletion {
   const blocks = messages.flatMap((message) => message.content ?? []);
@@ -649,7 +652,7 @@ export function readCompletion(
       .join(""),
     calls: blocks
       .filter((block) => block.type === "tool_use")
-      .map((block) => toolCall(block, names)),
+      .map((block) => toolCall(block)),
     stopReason: stopReasonOf(messages),
     usage: claudeUsage(usage),
     hasUsage:
@@ -658,21 +661,23 @@ export function readCompletion(
   };
 }
 
-function toolCall(
-  block: ClaudeBlock,
-  names: readonly string[],
-): ClaudeToolCall {
-  const name = text(block.name);
-  if (
-    !name.startsWith(CLAUDE_TOOL_PREFIX) ||
-    !names.includes(name.slice(CLAUDE_TOOL_PREFIX.length))
-  )
+/**
+ * Имя вызова для eve. Без префикса Iva это свой инструмент CLI (`Bash`, `Read`): Iva его не
+ * исполняет, и шаг отказывает. Имя с префиксом уходит как есть, даже если его нет в наборе
+ * шага: это ошибка модели, и eve отвечает на неё модели tool-error, как у любого вендора.
+ */
+function ivaToolName(wireName: string): string {
+  if (!wireName.startsWith(CLAUDE_TOOL_PREFIX))
     throw new ClaudeCliError(
-      `Claude returned a tool outside the current inventory: ${name}`,
+      `Claude returned a tool outside the current inventory: ${wireName}`,
     );
+  return wireName.slice(CLAUDE_TOOL_PREFIX.length);
+}
+
+function toolCall(block: ClaudeBlock): ClaudeToolCall {
   return {
     id: text(block.id),
-    name: name.slice(CLAUDE_TOOL_PREFIX.length),
+    name: ivaToolName(text(block.name)),
     // Отсутствующие аргументы — пустой объект (так их шлёт Anthropic для инструмента без
     // параметров), а всё остальное уезжает как есть, включая null: подменять значение модели
     // на своё — это выдумывать вызов, которого не было.
@@ -795,7 +800,6 @@ export function claudeCommand(
 
 type PreparedCall = {
   readonly frames: ClaudeFrame[];
-  readonly names: string[];
   readonly argv: string[];
 };
 
@@ -827,7 +831,7 @@ function prepareCall(
     }),
     "utf8",
   );
-  return { frames, names: tools.names, argv: claudeArgv(model, dir) };
+  return { frames, argv: claudeArgv(model, dir) };
 }
 
 function claudeArgv(model: string, dir: string): string[] {
@@ -1130,7 +1134,11 @@ type RunContext = {
 
 async function runCall(context: RunContext): Promise<void> {
   const { model, options, session, controller, run } = context;
-  const text = new TextStream();
+  const step: StepStream = {
+    text: new TextStream(),
+    blocks: new BlockStream(controller),
+    controller,
+  };
   try {
     const prepared = prepareCall(model, options, session);
     assertLive(options.abortSignal);
@@ -1155,18 +1163,18 @@ async function runCall(context: RunContext): Promise<void> {
       throw new ClaudeCliError("Claude CLI started without a stdout pipe");
     const events = silentFor(jsonLines(child.stdout), run.silenceMs);
     await writeFrames(child, prepared.frames, events);
-    const seen = await collect(events, text, controller);
+    const seen = await collect(events, step);
     const exit = await waitForExit(child);
     // Ход, снятый пока CLI отвечал, наружу не едет: eve его уже не ждёт, а убитый процесс
     // оставил бы огрызок ответа, который выглядел бы как настоящий.
     assertLive(options.abortSignal);
-    const completion = complete(admission, seen, exit, prepared.names);
+    const completion = complete(admission, seen, exit);
     // Уборка ДО первой части ответа: ни `finish`, ни `process.exit` по нему не должны обгонять
     // удаление системного промпта хода — иначе падение или рестарт сразу после шага оставляют
     // его в /tmp (QA: четыре папки после четырёх пробников). Ответ уже собран: ни реле, ни
     // временная папка дальше не нужны.
     await session.close();
-    emit(completion, text, admission, controller);
+    emit(completion, step, admission);
     report(model, completion, admission);
     controller.close();
   } finally {
@@ -1216,11 +1224,20 @@ type Collected = {
   readonly nativeError: string | undefined;
 };
 
-/** Читает ответ CLI до конца вывода: текст уезжает в поток сразу, остальное собирается. */
+/** Куда уходят части шага: текст, блоки рассуждения и вызовов и сам поток наружу. */
+type StepStream = {
+  readonly text: TextStream;
+  readonly blocks: BlockStream;
+  readonly controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>;
+};
+
+/**
+ * Читает ответ CLI до конца вывода: текст, рассуждение и начала вызовов уезжают в поток сразу,
+ * сообщения и итог собираются.
+ */
 async function collect(
   events: AsyncGenerator<Record<string, unknown>>,
-  text: TextStream,
-  controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
+  step: StepStream,
 ): Promise<Collected> {
   const assistants: NativeMessage[] = [];
   const results: Record<string, unknown>[] = [];
@@ -1234,7 +1251,7 @@ async function collect(
         assistants.push(assistant.message);
     } else if (event.type === "result") results.push(event);
     else if (event.type === "stream_event") {
-      stopped = applyStreamEvent(event, text, controller) || stopped;
+      stopped = applyStreamEvent(event, step) || stopped;
     }
   }
   return { assistants, results, stopped, nativeError };
@@ -1263,18 +1280,157 @@ function textOf(message: NativeMessage): string {
     .join("");
 }
 
-/** Дельта частичного сообщения: текст едет наружу, `message_stop` отмечает конец ответа. */
+/**
+ * Событие частичного сообщения: текст уходит в TextStream, всё остальное — в BlockStream,
+ * `message_stop` отмечает конец ответа.
+ */
 function applyStreamEvent(
   event: Record<string, unknown>,
-  text: TextStream,
-  controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
+  step: StepStream,
 ): boolean {
-  const native = event.event as Record<string, unknown> | undefined;
-  if (native?.type === "message_stop") return true;
-  const delta = native?.delta as Record<string, unknown> | undefined;
+  const native = asRecord(event.event);
+  if (native === undefined) return false;
+  if (native.type === "message_stop") return true;
+  const delta = asRecord(native.delta);
   if (delta?.type === "text_delta" && typeof delta.text === "string")
-    text.push(delta.text, controller);
+    step.text.push(delta.text, step.controller);
+  else step.blocks.apply(native);
   return false;
+}
+
+/** Приёмник частей: поток шага наружу, а в тесте — запись. */
+type PartSink = { enqueue(part: LanguageModelV4StreamPart): void };
+
+type BlockKind = "reasoning" | "tool";
+
+type OpenBlock = { readonly kind: BlockKind; readonly id: string };
+
+type StreamedCall = { readonly id: string; readonly name: string };
+
+/** Какие блоки ответа идут наружу и каким видом. Текст ведёт TextStream, прочее не идёт. */
+const BLOCK_KINDS: Readonly<Record<string, BlockKind>> = {
+  thinking: "reasoning",
+  redacted_thinking: "reasoning",
+  tool_use: "tool",
+};
+
+/** Какую дельту несёт блок каждого вида и в каком поле. Дельта чужого вида частей не даёт. */
+const BLOCK_DELTAS: Readonly<
+  Record<BlockKind, { readonly type: string; readonly field: string }>
+> = {
+  reasoning: { type: "thinking_delta", field: "thinking" },
+  tool: { type: "input_json_delta", field: "partial_json" },
+};
+
+const BLOCK_PARTS = {
+  reasoning: {
+    delta: "reasoning-delta",
+    end: "reasoning-end",
+  },
+  tool: {
+    delta: "tool-input-delta",
+    end: "tool-input-end",
+  },
+} as const;
+
+/**
+ * Блоки рассуждения и вызовов в момент прихода. Начало блока — `reasoning-start` или
+ * `tool-input-start`, непустая дельта своего вида — `*-delta`, `content_block_stop` — `*-end`.
+ * Индексы блоков в каждом сообщении начинаются с нуля, а сообщений за запуск бывает несколько,
+ * поэтому карта индексов сбрасывается на `message_start`; блоки, которые к этому моменту не
+ * закрылись, закрывает `close`.
+ */
+export class BlockStream {
+  private readonly byIndex = new Map<number, OpenBlock>();
+  private readonly unclosed = new Set<OpenBlock>();
+  private readonly started: StreamedCall[] = [];
+  private readonly sink: PartSink;
+
+  constructor(sink: PartSink) {
+    this.sink = sink;
+  }
+
+  /** Вызовы, чьё начало ушло наружу, в порядке прихода. */
+  get tools(): readonly StreamedCall[] {
+    return this.started;
+  }
+
+  apply(native: Record<string, unknown>): void {
+    if (native.type === "message_start") this.byIndex.clear();
+    const index = native.index;
+    if (typeof index !== "number") return;
+    if (native.type === "content_block_start")
+      this.start(index, asRecord(native.content_block));
+    else if (native.type === "content_block_delta")
+      this.delta(index, asRecord(native.delta));
+    else if (native.type === "content_block_stop") this.end(index);
+  }
+
+  /** Закрывает всё, что не закрыл CLI: перед вызовами шаг обязан закончить блоки. */
+  close(): void {
+    for (const block of this.unclosed) this.finish(block);
+    this.byIndex.clear();
+  }
+
+  private start(
+    index: number,
+    block: Record<string, unknown> | undefined,
+  ): void {
+    this.byIndex.delete(index);
+    const kind = BLOCK_KINDS[text(block?.type)];
+    if (block === undefined || kind === undefined) return;
+    const open =
+      kind === "tool" ? this.startTool(block) : this.startReasoning();
+    this.byIndex.set(index, open);
+    this.unclosed.add(open);
+  }
+
+  private startReasoning(): OpenBlock {
+    const id = `rsn-${randomUUID()}`;
+    this.sink.enqueue({ type: "reasoning-start", id });
+    return { kind: "reasoning", id };
+  }
+
+  private startTool(block: Record<string, unknown>): OpenBlock {
+    const toolName = ivaToolName(text(block.name));
+    const id = text(block.id);
+    if (id.length === 0 || this.started.some((call) => call.id === id))
+      throw new ClaudeCliError(
+        `Claude streamed a tool call without a unique id: ${JSON.stringify(id)}`,
+      );
+    this.started.push({ id, name: toolName });
+    this.sink.enqueue({ type: "tool-input-start", id, toolName });
+    return { kind: "tool", id };
+  }
+
+  private delta(
+    index: number,
+    delta: Record<string, unknown> | undefined,
+  ): void {
+    const open = this.byIndex.get(index);
+    if (open === undefined || delta === undefined) return;
+    const expected = BLOCK_DELTAS[open.kind];
+    if (delta.type !== expected.type) return;
+    const chunk = text(delta[expected.field]);
+    if (chunk.length === 0) return;
+    this.sink.enqueue({
+      type: BLOCK_PARTS[open.kind].delta,
+      id: open.id,
+      delta: chunk,
+    });
+  }
+
+  private end(index: number): void {
+    const open = this.byIndex.get(index);
+    if (open === undefined) return;
+    this.byIndex.delete(index);
+    this.finish(open);
+  }
+
+  private finish(open: OpenBlock): void {
+    this.unclosed.delete(open);
+    this.sink.enqueue({ type: BLOCK_PARTS[open.kind].end, id: open.id });
+  }
 }
 
 /** Копит текст ответа и держит один текстовый блок открытым, пока в него что-то едет. */
@@ -1344,7 +1500,6 @@ function complete(
   admission: Admission,
   seen: Collected,
   exit: number | null,
-  names: readonly string[],
 ): ClaudeCompletion {
   const captured = capturedMessage(admission, seen);
   const assistants = captured === null ? seen.assistants : [captured];
@@ -1362,7 +1517,6 @@ function complete(
   );
   const completion = readCompletion(
     assistants,
-    names,
     captured === null ? asRecord(result?.usage) : captured.usage,
   );
   if (!expected && !isToolBoundary(completion, result, exit))
@@ -1494,17 +1648,20 @@ function upstreamNote(admission: Admission): string {
 }
 
 /**
- * Отдаёт шаг наружу: текст, вызовы инструментов, расход и причина остановки. Уборка уже
- * позади, а поток закрывает вызывающий (см. runCall).
+ * Отдаёт шаг наружу: хвост текста, конец открытых блоков, вызовы инструментов, расход и
+ * причина остановки. Вызовы уходят только здесь, после сверки: eve начинает исполнять вызов,
+ * как только его увидит. Уборка уже позади, а поток закрывает вызывающий (см. runCall).
  */
 function emit(
   completion: ClaudeCompletion,
-  text: TextStream,
+  step: StepStream,
   admission: Admission,
-  controller: ReadableStreamDefaultController<LanguageModelV4StreamPart>,
 ): void {
-  reconcile(text, completion.text, controller);
-  text.close(controller);
+  const { controller } = step;
+  matchStreamedCalls(step.blocks.tools, completion.calls);
+  reconcile(step.text, completion.text, controller);
+  step.text.close(controller);
+  step.blocks.close();
   for (const call of completion.calls)
     controller.enqueue({
       type: "tool-call",
@@ -1525,6 +1682,30 @@ function emit(
       },
     },
   });
+}
+
+/**
+ * Вызовы, начатые в потоке, обязаны быть началом вызовов ответа: те же id и имена в том же
+ * порядке. Хвост, который CLI не допечатал, — норма: он уходит `tool-call` без начала блока.
+ */
+function matchStreamedCalls(
+  streamed: readonly StreamedCall[],
+  calls: readonly ClaudeToolCall[],
+): void {
+  const matches = streamed.every(
+    (call, index) =>
+      call.id === calls[index]?.id && call.name === calls[index]?.name,
+  );
+  if (!matches)
+    throw new ClaudeCliError(
+      `Claude CLI streamed tool calls [${callList(streamed)}] that differ from the response it received [${callList(calls)}]`,
+    );
+}
+
+function callList(
+  calls: readonly { readonly id: string; readonly name: string }[],
+): string {
+  return calls.map((call) => `${call.name}#${call.id}`).join(", ");
 }
 
 /** Хвост ответа, не доехавший дельтами: реле могло получить больше, чем CLI успел напечатать. */

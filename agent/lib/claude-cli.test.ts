@@ -421,6 +421,47 @@ function relayAnswer(text: string): string[] {
   ];
 }
 
+/** Ответ Anthropic из одних вызовов weather: по блоку tool_use на каждый id. */
+function relayCalls(ids: readonly string[]): string[] {
+  return [
+    sse("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_relay",
+        type: "message",
+        role: "assistant",
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: 11, output_tokens: 1 },
+      },
+    }),
+    ...ids.flatMap((id, index) => [
+      sse("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: {
+          type: "tool_use",
+          id,
+          name: `${CLAUDE_TOOL_PREFIX}weather`,
+          input: {},
+        },
+      }),
+      sse("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: '{"city":"Ташкент"}' },
+      }),
+      sse("content_block_stop", { type: "content_block_stop", index }),
+    ]),
+    sse("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use", stop_sequence: null },
+      usage: { output_tokens: 12 },
+    }),
+    sse("message_stop", { type: "message_stop" }),
+  ];
+}
+
 /** Что заглушка API увидела от реле: адрес запроса и заголовки хода. */
 type SeenRequest = {
   readonly url: string | undefined;
@@ -569,12 +610,22 @@ async function failureOf(
 
 type ScriptStep = Record<string, unknown>;
 
+/** Пауза внутри сценария: сторож первой части считает время, и тест меряет его же. */
+const PAUSE_MS = 1_000;
 const STEP_USAGE = { input_tokens: 11, output_tokens: 4 };
 const MESSAGE_START = streamEvent({
   type: "message_start",
   message: { id: "msg_1" },
 });
 const MESSAGE_STOP = streamEvent({ type: "message_stop" });
+const MAX_TURNS: ScriptStep = {
+  type: "result",
+  subtype: "error_max_turns",
+  is_error: true,
+  num_turns: 2,
+  usage: STEP_USAGE,
+};
+
 function streamEvent(event: Record<string, unknown>): ScriptStep {
   return { type: "stream_event", event };
 }
@@ -593,6 +644,14 @@ function blockDelta(index: number, delta: Record<string, unknown>): ScriptStep {
 
 function blockStop(index: number): ScriptStep {
   return streamEvent({ type: "content_block_stop", index });
+}
+
+function toolUse(
+  id: string,
+  wireName: string,
+  input: unknown = { city: "Ташкент" },
+): Record<string, unknown> {
+  return { type: "tool_use", id, name: wireName, input };
 }
 
 function assistantSays(
@@ -619,6 +678,35 @@ function scriptCli(
     FAKE_CLAUDE_SCRIPT: JSON.stringify(steps),
     ...env,
   });
+}
+
+type Timed = { readonly part: LanguageModelV4StreamPart; readonly at: number };
+
+/** Части шага с моментом прихода; ошибка, которой кончился поток, возвращается рядом. */
+async function timed(
+  result: LanguageModelV4StreamResult,
+): Promise<{ parts: Timed[]; error: unknown }> {
+  const parts: Timed[] = [];
+  const reader = result.stream.getReader();
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done === true) return { parts, error: undefined };
+      parts.push({ part: next.value, at: performance.now() });
+    }
+  } catch (error) {
+    return { parts, error };
+  }
+}
+
+function momentOf(parts: readonly Timed[], type: string): number {
+  const found = parts.find((entry) => entry.part.type === type);
+  assert.ok(found !== undefined, `в потоке есть ${type}`);
+  return found.at;
+}
+
+function untimed(parts: readonly Timed[]): LanguageModelV4StreamPart[] {
+  return parts.map((entry) => entry.part);
 }
 
 // ─── Нормальный ход ─────────────────────────────────────────────────────────────────────
@@ -802,6 +890,252 @@ test("инструмент вне списка — отказ, а не вызо�
   );
   assert.equal(error.name, "ClaudeCliError");
   assert.match(error.message, /outside the current inventory: Bash/u);
+});
+
+// Сторож первой части (provider.ts) снимается только содержательной частью. Модель, которая
+// думает и зовёт инструмент без текста, обязана подать её на старте блока: иначе на большом
+// контексте шаг умирает на 90 с, пока CLI ещё отвечает (#239).
+test("думающая модель подаёт голос на старте блока, а не после выхода CLI", async (t) => {
+  const weather = `${CLAUDE_TOOL_PREFIX}weather`;
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, { type: "thinking", thinking: "" }),
+      blockDelta(0, { type: "thinking_delta", thinking: "" }),
+      blockDelta(0, { type: "signature_delta", signature: "sig" }),
+      { pause: PAUSE_MS },
+      blockStart(1, toolUse("toolu_1", weather, {})),
+      blockDelta(1, {
+        type: "input_json_delta",
+        partial_json: '{"city":"Ташкент"}',
+      }),
+      blockStop(1),
+      MESSAGE_STOP,
+      assistantSays([toolUse("toolu_1", weather)]),
+      MAX_TURNS,
+    ],
+    { FAKE_CLAUDE_EXIT: "1" },
+  );
+  const { parts, error } = await timed(
+    await makeClaudeCliModel(MODEL).doStream({
+      prompt: userPrompt(),
+      tools: [WEATHER],
+    }),
+  );
+  assert.equal(error, undefined);
+  assert.equal(
+    parts[1]?.part.type,
+    "reasoning-start",
+    "первая часть после stream-start — начало рассуждения",
+  );
+  assert.ok(
+    momentOf(parts, "tool-call") - momentOf(parts, "reasoning-start") >=
+      0.8 * PAUSE_MS,
+    "начало рассуждения ушло до паузы, а не вместе с вызовом",
+  );
+  const [start] = partsOfType(untimed(parts), "tool-input-start");
+  const [call] = partsOfType(untimed(parts), "tool-call");
+  assert.equal(start?.id, call?.toolCallId);
+  assert.equal(start?.toolName, "weather");
+});
+
+test("вызов инструмента объявляется на старте блока, до его аргументов", async (t) => {
+  const weather = `${CLAUDE_TOOL_PREFIX}weather`;
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, toolUse("toolu_1", weather, {})),
+      { pause: PAUSE_MS },
+      blockDelta(0, {
+        type: "input_json_delta",
+        partial_json: '{"city":"Ташкент"}',
+      }),
+      blockStop(0),
+      MESSAGE_STOP,
+      assistantSays([toolUse("toolu_1", weather)]),
+      MAX_TURNS,
+    ],
+    { FAKE_CLAUDE_EXIT: "1" },
+  );
+  const { parts, error } = await timed(
+    await makeClaudeCliModel(MODEL).doStream({
+      prompt: userPrompt(),
+      tools: [WEATHER],
+    }),
+  );
+  assert.equal(error, undefined);
+  assert.ok(
+    momentOf(parts, "tool-call") - momentOf(parts, "tool-input-start") >=
+      0.8 * PAUSE_MS,
+    "начало вызова ушло до паузы в его аргументах",
+  );
+  assert.deepEqual(
+    partsOfType(untimed(parts), "tool-input-delta").map((part) => part.delta),
+    ['{"city":"Ташкент"}'],
+  );
+});
+
+test("свой инструмент CLI отвергается на старте блока, не дожидаясь конца ответа", async (t) => {
+  scriptCli(t, [
+    MESSAGE_START,
+    blockStart(0, toolUse("toolu_9", "Bash", {})),
+    { pause: 5_000 },
+  ]);
+  const started = performance.now();
+  const { parts, error } = await timed(
+    await makeClaudeCliModel(MODEL).doStream({
+      prompt: userPrompt(),
+      tools: [WEATHER],
+    }),
+  );
+  assert.ok(error instanceof ClaudeCliError);
+  assert.match(error.message, /outside the current inventory: Bash/u);
+  assert.ok(performance.now() - started < 4_000, "отказ раньше конца паузы");
+  assert.equal(partsOfType(untimed(parts), "tool-input-start").length, 0);
+});
+
+// Имя с префиксом Iva, которого нет в наборе шага, — ошибка модели, а не поломка шага: eve
+// отвечает на неё модели tool-error, как у любого другого вендора.
+test("незнакомый инструмент Iva уходит в eve, а не роняет шаг", async (t) => {
+  const unknown = `${CLAUDE_TOOL_PREFIX}not_offered`;
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, toolUse("toolu_1", unknown, {})),
+      blockDelta(0, { type: "input_json_delta", partial_json: "{}" }),
+      blockStop(0),
+      MESSAGE_STOP,
+      assistantSays([toolUse("toolu_1", unknown, {})]),
+      MAX_TURNS,
+    ],
+    { FAKE_CLAUDE_EXIT: "1" },
+  );
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL).doStream({
+      prompt: userPrompt(),
+      tools: [WEATHER],
+    }),
+  );
+  assert.deepEqual(
+    partsOfType(parts, "tool-input-start").map((part) => part.toolName),
+    ["not_offered"],
+  );
+  assert.deepEqual(
+    partsOfType(parts, "tool-call").map((part) => [part.toolName, part.input]),
+    [["not_offered", "{}"]],
+  );
+});
+
+test("вызов в потоке, не совпавший с пойманным ответом, валит шаг без подмены", async (t) => {
+  const upstream = await stubApi(t, relayAnswer("В Ташкенте +31"));
+  const weather = `${CLAUDE_TOOL_PREFIX}weather`;
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(1, toolUse("toolu_other", weather, {})),
+      blockStop(1),
+      MESSAGE_STOP,
+      assistantSays([toolUse("toolu_other", weather)]),
+      MAX_TURNS,
+    ],
+    { FAKE_CLAUDE_RELAY: "1", FAKE_CLAUDE_EXIT: "1" },
+  );
+  const { parts, error } = await timed(
+    await makeClaudeCliModel(MODEL, {
+      silenceTimeoutMs: 10_000,
+      upstream: upstream.url,
+    }).doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+  );
+  assert.ok(error instanceof ClaudeCliError);
+  assert.match(error.message, /toolu_other/u);
+  assert.equal(partsOfType(untimed(parts), "tool-call").length, 0);
+});
+
+// CLI оборвал вывод, а реле поймало ответ целиком: недоехавший вызов уходит без начала блока.
+test("вызов, не доехавший до потока, уходит из пойманного ответа", async (t) => {
+  const upstream = await stubApi(t, relayCalls(["toolu_a", "toolu_b"]));
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, toolUse("toolu_a", `${CLAUDE_TOOL_PREFIX}weather`, {})),
+      blockDelta(0, {
+        type: "input_json_delta",
+        partial_json: '{"city":"Ташкент"}',
+      }),
+      blockStop(0),
+      MAX_TURNS,
+    ],
+    { FAKE_CLAUDE_RELAY: "1", FAKE_CLAUDE_EXIT: "1" },
+  );
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL, {
+      silenceTimeoutMs: 10_000,
+      upstream: upstream.url,
+    }).doStream({ prompt: userPrompt(), tools: [WEATHER] }),
+  );
+  assert.deepEqual(
+    partsOfType(parts, "tool-input-start").map((part) => part.id),
+    ["toolu_a"],
+  );
+  assert.deepEqual(
+    partsOfType(parts, "tool-call").map((part) => part.toolCallId),
+    ["toolu_a", "toolu_b"],
+  );
+});
+
+// eve на tool-input-start выгружает накопленный текст отдельным сообщением, поэтому хвост
+// текста, дописанный сверкой, уезжает после начала вызова. Порядок закреплён здесь.
+test("хвост текста, дописанный сверкой, идёт после начала вызова и до самого вызова", async (t) => {
+  const weather = `${CLAUDE_TOOL_PREFIX}weather`;
+  scriptCli(
+    t,
+    [
+      MESSAGE_START,
+      blockStart(0, { type: "text", text: "" }),
+      blockDelta(0, { type: "text_delta", text: "Сейчас " }),
+      blockStart(1, toolUse("toolu_1", weather, {})),
+      blockDelta(1, {
+        type: "input_json_delta",
+        partial_json: '{"city":"Ташкент"}',
+      }),
+      blockStop(1),
+      MESSAGE_STOP,
+      assistantSays([
+        { type: "text", text: "Сейчас посмотрю" },
+        toolUse("toolu_1", weather),
+      ]),
+      MAX_TURNS,
+    ],
+    { FAKE_CLAUDE_EXIT: "1" },
+  );
+  const parts = await drain(
+    await makeClaudeCliModel(MODEL).doStream({
+      prompt: userPrompt(),
+      tools: [WEATHER],
+    }),
+  );
+  assert.deepEqual(
+    parts.map((part) =>
+      part.type === "text-delta" ? `${part.type}:${part.delta}` : part.type,
+    ),
+    [
+      "stream-start",
+      "text-start",
+      "text-delta:Сейчас ",
+      "tool-input-start",
+      "tool-input-delta",
+      "tool-input-end",
+      "text-delta:посмотрю",
+      "text-end",
+      "tool-call",
+      "finish",
+    ],
+  );
 });
 
 test("ошибка API в assistant доезжает текстом и остаётся поправимой", async (t) => {
@@ -1538,25 +1872,22 @@ test("расход складывает весь вход и отдельно н
 });
 
 test("readCompletion берёт текст, вызовы и причину из сообщений модели", () => {
-  const completion = readCompletion(
-    [
-      {
-        content: [
-          { type: "thinking", thinking: "думаю" },
-          { type: "text", text: "Иду " },
-          {
-            type: "tool_use",
-            id: "toolu_1",
-            name: `${CLAUDE_TOOL_PREFIX}weather`,
-            input: { city: "Ташкент" },
-          },
-        ],
-        stop_reason: "tool_use",
-        usage: { input_tokens: 5, output_tokens: 2 },
-      },
-    ],
-    ["weather"],
-  );
+  const completion = readCompletion([
+    {
+      content: [
+        { type: "thinking", thinking: "думаю" },
+        { type: "text", text: "Иду " },
+        {
+          type: "tool_use",
+          id: "toolu_1",
+          name: `${CLAUDE_TOOL_PREFIX}weather`,
+          input: { city: "Ташкент" },
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    },
+  ]);
   assert.equal(completion.text, "Иду ");
   assert.deepEqual(completion.calls, [
     { id: "toolu_1", name: "weather", input: '{"city":"Ташкент"}' },
@@ -1564,5 +1895,5 @@ test("readCompletion берёт текст, вызовы и причину из 
   assert.equal(completion.stopReason, "tool_use");
   assert.equal(completion.usage.inputTokens.total, 5);
   assert.equal(completion.hasUsage, true);
-  assert.equal(readCompletion([], []).hasUsage, false);
+  assert.equal(readCompletion([]).hasUsage, false);
 });

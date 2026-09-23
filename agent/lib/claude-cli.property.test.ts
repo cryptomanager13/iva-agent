@@ -56,7 +56,7 @@ test("обратный перевод: кадры ассистента дают 
   console.error(`[claude-cli property] seed ${SEED}, прогонов ${RUNS}`);
   fc.assert(
     fc.property(nativeMessageArbitrary(), (generated) => {
-      const completion = readCompletion([generated.message], generated.names);
+      const completion = readCompletion([generated.message]);
       assert.equal(completion.text, generated.text);
       // Пустой шаг не оставляет в промпте кадра ассистента: замыкать нечего.
       fc.pre(completion.text.length > 0 || completion.calls.length > 0);
@@ -89,7 +89,7 @@ test("обратный перевод: кадры ассистента дают 
         { role: "user", content: [{ type: "text", text: "дальше" }] },
       ];
       const frames = claudeHistory(prompt).frames;
-      const back = readCompletion([frames[0].message], ["weather", "remind"]);
+      const back = readCompletion([frames[0].message]);
       assert.equal(back.text, completion.text);
       assert.deepEqual(back.calls, completion.calls);
     }),
@@ -97,7 +97,9 @@ test("обратный перевод: кадры ассистента дают 
   );
 });
 
-test("инструмент вне списка — отказ на любом имени", () => {
+// Имя без префикса Iva — свой инструмент CLI, и шаг отказывает. Имя с префиксом уходит в eve
+// как есть, даже если его нет в наборе шага: на ошибку модели eve отвечает ей tool-error.
+test("инструмент без префикса Iva — отказ на любом имени, с префиксом — вызов", () => {
   console.error(`[claude-cli property] seed ${SEED}, прогонов ${RUNS}`);
   fc.assert(
     fc.property(
@@ -110,14 +112,16 @@ test("инструмент вне списка — отказ на любом и
           name: (prefixed ? CLAUDE_TOOL_PREFIX : "") + name,
           input: {},
         };
-        if (prefixed && name === "weather")
-          assert.equal(
-            readCompletion([{ content: [block] }], ["weather"]).calls.length,
-            1,
+        if (prefixed)
+          assert.deepEqual(
+            readCompletion([{ content: [block] }]).calls.map(
+              (call) => call.name,
+            ),
+            [name],
           );
         else
           assert.throws(
-            () => readCompletion([{ content: [block] }], ["weather"]),
+            () => readCompletion([{ content: [block] }]),
             ClaudeCliError,
           );
       },
@@ -280,7 +284,6 @@ function promptArbitrary(): fc.Arbitrary<LanguageModelV4Prompt> {
 /** Сообщение модели (нативный ответ), каким его собирает реле: блоки, текст, вызовы. */
 function nativeMessageArbitrary(): fc.Arbitrary<{
   message: NativeMessage;
-  names: string[];
   calls: [string, string][];
   inputs: unknown[];
   text: string;
@@ -326,7 +329,6 @@ function nativeMessageArbitrary(): fc.Arbitrary<{
     };
     return fc.constant({
       message,
-      names: ["weather", "remind"],
       calls,
       inputs,
       text,
