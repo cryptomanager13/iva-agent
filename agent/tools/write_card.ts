@@ -20,6 +20,12 @@ import { resolveTimeZone } from "../lib/timezone.js";
 import { resolveVaultDir } from "@iva/vault-dir";
 import { vaultDirErrorText } from "../lib/vault-error.ts";
 import { commitVaultWrite } from "../lib/vault-commit.ts";
+import {
+  brokenLinksError,
+  relatedTarget,
+  unresolvedLinkTargets,
+  wikilinkTargets,
+} from "../lib/vault-links.ts";
 
 // Строго типизированная запись карточки памяти. Заменяет «write_file по наитию» для карточек:
 // zod-enum на type/status берётся из autograph schema.json (единый источник правды), поэтому
@@ -541,6 +547,18 @@ function cardSlug(rel: string): string {
   return rel.slice(rel.lastIndexOf("/") + 1).replace(/\.md$/u, "");
 }
 
+/** Ссылка в никуда роняет health score графа, а ночной graph.fix её не чинит: резолвится
+ * она ничем. Проверяется ВХОД (тело и related), а не слитая карточка: за старые битые
+ * ссылки в ней отвечает не этот вызов. Зовётся перед записью, после структурных отказов:
+ * их текст точнее, и он должен доходить первым. */
+function brokenLinksRefusal(card: CardWrite): CardOutcome | null {
+  const broken = unresolvedLinkTargets(
+    [...wikilinkTargets(card.body), ...(card.related ?? []).map(relatedTarget)],
+    { vaultDir: card.root, source: card.rel.replace(/\.md$/u, "") },
+  );
+  return broken.length ? { ok: false, error: brokenLinksError(broken) } : null;
+}
+
 /** Запись под локом: что лежит на диске, какая операция из этого следует, отказы по
  * состоянию, слияние, атомарная запись и коммит затронутого пути. Коммит идёт под тем же
  * локом: история памяти повторяет порядок правок карточки. */
@@ -570,6 +588,8 @@ async function writeLockedCard(card: CardWrite): Promise<CardOutcome> {
     replaceBody: card.replace_body === true,
     title: card.title,
   });
+  const brokenLinks = brokenLinksRefusal(card);
+  if (brokenLinks !== null) return brokenLinks;
   if (action !== "noop") {
     atomicWrite(card.file, content);
     await commitVaultWrite(

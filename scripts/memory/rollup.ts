@@ -28,6 +28,7 @@ import {
   rollupRanBefore,
 } from "../lib/notice-policy.ts";
 import { resolveDataDir } from "../lib/data-dir.ts";
+import { childLinkRule } from "../lib/rollup-children.ts";
 import { resolveTimeZone } from "../lib/timezone.ts";
 import { notificationChat } from "../lib/notification-chat.ts";
 import { readCore } from "./read-core.ts";
@@ -113,6 +114,51 @@ function shiftDate(iso: string, deltaDays: number): string {
 // We take the target period as COMPLETED: schedules fire at the start of a new period
 // (daily ≈04:00, weekly on Mon, monthly on the 1st, yearly on Jan 1), so we process
 // the PREVIOUS period, not the empty current one (now is the current local date).
+// Задание ночи для daily: разбор сырого дня в карточки, сводка дня, CORE и уроки.
+function dailyTask(yesterday: string): string {
+  return (
+    `Process the raw transcript of the completed day (${VAULT()}/daily/${yesterday}.md): ` +
+    `extract entities and create/update autograph cards. Prefer the write_card tool over write_file ` +
+    `for cards — it enforces the schema. For each fact choose one operation: ADD (new), ` +
+    `UPDATE (existing subject, compatible new fact), SUPERSEDE (contradicts the Compiled Truth), ` +
+    `or NOOP (already known). Pass history_entry only for SUPERSEDE, never for ADD, UPDATE, or NOOP. ` +
+    `On SUPERSEDE: REWRITE the card's Compiled Truth (frontmatter + top description) to the new fact ` +
+    `and pass the OLD value through history_entry as a single dated line 'YYYY-MM-DD: fact' — ` +
+    `the fact the card holds now, matched against the card's body ('Owner: Alice.' becomes ` +
+    `'2026-07-31: Owner: Alice'; a summary is refused) — the fact's own date, not today's; ` +
+    `write_card owns the '## History' section. ` +
+    `A card 'body' is facts only, with no H1/H2 headings: write_card builds the card ` +
+    `structure itself (the title, '## Log', '## Related', '## History') and refuses a body ` +
+    `that carries a heading of its own. ` +
+    `Never leave two contradictory Compiled Truths; History is append-only, never edited. ` +
+    `Tag each fact's certainty with 'confidence:' — EXTRACTED (user stated it directly) or ` +
+    `INFERRED (you deduced it). ` +
+    `Emotional venting and momentary states ("I'm useless", "wasted the whole day", tiredness, ` +
+    `frustration) are NEVER identity-level facts: never put them into CORE or entity cards. ` +
+    `At most mention them as a dated mood line in the daily-summary, or — only if clearly worth ` +
+    `keeping — a note card with status: archived. ` +
+    `First read ${VAULT()}/.graph/supersede-candidates.json (the deterministic conflict scan) and ` +
+    `resolve every listed same-entity conflict by superseding the stale card. ` +
+    `Then assemble a daily-summary for ${yesterday} with the day's topics and MOC links down to the cards ` +
+    `and to the raw transcript daily/${yesterday}.md. ` +
+    `Link a card only by the 'file' path write_card returned in this turn, or by a path memory_search ` +
+    `or read_file showed you; never derive a path from a title — a slug is lowercased, its punctuation ` +
+    `becomes '-', and it is cut at 60 characters, so a derived path points at no file. ` +
+    `Then ${VAULT()}/CORE.md, per the ${INSTRUCTIONS}/rules/core-format.md rule. If the day produced ` +
+    `no new durable fact, preference, goal or behavioral lesson, do not open or write CORE.md. ` +
+    `Otherwise edit only the affected lines; never rewrite the file; keep every existing section, ` +
+    `including ones not in the template. The pointer to the last day is set by code — leave it alone. ` +
+    `Keep the file ≤~${CORE_CAP} characters — compress on overflow, don't bloat. ` +
+    `Separately, reflect on the day's interactions: for each notable exchange judge the outcome — ` +
+    `useful, dead_end, or corrected (user corrected you, asked again, or was dissatisfied). ` +
+    `When a corrected/dead_end outcome reveals a REPEATABLE behavioral lesson (not a one-off fix), ` +
+    `add/refine ONE dated line in the CORE Preferences section (e.g. '- 2026-07: отвечать короче, ` +
+    `без преамбул') so you don't repeat it. Keep lessons recency-ordered, drop the stalest when the ` +
+    `section grows; a lesson consistently honored for weeks can be dropped. Skip this whole step if ` +
+    `the day held no corrections (no-op — don't invent lessons). `
+  );
+}
+
 function buildPrompt(p: Period, now: string): string {
   const [y, m] = now.split("-").map(Number);
   const yesterday = shiftDate(now, -1);
@@ -132,52 +178,14 @@ function buildPrompt(p: Period, now: string): string {
 
   switch (p) {
     case "daily":
-      return (
-        intro +
-        `Process the raw transcript of the completed day (${VAULT()}/daily/${yesterday}.md): ` +
-        `extract entities and create/update autograph cards. Prefer the write_card tool over write_file ` +
-        `for cards — it enforces the schema. For each fact choose one operation: ADD (new), ` +
-        `UPDATE (existing subject, compatible new fact), SUPERSEDE (contradicts the Compiled Truth), ` +
-        `or NOOP (already known). Pass history_entry only for SUPERSEDE, never for ADD, UPDATE, or NOOP. ` +
-        `On SUPERSEDE: REWRITE the card's Compiled Truth (frontmatter + top description) to the new fact ` +
-        `and pass the OLD value through history_entry as a single dated line 'YYYY-MM-DD: fact' — ` +
-        `the fact the card holds now, matched against the card's body ('Owner: Alice.' becomes ` +
-        `'2026-07-31: Owner: Alice'; a summary is refused) — the fact's own date, not today's; ` +
-        `write_card owns the '## History' section. ` +
-        `A card 'body' is facts only, with no H1/H2 headings: write_card builds the card ` +
-        `structure itself (the title, '## Log', '## Related', '## History') and refuses a body ` +
-        `that carries a heading of its own. ` +
-        `Never leave two contradictory Compiled Truths; History is append-only, never edited. ` +
-        `Tag each fact's certainty with 'confidence:' — EXTRACTED (user stated it directly) or ` +
-        `INFERRED (you deduced it). ` +
-        `Emotional venting and momentary states ("I'm useless", "wasted the whole day", tiredness, ` +
-        `frustration) are NEVER identity-level facts: never put them into CORE or entity cards. ` +
-        `At most mention them as a dated mood line in the daily-summary, or — only if clearly worth ` +
-        `keeping — a note card with status: archived. ` +
-        `First read ${VAULT()}/.graph/supersede-candidates.json (the deterministic conflict scan) and ` +
-        `resolve every listed same-entity conflict by superseding the stale card. ` +
-        `Then assemble a daily-summary for ${yesterday} with the day's topics and MOC links down to the cards ` +
-        `and to the raw transcript daily/${yesterday}.md. ` +
-        `Then ${VAULT()}/CORE.md, per the ${INSTRUCTIONS}/rules/core-format.md rule. If the day produced ` +
-        `no new durable fact, preference, goal or behavioral lesson, do not open or write CORE.md. ` +
-        `Otherwise edit only the affected lines; never rewrite the file; keep every existing section, ` +
-        `including ones not in the template. The pointer to the last day is set by code — leave it alone. ` +
-        `Keep the file ≤~${CORE_CAP} characters — compress on overflow, don't bloat. ` +
-        `Separately, reflect on the day's interactions: for each notable exchange judge the outcome — ` +
-        `useful, dead_end, or corrected (user corrected you, asked again, or was dissatisfied). ` +
-        `When a corrected/dead_end outcome reveals a REPEATABLE behavioral lesson (not a one-off fix), ` +
-        `add/refine ONE dated line in the CORE Preferences section (e.g. '- 2026-07: отвечать короче, ` +
-        `без преамбул') so you don't repeat it. Keep lessons recency-ordered, drop the stalest when the ` +
-        `section grows; a lesson consistently honored for weeks can be dropped. Skip this whole step if ` +
-        `the day held no corrections (no-op — don't invent lessons). ` +
-        tail
-      );
+      return intro + dailyTask(yesterday) + tail;
     case "weekly":
       return (
         intro +
         `Assemble a weekly-summary for the completed week (7 days ending ${yesterday}): ` +
         `read the daily-summaries of those 7 days, pull out cross-cutting topics and the week's takeaways, ` +
         `create a weekly-summary with MOC links down to those daily-summaries. ` +
+        childLinkRule("weekly", yesterday, VAULT()) +
         tail
       );
     case "monthly":
@@ -186,6 +194,7 @@ function buildPrompt(p: Period, now: string): string {
         `Assemble a monthly-summary for the completed month ${prevMonth}: ` +
         `read the weekly-summaries of month ${prevMonth}, pull out the main topics and the month's takeaways, ` +
         `create a monthly-summary with MOC links down to the weekly summaries. ` +
+        childLinkRule("monthly", prevMonth, VAULT()) +
         tail
       );
     case "yearly":
@@ -194,6 +203,7 @@ function buildPrompt(p: Period, now: string): string {
         `Assemble a yearly-summary for the completed year ${prevYear}: ` +
         `read the monthly-summaries of year ${prevYear}, pull out the main topics and the year's takeaways, ` +
         `create a yearly-summary with MOC links down to the monthly summaries. ` +
+        childLinkRule("yearly", prevYear, VAULT()) +
         tail
       );
   }
