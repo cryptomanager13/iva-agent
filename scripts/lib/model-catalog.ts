@@ -4,6 +4,7 @@
 import { listCodexModelCatalog } from "./codex-oauth.ts";
 import {
   claudeModelLabel,
+  claudeReasoningLevels,
   claudeStatus,
   listClaudeModels,
   type ClaudeEnv,
@@ -282,7 +283,9 @@ export function providerEnvKeys(provider: ProviderCatalogEntry): string[] {
 // catalog carries a model-specific subset.
 // custom is deliberately absent: an unknown endpoint has promised nothing about
 // reasoning_effort, and sending it blind risks an HTTP 400 on every turn.
-const REASONING_PROVIDERS = new Set(["ollama", "opencode", "codex"]);
+// claude carries levels per model (claudeReasoningLevels): the CLI sends them as
+// output_config.effort, and only to models with adaptive thinking.
+const REASONING_PROVIDERS = new Set(["ollama", "opencode", "codex", "claude"]);
 
 export const providerSupportsReasoning = (provider: string): boolean =>
   REASONING_PROVIDERS.has(provider);
@@ -294,11 +297,14 @@ const optionsFor = (
   models: readonly string[],
 ): ModelOption[] =>
   models.map((id) => {
-    const label = provider === "claude" ? claudeModelLabel(id) : "";
+    const claude = provider === "claude";
+    const label = claude ? claudeModelLabel(id) : "";
     return {
       id,
       ...(label && label !== id ? { label } : {}),
-      reasoningLevels: providerFallbackReasoningLevels(provider),
+      reasoningLevels: claude
+        ? claudeReasoningLevels(id)
+        : providerFallbackReasoningLevels(provider),
     };
   });
 

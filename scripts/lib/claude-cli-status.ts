@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { accessSync, constants, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
 
 export type ClaudeEnv = Readonly<Record<string, string | undefined>>;
 
@@ -51,8 +52,27 @@ export function claudeModelLabel(id: string): string {
   return CLAUDE_KNOWN_MODELS.find((choice) => choice.id === id)?.label ?? id;
 }
 
+/** Уровни рассуждения подписки: тот же словарь без `minimal`, что у рантайма
+ *  (`CLAUDE_EFFORTS` в agent/lib/claude-cli.ts, на `minimal` подписка отвечает 400).
+ *  Живьём 23.09.2026 (CLI 2.1.280): low…max приняты у Sonnet 5, max у Fable 5.1, xhigh и
+ *  max у Opus 5.5. Сверку с рантаймом держит зеркальный тест. */
+const CLAUDE_REASONING_LEVELS: readonly string[] =
+  CANONICAL_REASONING_EFFORTS.filter((effort) => effort !== "minimal");
+
+/** Уровни модели: у каждой модели экрана adaptive thinking есть (таблица рантайма), у Haiku
+ *  и чужого id — нет, и кнопок им не рисуем. */
+export function claudeReasoningLevels(id: string): string[] {
+  return CLAUDE_KNOWN_MODELS.some((choice) => choice.id === id)
+    ? [...CLAUDE_REASONING_LEVELS]
+    : [];
+}
+
 function claudeChoice(id: string): ClaudeModelOption {
-  return { id, label: claudeModelLabel(id), reasoningLevels: [] };
+  return {
+    id,
+    label: claudeModelLabel(id),
+    reasoningLevels: claudeReasoningLevels(id),
+  };
 }
 
 /** Установка и вход живут в шелле сервера: в Telegram их за владельца не сделать. */
@@ -605,7 +625,11 @@ export async function probeClaudeModel(
     }),
   );
   if (!result.failed && probeAnswered(result.stdout))
-    return { id: model, reasoningLevels: [], answered: true };
+    return {
+      id: model,
+      reasoningLevels: claudeReasoningLevels(model),
+      answered: true,
+    };
   throw new ClaudeCliError(
     "model_unavailable",
     result.failed

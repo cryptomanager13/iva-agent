@@ -15,10 +15,12 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { claudeConflicts } from "#lib/claude-cli.ts";
+import { claudeConflicts, claudeEffort, claudeModel } from "#lib/claude-cli.ts";
+import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
 import {
   claudeBinary,
   claudeContextWindow,
+  claudeReasoningLevels,
   claudeStatus,
   ClaudeCliError,
   firstConflict,
@@ -196,11 +198,47 @@ test("both halves refuse the same variables, and the same values", () => {
     );
 });
 
+/** Уровни, которые подписка приняла живьём 23.09.2026 (CLI 2.1.280). */
+const CLAUDE_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
 const CLAUDE_THREE = [
-  { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
-  { id: "claude-opus-5-5", label: "Opus 5.5", reasoningLevels: [] },
-  { id: "claude-sonnet-5", label: "Sonnet 5", reasoningLevels: [] },
+  {
+    id: "claude-fable-5-1",
+    label: "Fable 5.1",
+    reasoningLevels: CLAUDE_LEVELS,
+  },
+  { id: "claude-opus-5-5", label: "Opus 5.5", reasoningLevels: CLAUDE_LEVELS },
+  { id: "claude-sonnet-5", label: "Sonnet 5", reasoningLevels: CLAUDE_LEVELS },
 ];
+
+// Кнопки уровней и тело запроса рантайма — две руки одного правила: уровень у модели есть
+// ровно тогда, когда рантайм шлёт ей adaptive thinking, и каждый уровень рантайм пропускает
+// в output_config.effort. Разъедься они — кнопка писала бы в .env то, что до модели не едет.
+test("reasoning levels mirror the runtime: adaptive models only, efforts it sends", () => {
+  const ids = [
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5-20251001",
+    "claude-someday-9",
+  ];
+  for (const id of ids)
+    assert.equal(
+      claudeReasoningLevels(id).length > 0,
+      claudeModel(id).adaptive,
+      id,
+    );
+  assert.deepEqual(claudeReasoningLevels("claude-haiku-4-5-20251001"), []);
+  assert.deepEqual(claudeReasoningLevels("claude-someday-9"), []);
+  assert.deepEqual(
+    claudeReasoningLevels("claude-sonnet-5"),
+    CANONICAL_REASONING_EFFORTS.filter(
+      (effort) => claudeEffort(effort) !== undefined,
+    ),
+  );
+  assert.deepEqual(claudeReasoningLevels("claude-sonnet-5"), CLAUDE_LEVELS);
+});
 
 test("the model list is the three named models, aliases and haiku dropped", async (t) => {
   const models = await listClaudeModels(envWith(t, "handshake"));
@@ -237,9 +275,17 @@ test("an older picker with Opus 5 shows Fable, Opus 5 and Sonnet", async (t) => 
     envWith(t, "handshake", { FAKE_CLAUDE_PICKER: fixture.trim() }),
   );
   assert.deepEqual(models, [
-    { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
-    { id: "claude-opus-5", label: "Opus 5", reasoningLevels: [] },
-    { id: "claude-sonnet-5", label: "Sonnet 5", reasoningLevels: [] },
+    {
+      id: "claude-fable-5-1",
+      label: "Fable 5.1",
+      reasoningLevels: CLAUDE_LEVELS,
+    },
+    { id: "claude-opus-5", label: "Opus 5", reasoningLevels: CLAUDE_LEVELS },
+    {
+      id: "claude-sonnet-5",
+      label: "Sonnet 5",
+      reasoningLevels: CLAUDE_LEVELS,
+    },
   ]);
 });
 
@@ -363,6 +409,7 @@ test("the live probe accepts text and a tool call, and names any other answer", 
   );
   assert.equal(text.answered, true);
   assert.equal(text.id, "claude-fable-5-1");
+  assert.deepEqual(text.reasoningLevels, CLAUDE_LEVELS);
 
   // Ход с инструментом — штатная граница: модель ответила вызовом, CLI остановился на
   // --max-turns. Это ответ, а не отказ (как answered у OpenRouter).

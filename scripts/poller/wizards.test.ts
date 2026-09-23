@@ -519,3 +519,74 @@ test("the claude model screen asks the CLI picker", async (t) => {
   );
   assert.doesNotMatch(screen, /haiku|\[1m\]/u);
 });
+
+// Уровни рассуждения Claude: экран моделей несёт их у каждой модели, выбор модели ведёт на
+// шаг уровня, а не сохраняет сразу с пустым усилием, — и выбранный уровень уезжает в .env.
+// Раньше пустой список уровней стирал THINKING_EFFORT при каждой смене модели Claude.
+test("picking a claude model asks the thinking level, and saving writes THINKING_EFFORT", async (t) => {
+  telegramSpy(t);
+  const fake = useWizardClaude(t);
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+  const st = flows.start(
+    4102052,
+    "9104222",
+    "model",
+  ) as unknown as WizardStateForTest;
+  st.step = "provider";
+
+  await wizardPickProvider(st as never, "claude");
+  const levels = ["low", "medium", "high", "xhigh", "max"];
+  for (const option of st.modelOptions)
+    assert.deepEqual(option.reasoningLevels, levels, option.id);
+
+  const option = selectWizardModel(st, "1");
+  assert.equal(option?.id, "claude-opus-5-5");
+  assert.deepEqual(st.efforts, levels);
+  assert.equal(wizardActionAllowed({ step: "effort" }, "eff:xhigh"), true);
+  assert.equal(selectWizardEffort(st, "minimal"), false);
+  assert.equal(selectWizardEffort(st, "xhigh"), true);
+
+  let written: Record<string, string | null> = {};
+  await validateAndSaveWizard(st as never, {
+    readEnv: async () => ({ THINKING_EFFORT: "high" }),
+    validate: () =>
+      Promise.resolve({ id: "claude-opus-5-5", reasoningLevels: levels }),
+    write: (updates: Record<string, string | null>) => {
+      written = updates;
+      return Promise.resolve();
+    },
+  });
+  assert.deepEqual(written, {
+    THINKING_EFFORT: "xhigh",
+    MODEL_PROVIDER: "claude",
+    CLAUDE_MODEL: "claude-opus-5-5",
+  });
+});
+
+test("/think on claude shows the model's thinking levels and the current one", async (t) => {
+  const sent = telegramSpy(t);
+  const fake = useWizardClaude(t);
+  writeFileSync(
+    fake.authFile,
+    JSON.stringify({ loggedIn: true, subscriptionType: "max" }),
+  );
+
+  await handleThinkCmd(4102053, "9104223", {
+    readEnv: async () => ({
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: "claude-sonnet-5",
+      THINKING_EFFORT: "max",
+    }),
+  });
+
+  const texts = sent.map((call) => call.text).join("\n");
+  assert.doesNotMatch(texts, /unavailable for|недоступны для/u);
+  assert.match(texts, /claude-sonnet-5: max/u);
+  // Кнопки уровней рисуются из st.efforts: шаг «effort» и есть экран с ними.
+  const st = getWizard(4102053, "9104223") as unknown as WizardStateForTest;
+  assert.equal(st.step, "effort");
+  assert.deepEqual(st.efforts, ["low", "medium", "high", "xhigh", "max"]);
+});

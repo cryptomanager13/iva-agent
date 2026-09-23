@@ -184,6 +184,13 @@ test("the claude catalog asks the CLI, and falls back to the pinned list", async
     fallback.map((option) => option.label),
     ["Fable 5.1", "Opus 5.5", "Sonnet 5"],
   );
+  // Вшитый список несёт те же уровни, что и живой: без CLI экран всё равно спросит уровень.
+  for (const option of fallback)
+    assert.deepEqual(
+      option.reasoningLevels,
+      ["low", "medium", "high", "xhigh", "max"],
+      option.id,
+    );
   // Вшитый список — те же три имени, что у экрана.
   assert.deepEqual(CATALOG.claude.models, [
     "claude-fable-5-1",
