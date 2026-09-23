@@ -75,7 +75,7 @@ export class RollupTurnTimeoutError extends Error {
 
 // Отмена и её подтверждение вместе укладываются в срок остановки раннера с запасом на
 // выход процесса: и после своего срока, и после SIGTERM ход гасится до SIGKILL.
-export const DEFAULT_CANCEL_TIMEOUT_MS = JOB_STOP_GRACE_MS / 3;
+const DEFAULT_CANCEL_TIMEOUT_MS = JOB_STOP_GRACE_MS / 3;
 
 // Любой сетевой отказ send двусмысленен: сервер мог принять ход до обрыва ответа.
 // Без отмены retry безопасен только для штатного 409 session_not_active от eve.
