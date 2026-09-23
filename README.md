@@ -163,7 +163,19 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 ## What's New
 
 <details>
-<summary><b>v0.4.6 · 22.09.2026 — expand the latest releases</b></summary>
+<summary><b>v0.4.7 · 23.09.2026 — expand the latest releases</b></summary>
+
+### 23.09.2026
+
+#### v0.4.7
+
+- 🧠 **Opus 5.5 replaces Opus 5 on the Claude model screen**: `/model` → Claude offers Fable 5.1, Opus 5.5 and Sonnet 5 and writes `claude-opus-5-5` to `.env`; the short name `opus` now means Opus 5.5, and an old `claude-opus-5` in `.env` keeps working.
+- 🤖 **GPT-6 Sol and Luna on the OpenAI subscription**: Iva asks for the subscription's models as codex client 0.156.0, so the screen shows `gpt-6-sol` and `gpt-6-luna`, which the backend hides from older clients. The effort from `/think` reaches them too: the SDK used to drop it silently for a model id it did not know.
+- 🔕 **The "Working" status and /update messages arrive without a sound**: technical lines no longer buzz the phone. The model can send a whole reply quietly too, with `<!-- iva:silent -->` on its first line, for low-urgency news or when the owner's rules ask for it (#232, thanks @yakovmakovets).
+- ⏰ **A schedule that succeeded no longer wakes the model**: a successful run is recorded by code and ends there, without a model turn and without a technical message in the chat; a turn that explains what happened is left for failures only (#233, thanks @yakovmakovets).
+- 🔗 **Links to nowhere are refused at write time**: `write_card` and `write_file` refuse a markdown file inside the vault whose `[[link]]` points at no file and name the broken targets; weekly, monthly and yearly Rollups link only summaries that exist (#224, thanks @AndyShaman).
+- 📎 **An attachment of any format is not a broken link**: the nightly graph check accepts a link to `attachments/…` with any extension, DOCX included, as long as it is a regular file inside the vault (#229, thanks @yakovmakovets).
+- 🔎 **Glob and grep see the vault through a symlink**: relative `cwd` and `path` start at the vault root, as `read_file` does, and the walk follows symlinked folders without visiting the same real folder twice.
 
 ### 22.09.2026
 
@@ -187,15 +199,6 @@ Default model is deepseek-v4-pro, 131k context. On Go it runs about $14–15/mo 
 - 🧾 **A fact in a card never changes silently**: an update with a new `description` used to erase the old value without a trace. Now the previous value goes to `## History` in a line dated by code only; swapped numbers and names, a changed sign or a negation count as a change of fact, case and spacing do not.
 - 🗂 **Every memory write is its own commit in the vault's git**: `write_card`, `write_file` inside the vault and `CORE.md` edits each leave a commit with exactly their own paths, so one broken card can be reverted. Someone else's uncommitted work is never swept in, the commit goes only to the vault's own repository, a git failure never fails the write, and Brain commits without a remote too.
 - 🩹 **The "iva repair" advice is replaced with a command that exists**: the nightly alert about unreadable files now advises `iva update --force`.
-
-### 17.09.2026
-
-#### v0.4.4
-
-- ⏰ **A reminder is an instruction Iva gives her future self**: at the due minute the text of the reminder is the prompt of one fresh turn with tools, not a line to read back — "in 3 minutes find the news and send it" arrives as the news, not as its own wording. A turn that could not run, failed or came back empty still delivers: the code sends your text verbatim and names the cause in the row.
-- ⏰ **A reminder comes back to the chat it was asked in**: the row remembers the chat and the topic of the turn, so a reminder set in a group topic lands in that topic instead of a private chat; old rows and requests that did not come from Telegram still go to the owner's chat. `iva doctor` stopped claiming "the dispatcher has not ticked yet" — it was reading the pulse from the wrong folder.
-- 🔁 **`/update --force` works from the chat too**: the word after `/update` is read now, so the running build can be rebuilt from Telegram exactly as `iva update --force` does on the server — the way out of a broken edit in Iva's own code. The flag travels in the request file, so a restarted update rebuilds as well.
-- 🩺 **The doctor names the cure for stuck workflows**: "running count 7 exceeds 5" now says in the same line that such runs are stale rather than live, and that `iva reset` quarantines them and restarts the services; memory is left alone.
 
 </details>
 
