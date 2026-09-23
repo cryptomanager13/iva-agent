@@ -26,6 +26,13 @@ import type {
   LanguageModelV4StreamResult,
 } from "@ai-sdk/provider";
 import { classifyModelCallError } from "../../node_modules/eve/dist/src/harness/model-call-error.js";
+
+// Свой TMPDIR на файл: тест «временная папка уходит раньше» считает папки iva-claude-* в
+// tmpdir(), а pre-push гоняет файлы параллельно — чужой ход с тем же префиксом в общем /tmp
+// делал его красным без дефекта. os.tmpdir() читает TMPDIR на каждом вызове.
+const PRIVATE_TMP = mkdtempSync(join(tmpdir(), "iva-claude-cli-test-"));
+process.env.TMPDIR = PRIVATE_TMP;
+process.on("exit", () => rmSync(PRIVATE_TMP, { recursive: true, force: true }));
 import {
   CLAUDE_SILENCE_TIMEOUT_MS,
   claudeModel,
