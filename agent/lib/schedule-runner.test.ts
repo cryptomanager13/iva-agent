@@ -923,3 +923,23 @@ void test("the child reads its stop time from the runner, never from a stale ser
   // Работа кончается за срок остановки до SIGTERM: сводка успевает погасить ход сама.
   assert.equal(seen!.env?.IVA_JOB_STOP_AT, String(1_000_000 + 5000 - 1000));
 });
+
+void test("a throwing log still settles the run with both causes", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  const result = await runScheduledJob({
+    name: "digest",
+    argv: ["ok.ts"],
+    root,
+    nodeBin: process.execPath,
+    log: () => {
+      throw new Error("log is broken");
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.error instanceof AggregateError);
+  assert.deepEqual(
+    result.error.errors.map((error: Error) => error.message),
+    ["log is broken", "log is broken"],
+  );
+});
