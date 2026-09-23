@@ -229,6 +229,54 @@ test("grep резолвит относительный path от vault-симл�
   );
 });
 
+// #242: ночной memory-daily подал grep путь от корня проекта (`vault/daily/…`), тул
+// приклеил его к корню vault и упал на vault/vault/… с ENOENT.
+test("read_file, grep и glob принимают путь с префиксом vault/ от корня проекта", async () => {
+  const [read, grep, glob] = await fromSymlinkedVault(async () => [
+    settled(
+      await readFileTool.execute(
+        { path: "vault/projects/x/needle.md" },
+        testToolContext("read_file"),
+      ),
+    ),
+    settled(
+      await grepTool.execute(
+        { pattern: "T57", path: "vault/projects/x/needle.md" },
+        testToolContext("grep"),
+      ),
+    ),
+    settled(
+      await globTool.execute(
+        { pattern: "*.md", cwd: "vault/projects/x" },
+        testToolContext("glob"),
+      ),
+    ),
+  ]);
+  assert.match(String(read.content), /T57/);
+  assert.equal(grep.count, 1, `grep: ${JSON.stringify(grep)}`);
+  assert.deepEqual(glob, ["alias.md", "needle.md"]);
+});
+
+test("настоящий vault/vault/ внутри vault по-прежнему первичен", async () => {
+  const nested = join(REAL_VAULT, "vault");
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(nested, "inner.md"), "вложенный T99\n", "utf8");
+  try {
+    const grep = await fromSymlinkedVault(async () =>
+      settled(
+        await grepTool.execute(
+          { pattern: "T99", path: "vault" },
+          testToolContext("grep"),
+        ),
+      ),
+    );
+    assert.equal(grep.count, 1, `grep: ${JSON.stringify(grep)}`);
+    assert.equal(basename(grep.matches[0].file), "inner.md");
+  } finally {
+    rmSync(nested, { recursive: true, force: true });
+  }
+});
+
 test(
   "цикл симлинков не зацикливает glob и grep",
   { timeout: 2_000 },

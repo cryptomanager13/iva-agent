@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveVaultDir } from "@iva/vault-dir";
 
 const IGNORE_DIRS = new Set([
@@ -34,10 +35,27 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${expression}$`);
 }
 
-export function resolveVaultToolRoot(path?: string): string {
-  if (path !== undefined && isAbsolute(path)) return path;
+// Относительный путь тулов чтения (read_file, grep, glob) считается от корня vault, а
+// write_file и bash — от корня проекта. Модель путает контракты и подаёт `vault/daily/x.md`,
+// который от корня vault становится vault/vault/daily/x.md → ENOENT (#199, #242). Если
+// такого пути в vault нет, а тот же путь от рабочего каталога указывает ВНУТРЬ vault,
+// берём его: оба прочтения ведут в один vault, настоящий vault/vault/ по-прежнему первичен.
+export function resolveVaultToolPath(path: string): string {
+  if (isAbsolute(path)) return path;
   const vault = resolveVaultDir(process.cwd());
-  return path === undefined ? vault : resolve(vault, path);
+  const fromVault = resolve(vault, path);
+  if (existsSync(fromVault)) return fromVault;
+  const fromCwd = resolve(process.cwd(), path);
+  const inside = relative(vault, fromCwd);
+  const withinVault =
+    inside === "" || (!inside.startsWith("..") && !isAbsolute(inside));
+  return withinVault && existsSync(fromCwd) ? fromCwd : fromVault;
+}
+
+export function resolveVaultToolRoot(path?: string): string {
+  return path === undefined
+    ? resolveVaultDir(process.cwd())
+    : resolveVaultToolPath(path);
 }
 
 async function walk(

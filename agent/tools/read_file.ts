@@ -1,8 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
-import { resolveVaultDir } from "@iva/vault-dir";
+import { resolveVaultToolPath } from "../lib/vault-file-search.ts";
 import { vaultDirErrorText } from "../lib/vault-error.ts";
 
 // Host-native чтение файла. Переопределяет встроенный read_file eve: читает реальный
@@ -12,13 +11,8 @@ import { vaultDirErrorText } from "../lib/vault-error.ts";
 // ОТНОСИТЕЛЬНО корня vault (cards/contacts/x.md) и в описании велит открывать хиты этим
 // тулом — поэтому read_file принимает и абсолютный путь, и vault-относительный, резолвя
 // последний от ASSISTANT_VAULT_DIR. Иначе модель получала ENOENT на путь, который ей же
-// и выдали. Не менять в одностороннем порядке.
-
-function resolvePath(path: string): string {
-  return isAbsolute(path)
-    ? path
-    : resolve(resolveVaultDir(process.cwd()), path);
-}
+// и выдали. Не менять в одностороннем порядке. Путь с лишним `vault/` от корня проекта
+// тоже доходит до файла — резолвер общий с grep/glob (#242).
 
 // Потолок вывода: большой файл не должен переполнять окно контекста за один ход.
 const MAX_CHARS = 24000;
@@ -53,7 +47,7 @@ export default defineTool({
   async execute({ path, offset, limit }) {
     let raw: string;
     try {
-      raw = await readFile(resolvePath(path), "utf8");
+      raw = await readFile(resolveVaultToolPath(path), "utf8");
     } catch (error) {
       const text = vaultDirErrorText(error);
       if (text !== null)

@@ -153,7 +153,6 @@ test("the authored tree has only its explicit shared-package edges", () => {
       "agent/lib/vault-error.ts -> @iva/vault-dir",
       "agent/lib/vault-file-search.ts -> @iva/vault-dir",
       "agent/tools/memory_search.ts -> @iva/vault-dir",
-      "agent/tools/read_file.ts -> @iva/vault-dir",
       "agent/tools/write_card.ts -> @iva/vault-dir",
       "agent/tools/write_file.ts -> @iva/vault-dir",
     ],
