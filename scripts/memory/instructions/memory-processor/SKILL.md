@@ -37,6 +37,10 @@ used — you are the enrichment.
 
 ## Layout & types (from schema.json)
 
+Paths here are from the vault root, as `read_file`, `grep` and `glob` take them;
+the shell code blocks run through `bash` from the project root, so there it is
+`grep -rl … vault/cards/` (the memory map's path contract).
+
 | What                              | Folder                           | type            |
 | --------------------------------- | -------------------------------- | --------------- |
 | Raw transcript (read-only log)    | `daily/YYYY-MM-DD.md`            | — (not a card)  |

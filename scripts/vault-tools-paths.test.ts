@@ -344,10 +344,11 @@ test("glob и grep сохраняют абсолютный путь вне vault
   );
 });
 
-// Инструкции не должны давать read_file путь с префиксом `vault/`: тул резолвит
-// относительный путь ОТ корня vault, поэтому `vault/daily/x.md` превращается в
-// vault/vault/daily/x.md и падает с ENOENT (#199). Шелл-примеры (ls, grep, uv run) и
-// write_file — исключение: они работают от корня проекта, а не от корня vault.
+// Инструкции не должны давать read_file, grep и glob путь с префиксом `vault/`: тулы
+// резолвят относительный путь ОТ корня vault, и `vault/daily/x.md` превращается в
+// vault/vault/daily/x.md (#199, #242). Шелл-команда живёт в одном спане с путём
+// (`ls vault/…`, блок ```bash) и сюда не попадает; отдельный спан `vault/…` рядом со
+// словом grep — это путь для тула. Исключение одно: write_file берёт путь от корня проекта.
 // Скиллы (agent/skills) сюда не входят намеренно: они гоняют шелл-утилиты и получают от
 // Telegram ХОСТОВЫЙ путь вложения (`vault/attachments/…`, см. lib/telegram-media.ts) —
 // там префикс правильный. Контракт read_file живёт в инструкциях и ночных промптах.
@@ -355,9 +356,9 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const INSTRUCTION_ROOTS = ["agent/instructions", "scripts/memory/instructions"];
 const VAULT_PREFIXED =
   /`vault\/(CORE\.md|MOC\.md|PERSONA\.md|schema\.json|cards|daily|summaries|weekly|monthly|yearly)/;
-const HOST_RELATIVE = /`ls |`grep|uv run|write_file/;
+const HOST_RELATIVE = /`write_file`/;
 
-test("инструкции не префиксуют vault/ пути, которые уходят в read_file", () => {
+test("инструкции не префиксуют vault/ пути, которые уходят в тулы чтения", () => {
   const offenders: string[] = [];
   for (const root of INSTRUCTION_ROOTS) {
     const names = readdirSync(join(ROOT, root), {
@@ -377,7 +378,7 @@ test("инструкции не префиксуют vault/ пути, котор
   assert.deepEqual(
     offenders,
     [],
-    `read_file резолвит путь от корня vault — префикс vault/ даёт ENOENT:\n${offenders.join("\n")}`,
+    `read_file, grep и glob резолвят путь от корня vault — префикс vault/ даёт ENOENT:\n${offenders.join("\n")}`,
   );
 });
 

@@ -5,10 +5,11 @@ index is in context; search content with `memory_search` (ranked search over
 cards and summaries), then pull the top hits one file at a time with
 `read_file`. Never read the whole vault.
 
-`read_file` paths are relative to the vault root (`CORE.md`, `cards/…` — the
-same shape `memory_search` returns): never prefix them with `vault/`. Shell
-commands (`ls`, `grep`) run from the project root, so there the path does start
-with `vault/`.
+A path has one of two roots. The tools `read_file`, `grep` and `glob` take it
+from the vault root (`CORE.md`, `daily/…`, `cards/…` — the shape
+`memory_search` returns): never prefix it with `vault/`. A shell command run
+through `bash` (`ls`, `grep -r`, `uv run`) and `write_file` start in the project
+root, so there the path does start with `vault/`.
 
 Creating a fact card (contact/project/decision/idea/note) — write it with the
 **`write_card`** tool, not `write_file`: it guarantees a valid type and schema
@@ -43,11 +44,11 @@ typo) go into `aliases`, and that is what makes the card findable by any of them
    name into ONE query — Russian and Latin, transliteration, the colloquial
    name, the base form. Read the top 1–3 hits with `read_file`.
 2. "Last week / in May" → summaries for those dates
-   (`ls vault/summaries/daily/2026-06-*.md`).
+   (the `glob` tool, `summaries/daily/2026-06-*.md`).
 3. Not enough → follow the top hit's `[[...]]` wiki links one step (graph
    neighbors).
-4. Still not enough → `grep` over `vault/daily/` for the month (last resort,
-   the largest files).
+4. Still not enough → the `grep` tool with path `daily/` and glob
+   `2026-06-*.md` for the month (last resort, the largest files).
 5. Stop early. Summaries before raw: a weekly summary is ~35× cheaper than
    its seven days.
 

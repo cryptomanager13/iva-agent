@@ -13,7 +13,7 @@ For each item:
 
 1. **Dedup first.** Search for an existing card before creating one:
    ```bash
-   grep -ril "<entity name or key phrase>" cards/
+   grep -ril "<entity name or key phrase>" vault/cards/
    ```
    Then choose exactly one operation and pass it to `write_card`:
    - No match → **ADD**. Create the card; ADD refuses an existing identity.
