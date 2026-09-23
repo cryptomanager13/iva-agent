@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   mkdtempSync,
   mkdirSync,
+  existsSync,
   readdirSync,
   symlinkSync,
   writeFileSync,
@@ -15,8 +16,9 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import fc from "fast-check";
 import type { ToolContext } from "eve/tools";
 import { settled } from "./fixtures/tool-result.ts";
 
@@ -37,7 +39,8 @@ const { default: writeFile } = await import("../agent/tools/write_file.ts");
 const { default: readFileTool } = await import("../agent/tools/read_file.ts");
 const { default: globTool } = await import("../agent/tools/glob.ts");
 const { default: grepTool } = await import("../agent/tools/grep.ts");
-const { walkFiles } = await import("../agent/lib/vault-file-search.ts");
+const { resolveVaultToolPath, walkFiles } =
+  await import("../agent/lib/vault-file-search.ts");
 const { default: memorySearch } =
   await import("../agent/tools/memory_search.ts");
 
@@ -257,24 +260,114 @@ test("read_file, grep и glob принимают путь с префиксом 
   assert.deepEqual(glob, ["alias.md", "needle.md"]);
 });
 
+test("read_file не читает одноимённый файл проекта вне vault", async () => {
+  const projectOnly = join(APP_ROOT, "project-only.txt");
+  writeFileSync(projectOnly, "только в проекте\n", "utf8");
+  try {
+    await assert.rejects(
+      fromSymlinkedVault(async () =>
+        settled(
+          await readFileTool.execute(
+            { path: "project-only.txt" },
+            testToolContext("read_file"),
+          ),
+        ),
+      ),
+      { code: "ENOENT" },
+    );
+  } finally {
+    rmSync(projectOnly, { force: true });
+  }
+});
+
 test("настоящий vault/vault/ внутри vault по-прежнему первичен", async () => {
   const nested = join(REAL_VAULT, "vault");
+  const topFile = join(REAL_VAULT, "inner.md");
   mkdirSync(nested, { recursive: true });
   writeFileSync(join(nested, "inner.md"), "вложенный T99\n", "utf8");
+  writeFileSync(topFile, "верхний T99\n", "utf8");
   try {
-    const grep = await fromSymlinkedVault(async () =>
+    const [read, grep] = await fromSymlinkedVault(async () => [
+      settled(
+        await readFileTool.execute(
+          { path: "vault/inner.md" },
+          testToolContext("read_file"),
+        ),
+      ),
       settled(
         await grepTool.execute(
           { pattern: "T99", path: "vault" },
           testToolContext("grep"),
         ),
       ),
-    );
+    ]);
+    assert.equal(read.content, "вложенный T99\n");
     assert.equal(grep.count, 1, `grep: ${JSON.stringify(grep)}`);
     assert.equal(basename(grep.matches[0].file), "inner.md");
   } finally {
+    rmSync(topFile, { force: true });
     rmSync(nested, { recursive: true, force: true });
   }
+});
+
+const RESOLVER_SEED = 20260923;
+
+test(`резолвер выбирает только путь внутри vault (fast-check seed ${RESOLVER_SEED})`, () => {
+  fc.assert(
+    fc.property(
+      fc.record({
+        prefix: fc.boolean(),
+        name: fc
+          .array(fc.constantFrom("a", "b", "c", "0", "1"), {
+            minLength: 1,
+            maxLength: 5,
+          })
+          .map((parts) => `${parts.join("")}.txt`),
+        vaultFile: fc.boolean(),
+        cwdFile: fc.boolean(),
+      }),
+      ({ prefix, name, vaultFile, cwdFile }) => {
+        const root = mkdtempSync(join(tmpdir(), "iva-resolver-property-"));
+        const vault = join(root, "vault");
+        const input = prefix ? `vault/${name}` : name;
+        const fromVault = resolve(vault, input);
+        const fromCwd = resolve(root, input);
+        const previousCwd = process.cwd();
+        const previousVault = process.env.ASSISTANT_VAULT_DIR;
+        try {
+          mkdirSync(vault, { recursive: true });
+          if (vaultFile) {
+            mkdirSync(resolve(fromVault, ".."), { recursive: true });
+            writeFileSync(fromVault, "vault\n");
+          }
+          if (cwdFile) writeFileSync(fromCwd, "cwd\n");
+          process.env.ASSISTANT_VAULT_DIR = vault;
+          process.chdir(root);
+
+          const actual = resolveVaultToolPath(input);
+          const inside = relative(vault, actual);
+          assert.ok(
+            inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)),
+            `путь вне vault: ${actual}`,
+          );
+          assert.ok(
+            actual === fromVault ||
+              (actual === fromCwd &&
+                !existsSync(fromVault) &&
+                existsSync(fromCwd)),
+            `неверный приоритет для ${input}: ${actual}`,
+          );
+        } finally {
+          process.chdir(previousCwd);
+          if (previousVault === undefined)
+            delete process.env.ASSISTANT_VAULT_DIR;
+          else process.env.ASSISTANT_VAULT_DIR = previousVault;
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    ),
+    { seed: RESOLVER_SEED, numRuns: 300 },
+  );
 });
 
 test(
