@@ -2069,7 +2069,7 @@ test("doctor sends a claude installation to the CLI install and to its login", a
   );
   assert.match(
     missing.bad.join("\n"),
-    /npm install -g @anthropic-ai\/claude-code/u,
+    /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
   );
 
   const loggedOut = await diagnoseClaude(t, {

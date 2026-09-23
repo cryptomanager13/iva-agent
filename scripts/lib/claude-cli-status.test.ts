@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -13,7 +14,7 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { claudeConflicts, claudeEffort, claudeModel } from "#lib/claude-cli.ts";
 import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
@@ -150,7 +151,10 @@ test("a logged-out CLI is told from a missing one, each with its own command", a
   const missing = await claudeStatus({ CLAUDE_COMMAND: "/nonexistent/claude" });
   assert.equal(missing.installed, false);
   assert.equal(missing.ready, false);
-  assert.match(missing.hint, /npm install -g @anthropic-ai\/claude-code/u);
+  assert.match(
+    missing.hint,
+    /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
 });
 
 // Чужая авторизация в окружении увела бы подписку на чужой счёт. Имя переменной
@@ -486,20 +490,31 @@ test("the probe declares one tool and marks it inert", async (t) => {
   assert.match(String(server?.args?.[1]), /Denied: tools run in Iva/u);
 });
 
-test("the model binary comes from CLAUDE_COMMAND or from PATH", (t) => {
+test("the model binary comes from CLAUDE_COMMAND or from the service PATH", (t) => {
   const file = fakeClaude(t);
   assert.deepEqual(claudeBinary({ CLAUDE_COMMAND: file }), [file]);
   assert.deepEqual(claudeBinary({ CLAUDE_COMMAND: `${file} --flag` }), [
     file,
     "--flag",
   ]);
-  // PATH ищется и без переменной: сервис держит `claude` в своём PATH.
-  assert.deepEqual(claudeBinary({ PATH: scratch(t, "path") }), null);
-  const dir = scratch(t, "path-with-claude");
-  const onPath = join(dir, "claude");
-  writeFileSync(onPath, "#!/bin/sh\n");
-  chmodSync(onPath, 0o755);
-  assert.deepEqual(claudeBinary({ PATH: dir }), [onPath]);
+  const home = scratch(t, "home");
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    process.env.HOME = previousHome;
+  });
+  // PATH шелла не в счёт: сервис его не видит и `claude` оттуда не запустит.
+  const shell = scratch(t, "shell-path");
+  const onShell = join(shell, "claude");
+  writeFileSync(onShell, "#!/bin/sh\n");
+  chmodSync(onShell, 0o755);
+  assert.deepEqual(claudeBinary({ PATH: shell }), null);
+  // ~/.local/bin в PATH сервиса: туда ставит подсказка.
+  const onLocal = join(home, ".local/bin/claude");
+  mkdirSync(dirname(onLocal), { recursive: true });
+  writeFileSync(onLocal, "#!/bin/sh\n");
+  chmodSync(onLocal, 0o755);
+  assert.deepEqual(claudeBinary({ PATH: shell }), [onLocal]);
 });
 
 // Окно контекста пишет мастер: у haiku оно впятеро меньше, и завышенное окно сдвинуло бы

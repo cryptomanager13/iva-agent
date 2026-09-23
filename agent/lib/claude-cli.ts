@@ -68,6 +68,10 @@ import {
 } from "./claude-admission.ts";
 import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
 import { TOOL_NAME_MAX, wireToolName } from "./tool-wire-name.ts";
+import {
+  claudeInstallHint,
+  resolveClaude,
+} from "../../packages/claude-command/index.ts";
 
 const CLAUDE_PROVIDER_ID = "iva-claude";
 /** Префикс имён инструментов в муляже MCP: по нему видно, что вызов пришёл от Iva. */
@@ -88,8 +92,6 @@ export const CLAUDE_SILENCE_TIMEOUT_MS = 180_000;
 const CLAUDE_EXIT_GRACE_MS = 5_000;
 
 const CLAUDE_UPSTREAM = "https://api.anthropic.com";
-const INSTALL_HINT =
-  "install it with `npm install -g @anthropic-ai/claude-code` or point CLAUDE_COMMAND at the binary";
 /** Значения, при которых переменная означает «не включено». */
 const OFF_VALUES = new Set(["", "0", "false", "no", "off"]);
 /**
@@ -814,15 +816,14 @@ export function claudeConflicts(
 }
 
 /**
- * Бинарь CLI. `npm install -g` кладёт `claude` рядом с node, а PATH сервиса начинается с
- * каталога node (scripts/cli/systemd.ts), поэтому в обычной установке CLAUDE_COMMAND не нужен;
- * он тут для нестандартной. PATH не переписываем: подмена PATH — это чужие `claude` в ходу.
+ * Команда CLI с аргументами или null. Ищется по PATH процесса: под юнитом это PATH сервиса
+ * (каталог node, затем `~/.local/bin`, куда ставит подсказка), тот же, которым ищет доктор.
+ * PATH не переписываем: подмена PATH — это чужие `claude` в ходу.
  */
 export function claudeCommand(
   env: Readonly<Record<string, string | undefined>>,
-): string {
-  const configured = (env.CLAUDE_COMMAND ?? "").trim();
-  return configured.length > 0 ? configured : "claude";
+): string[] | null {
+  return resolveClaude(env.CLAUDE_COMMAND, env.PATH);
 }
 
 type PreparedCall = {
@@ -952,17 +953,21 @@ function killTree(child: ChildProcess | undefined): void {
 }
 
 async function spawnClaude(
-  command: string,
+  command: string[] | null,
   argv: string[],
   options: SpawnOptions,
 ): Promise<ChildProcess> {
-  const child = spawn(command, argv, options);
+  const install = `install it ${claudeInstallHint()}, or point CLAUDE_COMMAND at the binary`;
+  if (command === null)
+    throw new ClaudeCliError(`claude CLI not found on PATH; ${install}`);
+  const [head, ...args] = command;
+  const child = spawn(head, [...args, ...argv], options);
   return await new Promise<ChildProcess>((resolve, reject) => {
     child.once("spawn", () => resolve(child));
     child.once("error", (error: Error) =>
       reject(
         new ClaudeCliError(
-          `claude CLI (${command}) did not start: ${error.message}; ${INSTALL_HINT}`,
+          `claude CLI (${head}) did not start: ${error.message}; ${install}`,
         ),
       ),
     );

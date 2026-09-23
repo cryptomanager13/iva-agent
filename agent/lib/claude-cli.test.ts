@@ -1665,8 +1665,11 @@ test("нет бинаря — отказ с командой установки,
   const error = await failureOf(async () =>
     drain(await model.doStream({ prompt: userPrompt() })),
   );
-  assert.match(error.message, /did not start/u);
-  assert.match(error.message, /npm install -g @anthropic-ai\/claude-code/u);
+  assert.match(error.message, /not found on PATH/u);
+  assert.match(
+    error.message,
+    /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
   assert.equal(classifyModelCallError(error), "recoverable");
 });
 
@@ -1825,10 +1828,18 @@ test("окружение CLI получает адрес реле и выклю�
   );
 });
 
-test("команда CLI берётся из CLAUDE_COMMAND, иначе из PATH", () => {
-  assert.equal(claudeCommand({}), "claude");
-  assert.equal(claudeCommand({ CLAUDE_COMMAND: "  " }), "claude");
-  assert.equal(claudeCommand({ CLAUDE_COMMAND: "/opt/claude" }), "/opt/claude");
+// CLAUDE_COMMAND — командная строка: голова ищется, аргументы идут CLI перед нашими.
+test("CLAUDE_COMMAND с аргументом запускает CLI, а не ищет файл с пробелом в имени", async (t) => {
+  const fake = fakeCli(t, "text");
+  process.env.CLAUDE_COMMAND = `${fake.command} --iva-extra`;
+  assert.deepEqual(claudeCommand(process.env), [fake.command, "--iva-extra"]);
+  // Пусто и пробелы — это `claude`, а на пустом PATH его нет: отказ до запуска.
+  assert.equal(claudeCommand({ PATH: "" }), null);
+  assert.equal(claudeCommand({ CLAUDE_COMMAND: "  ", PATH: "" }), null);
+  await drain(
+    await makeClaudeCliModel(MODEL).doStream({ prompt: userPrompt() }),
+  );
+  assert.equal((fake.read().argv as string[])[0], "--iva-extra");
 });
 
 test("имя инструмента — только ASCII, с префиксом до 64 символов", () => {

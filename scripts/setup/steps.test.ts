@@ -359,7 +359,7 @@ test("a CLI that is not ready is named, and the check can be repeated", async ()
             plan: "",
             conflict: null,
             ready: false,
-            hint: `Claude Code CLI not found — install it on the server: npm install -g @anthropic-ai/claude-code`,
+            hint: `Claude Code CLI not found — install it on the server as iva: npm install -g --prefix ~/.local @anthropic-ai/claude-code`,
           }
         : readyClaude;
     },
@@ -373,7 +373,10 @@ test("a CLI that is not ready is named, and the check can be repeated", async ()
   assert.equal(asked, 1);
   assert.equal(checks, 2);
   const screen = printed.join("\n");
-  assert.match(screen, /npm install -g @anthropic-ai\/claude-code/u);
+  assert.match(
+    screen,
+    /npm install -g --prefix ~\/\.local @anthropic-ai\/claude-code/u,
+  );
   assert.match(screen, /max/u, "план подписки не назван после входа");
   assert.equal(out.CLAUDE_MODEL, "claude-fable-5-1");
 });

@@ -392,7 +392,7 @@ test("/think still works on a provider the runtime accepts", async (t) => {
 
 // ─── claude: вендор без ключа, вход живёт в чужом CLI ────────────────────────────────
 // Мастер не может ни поставить npm-пакет, ни войти в подписку за владельца, поэтому
-// вместо экрана ключа он называет две команды для сервера и даёт перечитать статус.
+// вместо экрана ключа он называет команду для фактической причины и даёт перечитать статус.
 // CLI подменён скриптом с тем же контрактом: `auth status` читает ответ из файла.
 
 function fakeClaudeForWizard(t: TestContext): {
@@ -453,8 +453,8 @@ test("the provider screen offers claude, and /model walks it to the CLI commands
 
   await wizardPickProvider(st as never, "claude");
   const screen = sent.map((call) => call.text).join("\n");
-  // Ни ключа, ни каталога: сначала две команды для сервера и кнопка перечитать статус.
-  assert.match(screen, /npm install -g @anthropic-ai\/claude-code/u);
+  // CLI стоит, входа нет: команда входа, без команды установки, и кнопка перечитать статус.
+  assert.doesNotMatch(screen, /npm install/u);
   assert.match(screen, /claude auth login/u);
   // Кнопка «Проверить снова» живёт ровно на этом шаге: иначе тап по ней молча ничего
   // не сделал бы (wizardActionAllowed).

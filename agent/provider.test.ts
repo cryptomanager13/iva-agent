@@ -137,7 +137,7 @@ function requestUrl(input: RequestInfo | URL): string {
 await test("ошибка шага claude не отравляет сессию", () => {
   const errors = [
     new ClaudeCliError(
-      "claude CLI (claude) did not start: spawn claude ENOENT; install it with `npm install -g @anthropic-ai/claude-code`",
+      "claude CLI not found on PATH; install it as iva: npm install -g --prefix ~/.local @anthropic-ai/claude-code, or point CLAUDE_COMMAND at the binary",
     ),
     new ClaudeCliError("API Error: 500 internal server error"),
     new ClaudeCliError("Claude CLI produced nothing for 180s"),

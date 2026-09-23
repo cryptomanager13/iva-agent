@@ -4,9 +4,14 @@
 // не импортирует (ADR-0003): та половина задаёт CLI те же вопросы своей рукой, а общий
 // у них только контракт — CLAUDE_COMMAND, CLAUDE_MODEL, CLAUDE_CONTEXT_WINDOW.
 import { spawn } from "node:child_process";
-import { accessSync, constants, mkdtempSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
+import {
+  claudeInstallHint,
+  resolveClaude,
+  servicePath,
+} from "../../packages/claude-command/index.ts";
 import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
 
 export type ClaudeEnv = Readonly<Record<string, string | undefined>>;
@@ -75,8 +80,7 @@ function claudeChoice(id: string): ClaudeModelOption {
   };
 }
 
-/** Установка и вход живут в шелле сервера: в Telegram их за владельца не сделать. */
-export const CLAUDE_INSTALL_HINT = "npm install -g @anthropic-ai/claude-code";
+/** Вход живёт в шелле сервера: в Telegram его за владельца не сделать. */
 export const CLAUDE_LOGIN_HINT = "claude auth login";
 
 // `auth status` читает локальное хранилище и отвечает мгновенно; рукопожатие поднимает
@@ -146,42 +150,15 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 // ── бинарь ────────────────────────────────────────────────────────────────────
 
-/** Путь к исполняемому файлу из PATH. Пустая строка и мусор в PATH не считаются. */
-function which(head: string, env: ClaudeEnv): string | null {
-  if (isAbsolute(head)) return executable(head) ? head : null;
-  const path = env.PATH ?? "";
-  for (const dir of path.split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, head);
-    if (executable(candidate)) return candidate;
-  }
-  return null;
-}
-
-/** Файл, который можно запустить: каталог с правом входа программой не является. */
-function executable(file: string): boolean {
-  try {
-    accessSync(file, constants.X_OK);
-    return statSync(file).isFile();
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Команда CLI: `CLAUDE_COMMAND` (одно слово или строка с аргументами) или `claude` из
- * PATH. Сервис systemd несёт PATH без каталога node, а `claude` — npm-скрипт с шебангом
- * `env node`, поэтому каталог работающего node ищем и сами.
+ * Команда CLI, какой её найдёт сервис: ищем не PATH шелла, а PATH юнита. Каталог, который
+ * есть только в шелле, даёт «не найден» — сервис там тоже не найдёт.
  */
 export function claudeBinary(env: ClaudeEnv = process.env): string[] | null {
-  const configured = (env.CLAUDE_COMMAND ?? "").trim();
-  const [head = "", ...rest] = configured
-    ? configured.split(/\s+/u)
-    : ["claude"];
-  if (!head) return null;
-  const found = which(head, env) ?? which(head, searchPath(env));
-  if (!found) return null;
-  return [found, ...rest];
+  return resolveClaude(
+    env.CLAUDE_COMMAND,
+    servicePath(dirname(process.execPath), homedir()),
+  );
 }
 
 /** PATH, которым пользуемся мы: свой плюс каталог node, которым запущен этот процесс. */
@@ -374,7 +351,7 @@ const notInstalled = (): ClaudeStatus => ({
   plan: "",
   conflict: null,
   ready: false,
-  hint: `Claude Code CLI not found — install it on the server: ${CLAUDE_INSTALL_HINT} (or point CLAUDE_COMMAND at the binary)`,
+  hint: `Claude Code CLI not found — install it on the server ${claudeInstallHint()} (or point CLAUDE_COMMAND at the binary)`,
 });
 
 function hintFor({

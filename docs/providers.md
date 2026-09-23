@@ -49,13 +49,13 @@ Notes: the model list is pulled from your subscription at setup time, so you alw
 Use the Claude subscription you already pay for — no API key, no per-token bill, nothing to paste into `.env`. Iva calls the `claude` CLI (Claude Code) installed and signed in on the same server, so the CLI's own login is what pays for the requests.
 
 ```bash
-npm install -g @anthropic-ai/claude-code
+npm install -g --prefix ~/.local @anthropic-ai/claude-code   # as the service user, no root: lands in ~/.local/bin
 claude auth login      # one sign-in on the server (a link + code)
 iva config             # pick the provider (option 4) and a model from the subscription's live list
 iva restart
 ```
 
-Notes: the screen offers three models — Fable 5.1, Opus 5.5 and Sonnet 5 — and only those the CLI picker actually has. `.env` stores the canonical id (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5`), never a picker alias. `claude auth status` names the plan, and `iva doctor` prints it next to the model. Requests are billed by the CLI — they count as `claude -p` (Agent SDK) usage on your plan. `CLAUDE_CONTEXT_WINDOW` for these three is 1000000. If the CLI is not on the service's `PATH`, point `CLAUDE_COMMAND` at the binary. `/model` → Claude checks the CLI and repeats the check after you sign in there.
+Notes: the screen offers three models — Fable 5.1, Opus 5.5 and Sonnet 5 — and only those the CLI picker actually has. `.env` stores the canonical id (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5`), never a picker alias. `claude auth status` names the plan, and `iva doctor` prints it next to the model. Requests are billed by the CLI — they count as `claude -p` (Agent SDK) usage on your plan. `CLAUDE_CONTEXT_WINDOW` for these three is 1000000. The service's `PATH` is the node directory, then `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`; `iva doctor` looks for `claude` on that same `PATH`, not on your shell's. If the CLI lives elsewhere, point `CLAUDE_COMMAND` at the binary. `/model` → Claude checks the CLI and repeats the check after you sign in there.
 
 ### OpenRouter (`openrouter`)
 

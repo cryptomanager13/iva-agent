@@ -16,10 +16,10 @@ import {
 import { getAccessToken } from "#lib/codex-auth.ts";
 import {
   claudeStatus,
-  CLAUDE_INSTALL_HINT,
   CLAUDE_LOGIN_HINT,
   type ClaudeStatus,
 } from "../lib/claude-cli-status.ts";
+import { claudeInstallHint } from "../../packages/claude-command/index.ts";
 import { runDeviceCodeLogin } from "../lib/codex-oauth.ts";
 import { compactNumber, modelSummary } from "../lib/model-summary.ts";
 import { getLang, tr } from "#lib/i18n.ts";
@@ -677,7 +677,7 @@ async function pickCliProvider(st: WizardState, cat: ProviderCatalogEntry) {
   return showModelScreen(st);
 }
 
-/** Экран «CLI ещё не готов»: команды для сервера и кнопка перечитать статус. */
+/** Экран «CLI ещё не готов»: причина с командой для сервера и кнопка перечитать статус. */
 async function showCliStatusScreen(st: WizardState, status: ClaudeStatus) {
   st.step = "cli_status";
   return wizScreen(
@@ -688,8 +688,6 @@ async function showCliStatusScreen(st: WizardState, status: ClaudeStatus) {
         `Iva calls the claude CLI on this server, and it isn't ready: ${escapeRichText(status.hint)}`,
         `Ива зовёт CLI claude на этом же сервере, а он ещё не готов: ${escapeRichText(status.hint)}`,
       ),
-      tr("On the server run:", "На сервере выполните:") +
-        `\n${CLAUDE_INSTALL_HINT}\n${CLAUDE_LOGIN_HINT}`,
       `${button(tr("Check again", "Проверить снова"), "iva_model:retry")} — ${tr(
         "read the status again.",
         "перечитать статус.",
@@ -706,7 +704,7 @@ const noClaude = (): ClaudeStatus => ({
   plan: "",
   conflict: null,
   ready: false,
-  hint: `${CLAUDE_INSTALL_HINT} и ${CLAUDE_LOGIN_HINT}`,
+  hint: `${claudeInstallHint()} и ${CLAUDE_LOGIN_HINT}`,
 });
 
 // Продолжение после введённого адреса: тот же порядок шагов, что и в pickProvider.

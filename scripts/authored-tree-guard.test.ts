@@ -142,6 +142,7 @@ test("the authored tree has only its explicit shared-package edges", () => {
       "agent/instructions/25-persona.ts -> @iva/vault-dir",
       "agent/instructions/now.ts -> @iva/data-dir",
       "agent/instructions/now.ts -> @iva/timezone",
+      "agent/lib/claude-cli.ts -> ../../packages/claude-command/index.ts",
       "agent/lib/context-window.ts -> ../../packages/context-window/index.ts",
       "agent/lib/data-dir.ts -> ../../packages/data-dir/index.ts",
       "agent/lib/job-facts.ts -> ../../packages/secret-redaction/index.ts",
@@ -156,7 +157,7 @@ test("the authored tree has only its explicit shared-package edges", () => {
       "agent/tools/write_card.ts -> @iva/vault-dir",
       "agent/tools/write_file.ts -> @iva/vault-dir",
     ],
-    "agent/ may leave its tree only for the shared packages Eve bundles: @iva/data-dir, @iva/vault-dir, @iva/timezone and @iva/context-window, plus the one rule that cuts secrets for both `iva diagnose` and the schedule log tail the agent reads (a second copy of that rule is how a token inside `bot<token>` stayed in data/jobs.json)",
+    "agent/ may leave its tree only for the shared packages Eve bundles: @iva/data-dir, @iva/vault-dir, @iva/timezone and @iva/context-window, plus the one rule that cuts secrets for both `iva diagnose` and the schedule log tail the agent reads (a second copy of that rule is how a token inside `bot<token>` stayed in data/jobs.json), and the one rule that finds the claude CLI for both the runtime and `iva doctor` (two copies let the doctor pass a command the runtime could not start)",
   );
 });
 
