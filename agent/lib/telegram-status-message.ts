@@ -56,13 +56,9 @@ let richStatusSupported = true;
 
 // Строка статуса. Лоадер падает на ⏳, когда Telegram отверг custom emoji.
 function workingMarkdown({
-  animated = workLoaderSupported,
   withStop = true,
-}: {
-  animated?: boolean;
-  withStop?: boolean;
-} = {}): string {
-  const loader = animated
+}: { withStop?: boolean } = {}): string {
+  const loader = workLoaderSupported
     ? `<tg-emoji emoji-id="${WORK_LOADER.customEmojiId}">${WORK_LOADER.alt}</tg-emoji>`
     : WORK_LOADER.fallback;
   return withStop
@@ -93,12 +89,11 @@ function statusBody(tg: TelegramStatusHandle): Record<string, unknown> {
   };
 }
 
-// Кнопку показываем только в личке, где Bridge примет её callback.
-
 export async function sendWorkingStatus(
   tg: TelegramStatusHandle,
   { canStop = true } = {},
 ): Promise<number | null> {
+  // Кнопку показываем только в личке, где Bridge примет её callback.
   const withStop = canStop && isPrivateTelegramChatHandle(tg);
   const base = statusBody(tg);
   if (richStatusSupported) {
