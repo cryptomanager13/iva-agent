@@ -17,7 +17,9 @@
 // могут — их сверяет scripts/lib/model-catalog.test.ts. Зеркало несёт ОБЕ модели
 // провайдера: и текстовую, и vision.
 //
-// Зависимостей у модуля нет намеренно: он читает env и больше ничего.
+// Модуль читает env; пределы имён берёт из общих констант проводного формата.
+import { CLAUDE_TOOL_NAME_MAX } from "./claude-cli.ts";
+import { TOOL_NAME_MAX } from "./tool-wire-name.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -60,7 +62,7 @@ export const MODEL_PROVIDERS = {
     // Рассуждение прошлых шагов обратно не шлём, как и у остальных OpenAI-совместимых:
     // вернулось бы полем reasoning_content, а принимает ли его бэкенд, живьём не доказано.
     replaysReasoning: false,
-    toolNameMax: 64,
+    toolNameMax: TOOL_NAME_MAX,
     // Дешёвая мультимодалка того же провайдера (проверено на проде: принимает image_url,
     // http 200). Ollama Cloud снимает теги с раздачи: gemma3:12b отвечает
     // 410 "retired at 2026-07-15" — заменён на gemma4:31b (проверено 2026-07-28).
@@ -74,7 +76,7 @@ export const MODEL_PROVIDERS = {
     defaultModel: "deepseek-v4-pro",
     compatibleReasoning: true,
     replaysReasoning: false,
-    toolNameMax: 64,
+    toolNameMax: TOOL_NAME_MAX,
     // Живая проверка 2026-08-18, картинка через POST /chat/completions: qwen3.7-plus
     // отвечает 200 и кладёт в message.content чистое описание с OCR (4-6 с) — он и дефолт.
     // minimax-m3 картинку тоже видит, но течёт <think>…</think> прямо в content, а vision.ts
@@ -92,7 +94,7 @@ export const MODEL_PROVIDERS = {
     // Бэкенд подписки принимает рассуждение прошлых шагов обратно (reasoning-item с
     // encrypted_content, store:false): живой многошаговый ход gpt-6-sol 23.09.2026.
     replaysReasoning: true,
-    toolNameMax: 64,
+    toolNameMax: TOOL_NAME_MAX,
     // gpt-5* мультимодальны — картинки идут через ту же подписку (agent/vision.ts гонит их
     // по Responses API), поэтому отдельной переменной нет вовсе: vision-модель подписки —
     // это и есть выбранная текстовая.
@@ -109,7 +111,7 @@ export const MODEL_PROVIDERS = {
     compatibleReasoning: false,
     // Подписка отвергает рассуждение без подписи, а сборка промпта CLI его и так пропускает.
     replaysReasoning: false,
-    toolNameMax: 54,
+    toolNameMax: CLAUDE_TOOL_NAME_MAX,
     // Подписка мультимодальна — как у codex, отдельной vision-модели нет: картинку смотрит
     // та же модель, что ведёт ход (agent/vision.ts гонит её через тот же CLI).
     visionModelVar: null,
@@ -122,7 +124,7 @@ export const MODEL_PROVIDERS = {
     defaultModel: "openai/gpt-5.1",
     compatibleReasoning: false,
     replaysReasoning: false,
-    toolNameMax: 64,
+    toolNameMax: TOOL_NAME_MAX,
     // Дешёвая гарантированно-мультимодальная модель для картинок: vision работает независимо
     // от выбранной текстовой (та может быть text-only). Сюда вписывается любой слаг
     // OpenRouter с поддержкой картинок. Переопределяется OPENROUTER_VISION_MODEL.
@@ -140,7 +142,7 @@ export const MODEL_PROVIDERS = {
     // обещает, а лишний параметр — HTTP 400 на каждом ходу.
     compatibleReasoning: false,
     replaysReasoning: false,
-    toolNameMax: 64,
+    toolNameMax: TOOL_NAME_MAX,
     // Vision-модель необязательна: с 0.3.34 картинку сначала предлагают самой модели чата
     // (ADR-0012). Пусто — дефолта нет, и картинку смотрит выбранная текстовая модель.
     visionModelVar: "CUSTOM_VISION_MODEL",
