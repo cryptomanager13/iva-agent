@@ -14,7 +14,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import fc from "fast-check";
-import { normalizeInstructionsDefinition } from "../node_modules/eve/dist/src/internal/authored-definition/core.js";
 
 const SEED = Number(process.env.IVA_INSTRUCTIONS_PBT_SEED ?? 20_260_923);
 const RUNS = Number(process.env.IVA_INSTRUCTIONS_PBT_RUNS ?? 50);
@@ -25,7 +24,7 @@ const TIME_ZONE = "Asia/Tashkent";
 const LOCAL_MIDNIGHT = Date.UTC(2026, 8, 22, 19, 0, 0);
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-type Resolved = ReturnType<typeof normalizeInstructionsDefinition>;
+type Resolved = { content: string; role: string };
 type Resolver = () => unknown;
 
 const home = mkdtempSync(join(tmpdir(), "iva-instructions-stable-"));
@@ -53,8 +52,13 @@ async function resolveAt(
   const results = new Map<string, Resolved>();
   for (const [file, resolver] of resolvers) {
     const result = await resolver();
-    if (result !== null)
-      results.set(file, normalizeInstructionsDefinition(result, file));
+    if (result !== null) {
+      const instruction = result as { content: string; role?: string };
+      results.set(file, {
+        content: instruction.content,
+        role: instruction.role ?? "system",
+      });
+    }
   }
   return results;
 }

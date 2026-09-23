@@ -24,7 +24,7 @@ import type {
   LanguageModelV4Usage,
 } from "@ai-sdk/provider";
 import { classifyModelCallError } from "../node_modules/eve/dist/src/harness/model-call-error.js";
-import { ClaudeCliError } from "./lib/claude-cli.ts";
+import { CLAUDE_TOOL_NAME_MAX, ClaudeCliError } from "./lib/claude-cli.ts";
 import { writeAuth, type CodexAuth, TOKEN_URL } from "./lib/codex-auth.ts";
 import { MODEL_PROVIDERS, MODEL_PROVIDER_NAMES } from "./lib/model-provider.ts";
 
@@ -1464,6 +1464,7 @@ function claudeTestEnv(t: TestContext, command: string): void {
 }
 
 void test("claude: имя инструмента длиннее 54 символов доходит до запуска CLI", async (t) => {
+  assert.equal(MODEL_PROVIDERS.claude.toolNameMax, CLAUDE_TOOL_NAME_MAX);
   const claude = await loadProviderAs("claude");
   const dir = mkdtempSync(join(tmpdir(), "iva-claude-wire-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1582,8 +1583,38 @@ void test("user-сообщение времени и ввод владельца
     messages.map((message) => message.role),
     ["system", "user", "assistant", "user"],
   );
-  assert.deepEqual(messages[3].content, [
-    { type: "text", text: "время 10:31" },
-    { type: "text", text: "а сейчас?" },
-  ]);
+  assert.equal(messages[3].content, "время 10:31\n\nа сейчас?");
+});
+
+void test("файл между user-текстами остаётся на своём месте", async (t) => {
+  const go = await loadOpencodeProvider();
+  const bodies = captureRequests(t, [() => sse([OK_CHUNK])]);
+  const model = go.makeTextModel({ chatModelSeesImages: blindToImages });
+  const { stream } = await model.doStream({
+    prompt: [
+      { role: "user", content: [{ type: "text", text: "до" }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "file",
+            data: { type: "data", data: new Uint8Array([1, 2, 3]) },
+            mediaType: "image/png",
+          },
+          { type: "text", text: "после" },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "вопрос" }] },
+    ],
+  });
+  await stream.pipeTo(new WritableStream());
+  const messages = bodies[0].messages as { role: string; content: unknown }[];
+  assert.equal(messages.length, 1);
+  const content = messages[0].content as { type: string; text?: string }[];
+  assert.deepEqual(
+    content.map((part) => part.type),
+    ["text", "image_url", "text"],
+  );
+  assert.equal(content[0].text, "до");
+  assert.equal(content[2].text, "после\n\nвопрос");
 });

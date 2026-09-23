@@ -121,6 +121,10 @@ test("имя в пределе уходит как есть, на символ �
 test("files.read и files_read не склеиваются в одно имя", () => {
   assert.equal(wireToolName("files_read", TOOL_NAME_MAX), "files_read");
   assert.notEqual(wireToolName("files.read", TOOL_NAME_MAX), "files_read");
+  assert.notEqual(
+    wireToolName("files.read", TOOL_NAME_MAX),
+    wireToolName("files:read", TOOL_NAME_MAX),
+  );
 });
 
 test("имя, равное проводному имени другого, — явная ошибка с обоими именами", async () => {

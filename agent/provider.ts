@@ -16,11 +16,7 @@ import {
   MAX_IMAGE_BYTES,
 } from "./lib/attachment-ref.ts";
 import { resolveAttachmentPath } from "./lib/telegram-media-cache.ts";
-import {
-  CLAUDE_TOOL_NAME_MAX,
-  claudeContextWindow,
-  makeClaudeCliModel,
-} from "./lib/claude-cli.ts";
+import { claudeContextWindow, makeClaudeCliModel } from "./lib/claude-cli.ts";
 import {
   CODEX_BASE_URL,
   codexAuthHeaders,
@@ -33,7 +29,7 @@ import {
   type ModelProviderName,
 } from "./lib/model-provider.ts";
 import { CANONICAL_REASONING_EFFORTS as EFFORTS } from "./lib/reasoning-levels.ts";
-import { TOOL_NAME_MAX, toolNameWireMiddleware } from "./lib/tool-wire-name.ts";
+import { toolNameWireMiddleware } from "./lib/tool-wire-name.ts";
 
 type WrappableModel = Parameters<typeof wrapLanguageModel>[0]["model"];
 type ModelStreamPart =
@@ -736,16 +732,17 @@ export const toolSchemaRetryMiddleware: LanguageModelMiddleware = {
 type UserMessage = Extract<ModelMessage, { role: "user" }>;
 
 function mergeUserMessages(first: UserMessage, next: UserMessage): UserMessage {
-  const merged: UserMessage = {
-    role: "user",
-    content: [...first.content, ...next.content],
-  };
-  if (first.providerOptions === undefined && next.providerOptions === undefined)
-    return merged;
-  return {
-    ...merged,
-    providerOptions: { ...first.providerOptions, ...next.providerOptions },
-  };
+  const content: UserMessage["content"] = [];
+  for (const part of [...first.content, ...next.content]) {
+    const previous = content.at(-1);
+    if (part.type === "text" && previous?.type === "text")
+      content[content.length - 1] = {
+        ...previous,
+        text: `${previous.text}\n\n${part.text}`,
+      };
+    else content.push(part);
+  }
+  return { role: "user", content };
 }
 
 function withAdjacentUserMessagesMerged(prompt: ModelPrompt): ModelPrompt {
@@ -783,11 +780,8 @@ export function makeTextModel(options: {
       toolSchemaRetryMiddleware,
       modelFirstChunkDeadlineMiddleware,
       adjacentUserMessagesMiddleware,
-      // Последним, то есть ближе всех к провайдеру: повтор toolSchemaRetryMiddleware идёт
-      // через model.doStream и тоже получает проводные имена.
-      toolNameWireMiddleware(
-        providerName === "claude" ? CLAUDE_TOOL_NAME_MAX : TOOL_NAME_MAX,
-      ),
+      // Порядок свободен: кодирование идемпотентно, других читателей toolName в цепочке нет.
+      toolNameWireMiddleware(MODEL_PROVIDERS[providerName].toolNameMax),
     ],
   });
 }

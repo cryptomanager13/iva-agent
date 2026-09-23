@@ -40,13 +40,13 @@ function isNamed(part: unknown): part is Named {
 }
 
 /** Проводное имя → исходное для инструментов этого запроса; совпадение двух имён — отказ. */
-function buildTable(
+function encodeTools(
   tools: LanguageModelV4CallOptions["tools"],
   max: number,
-): Map<string, string> {
+): { tools: LanguageModelV4CallOptions["tools"]; table: Map<string, string> } {
   const table = new Map<string, string>();
-  for (const tool of tools ?? []) {
-    if (tool.type !== "function") continue;
+  const encoded = tools?.map((tool) => {
+    if (tool.type !== "function") return tool;
     const wire = wireToolName(tool.name, max);
     const taken = table.get(wire);
     if (taken !== undefined && taken !== tool.name)
@@ -54,8 +54,9 @@ function buildTable(
         `tool names ${JSON.stringify(taken)} and ${JSON.stringify(tool.name)} share the wire name ${JSON.stringify(wire)}`,
       );
     table.set(wire, tool.name);
-  }
-  return table;
+    return { ...tool, name: wire };
+  });
+  return { tools: encoded, table };
 }
 
 /** Любая часть с `toolName`: вызов, результат, принуждение к инструменту. */
@@ -82,15 +83,12 @@ function encodePrompt(
 function encodeParams(
   params: LanguageModelV4CallOptions,
   max: number,
+  tools: LanguageModelV4CallOptions["tools"],
 ): LanguageModelV4CallOptions {
   return {
     ...params,
     prompt: encodePrompt(params.prompt, max),
-    tools: params.tools?.map((tool) =>
-      tool.type === "function"
-        ? { ...tool, name: wireToolName(tool.name, max) }
-        : tool,
-    ),
+    tools,
     toolChoice: encodePart(params.toolChoice, max),
   };
 }
@@ -103,15 +101,14 @@ function decodePart<Part>(part: Part, table: Map<string, string>): Part {
 }
 
 /**
- * Кодирует имена на входе в модель и раскодирует их в ответе. Стоит последним в цепочке
- * makeTextModel: повтор toolSchemaRetryMiddleware идёт через `model.doStream` и тоже
- * проходит через кодирование.
+ * Кодирует имена на входе в модель и раскодирует их в ответе. Порядок middleware
+ * свободен: кодирование идемпотентно, других читателей toolName в цепочке нет.
  */
 export function toolNameWireMiddleware(max: number): LanguageModelMiddleware {
   return {
     async wrapStream({ model, params }) {
-      const table = buildTable(params.tools, max);
-      const result = await model.doStream(encodeParams(params, max));
+      const { tools, table } = encodeTools(params.tools, max);
+      const result = await model.doStream(encodeParams(params, max, tools));
       return {
         ...result,
         stream: result.stream.pipeThrough(
@@ -124,8 +121,8 @@ export function toolNameWireMiddleware(max: number): LanguageModelMiddleware {
       };
     },
     async wrapGenerate({ model, params }) {
-      const table = buildTable(params.tools, max);
-      const result = await model.doGenerate(encodeParams(params, max));
+      const { tools, table } = encodeTools(params.tools, max);
+      const result = await model.doGenerate(encodeParams(params, max, tools));
       return {
         ...result,
         content: result.content.map((part) => decodePart(part, table)),

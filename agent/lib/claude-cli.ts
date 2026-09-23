@@ -67,7 +67,7 @@ import {
   type NativeMessage,
 } from "./claude-admission.ts";
 import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
-import { TOOL_NAME_MAX } from "./tool-wire-name.ts";
+import { TOOL_NAME_MAX, wireToolName } from "./tool-wire-name.ts";
 
 const CLAUDE_PROVIDER_ID = "iva-claude";
 /** Префикс имён инструментов в муляже MCP: по нему видно, что вызов пришёл от Iva. */
@@ -221,7 +221,6 @@ export function claudeContextWindow(route: string): number {
 }
 
 /** Имя инструмента: правило Anthropic, [A-Za-z0-9_-] и вместе с префиксом до 64 символов. */
-const TOOL_NAME = new RegExp(`^[A-Za-z0-9_-]{1,${CLAUDE_TOOL_NAME_MAX}}$`, "u");
 /**
  * Усилия, которые принимает `output_config.effort`. `minimal` в их числе нет: подписка
  * отвечает на него 400, а `disabled` Iva и не знает — словарь лежит в reasoning-levels.ts
@@ -342,7 +341,7 @@ export function claudeTools(tools: LanguageModelV4CallOptions["tools"]): {
       throw new ClaudeCliError(
         `Claude CLI runs Iva function tools only, got a ${tool.type} tool`,
       );
-    if (!TOOL_NAME.test(tool.name))
+    if (wireToolName(tool.name, CLAUDE_TOOL_NAME_MAX) !== tool.name)
       throw new ClaudeCliError(
         `tool name ${JSON.stringify(tool.name)} does not match [A-Za-z0-9_-]{1,${CLAUDE_TOOL_NAME_MAX}}`,
       );
