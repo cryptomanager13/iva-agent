@@ -120,9 +120,9 @@ Markdown) and let the nightly Brain run the mechanical pass later.
   you finish (`phases/link.md`).
 - **description is a search snippet, not the title.** One line, what/why, ~150 chars.
 - **tags:** 2–5, lowercase, kebab-case.
-- **Idempotent.** If the daily file ends with the processed marker, the day is done: only
-  reconcile entries after it; do not duplicate cards. Without it, the day is unfinished:
-  entries up to the last part marker are already processed, continue after it.
+- **Idempotent.** A day whose file ends with the processed marker is done: do not process
+  it again and do not duplicate its cards. A day without it is unfinished: entries up to
+  the last part marker are already processed, so continue with the first entry after it.
 - **One structure per card.** Exactly one `## Log` and one `## Related`; never emit
   dated `## Обновление` / `## Update` headings. Pass relations only through the
   `write_card.related` argument, never inside `body`.

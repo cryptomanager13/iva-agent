@@ -841,24 +841,24 @@ export async function runScheduledJob(
     // Провал факта уже назван в журнале строкой «fact not recorded» — не выдаём его за
     // неожиданный сбой, а отдаём тому, кто ждёт промис.
     if (error === run.factFailure) throw error;
-    return unexpectedFailure(o, error);
+    return await unexpectedFailure(o, error);
   } finally {
     if (run.reserved && hasStatus(o)) await clearReservation(o, run);
   }
 }
 
-// Неожиданный сбой — провал запуска с причиной. Журнал сам не должен выбросить наружу:
-// промис расписания обязан разрешиться.
-function unexpectedFailure(
+// Неожиданный сбой — провал запуска с причиной. Бросивший журнал причину не меняет:
+// промис расписания обязан разрешиться этим же провалом.
+async function unexpectedFailure(
   o: ResolvedOptions,
   error: unknown,
-): RunScheduledJobResult {
-  try {
-    o.log(
-      `schedule-runner: ${o.name} unexpected failure: ${errorMessage(error)}`,
-    );
-    return { skipped: false, ok: false, error };
-  } catch {
-    return { skipped: false, ok: false, error };
-  }
+): Promise<RunScheduledJobResult> {
+  await Promise.resolve()
+    .then(() =>
+      o.log(
+        `schedule-runner: ${o.name} unexpected failure: ${errorMessage(error)}`,
+      ),
+    )
+    .catch(() => undefined);
+  return { skipped: false, ok: false, error };
 }

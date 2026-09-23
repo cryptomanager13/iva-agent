@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 import { LEGACY_MEMORY_UNITS as CLI_LEGACY_MEMORY_UNITS } from "../../scripts/lib/legacy-memory-units.ts";
 import {
+  catchUpJob,
   LEGACY_MEMORY_UNITS,
   runScheduleMigration,
 } from "./schedule-migration.ts";
@@ -575,4 +576,19 @@ void test("a damaged status file defers the whole pass: no seed, no catch-up, an
     lines.some((l) => l.includes(statusPath)),
     "the journal must name the file the owner has to fix",
   );
+});
+
+void test("the catch-up run of a rollup carries the rollup's stop grace, like its schedule", () => {
+  const job = catchUpJob("daily", {
+    root: "/srv/iva",
+    nodeBin: "/usr/bin/node",
+    statusPath: "/srv/iva/data/rollup-status.json",
+    log: () => {},
+  });
+  assert.equal(job.name, "memory-daily");
+  assert.deepEqual(job.argv, ["scripts/memory/rollup.ts", "daily"]);
+  assert.equal(job.lockPath, "/srv/iva/.memory.lock");
+  assert.equal(job.factsPath, "/srv/iva/data/jobs.json");
+  // Без него после SIGTERM ребёнку 10 с: сводка не успевает погасить ход до SIGKILL.
+  assert.equal(job.killGraceMs, 90_000);
 });

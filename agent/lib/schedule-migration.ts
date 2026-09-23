@@ -31,13 +31,14 @@ import { jobFactsFile } from "./job-facts.ts";
 import { SCHEDULE_CRON, parseCron } from "./schedule-table.ts";
 import type { ScheduleCron, ScheduleName } from "./schedule-table.ts";
 import {
+  JOB_STOP_GRACE_MS,
   readStatus,
   runScheduledJob,
+  type RunScheduledJobOptions,
   withStatusLock,
   writeStatusAtomic,
 } from "./schedule-runner.ts";
 import { addDaysToDate, zonedParts, zonedToUtcMs } from "./zoned-time.ts";
-import { memoryRollupJob } from "./schedule-paths.ts";
 
 type Period = "daily" | "weekly" | "monthly" | "yearly";
 
@@ -243,6 +244,35 @@ function removeLegacyUnits({
   }
 }
 
+// Задание догона одного периода — то же, что у расписания, со своими путями и со сроком
+// остановки сводки (agent/lib/schedule-paths.ts): сводка гасит ход на сервере до SIGKILL.
+export function catchUpJob(
+  period: Period,
+  {
+    root,
+    nodeBin,
+    statusPath,
+    log,
+  }: {
+    readonly root: string | undefined;
+    readonly nodeBin: string;
+    readonly statusPath: string;
+    readonly log: (...args: unknown[]) => void;
+  },
+): RunScheduledJobOptions {
+  return {
+    name: statusKey(period),
+    argv: ["scripts/memory/rollup.ts", period],
+    root,
+    nodeBin,
+    lockPath: root ? join(root, ".memory.lock") : undefined,
+    statusPath,
+    factsPath: jobFactsFile(dirname(statusPath)),
+    killGraceMs: JOB_STOP_GRACE_MS,
+    log,
+  };
+}
+
 export async function runScheduleMigration({
   homedir,
   execImpl = defaultExecImpl,
@@ -260,16 +290,9 @@ export async function runScheduleMigration({
     const runPeriod =
       runJob ??
       ((period: Period) =>
-        runScheduledJob({
-          // Задание сводки описано в одном месте; догон подставляет свои пути.
-          ...memoryRollupJob(period),
-          root,
-          nodeBin,
-          lockPath: root ? join(root, ".memory.lock") : undefined,
-          statusPath,
-          factsPath: jobFactsFile(dirname(statusPath)),
-          log,
-        }));
+        runScheduledJob(
+          catchUpJob(period, { root, nodeBin, statusPath, log }),
+        ));
 
     // Per-key seed, the seed write, AND the due-check all happen inside the
     // SAME single lock acquisition runScheduledJob's own admission check uses — never
