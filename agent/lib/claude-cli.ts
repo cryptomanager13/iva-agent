@@ -67,10 +67,13 @@ import {
   type NativeMessage,
 } from "./claude-admission.ts";
 import { CANONICAL_REASONING_EFFORTS } from "./reasoning-levels.ts";
+import { TOOL_NAME_MAX } from "./tool-wire-name.ts";
 
 const CLAUDE_PROVIDER_ID = "iva-claude";
 /** Префикс имён инструментов в муляже MCP: по нему видно, что вызов пришёл от Iva. */
 export const CLAUDE_TOOL_PREFIX = "mcp__iva__";
+/** Предел имени без префикса: на проводе имя с префиксом укладывается в TOOL_NAME_MAX. */
+export const CLAUDE_TOOL_NAME_MAX = TOOL_NAME_MAX - CLAUDE_TOOL_PREFIX.length;
 /** Тишина CLI, после которой ход считается мёртвым. Отсчитывается заново на каждом событии. */
 export const CLAUDE_SILENCE_TIMEOUT_MS = 180_000;
 /** Сколько ждать выхода процесса после того, как он закрыл вывод. */
@@ -209,8 +212,8 @@ export function claudeContextWindow(route: string): number {
   return claudeModel(route).window;
 }
 
-/** Имя инструмента: то же правило, что у Anthropic — до 50 символов ASCII. */
-const TOOL_NAME = /^[A-Za-z0-9_-]{1,50}$/u;
+/** Имя инструмента: правило Anthropic, [A-Za-z0-9_-] и вместе с префиксом до 64 символов. */
+const TOOL_NAME = new RegExp(`^[A-Za-z0-9_-]{1,${CLAUDE_TOOL_NAME_MAX}}$`, "u");
 /**
  * Усилия, которые принимает `output_config.effort`. `minimal` в их числе нет: подписка
  * отвечает на него 400, а `disabled` Iva и не знает — словарь лежит в reasoning-levels.ts
@@ -328,7 +331,7 @@ export function claudeTools(tools: LanguageModelV4CallOptions["tools"]): {
       );
     if (!TOOL_NAME.test(tool.name))
       throw new ClaudeCliError(
-        `tool name ${JSON.stringify(tool.name)} does not match [A-Za-z0-9_-]{1,50}`,
+        `tool name ${JSON.stringify(tool.name)} does not match [A-Za-z0-9_-]{1,${CLAUDE_TOOL_NAME_MAX}}`,
       );
     if (names.includes(tool.name))
       throw new ClaudeCliError(

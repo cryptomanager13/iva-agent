@@ -1790,13 +1790,13 @@ test("команда CLI берётся из CLAUDE_COMMAND, иначе из PAT
   assert.equal(claudeCommand({ CLAUDE_COMMAND: "/opt/claude" }), "/opt/claude");
 });
 
-test("имя инструмента — только ASCII до 50 символов", () => {
+test("имя инструмента — только ASCII, с префиксом до 64 символов", () => {
   const tool = (name: string): LanguageModelV4FunctionTool => ({
     ...WEATHER,
     name,
   });
-  assert.equal(claudeTools([tool("a".repeat(50))]).names.length, 1);
-  assert.throws(() => claudeTools([tool("a".repeat(51))]), /50/u);
+  assert.equal(claudeTools([tool("a".repeat(54))]).names.length, 1);
+  assert.throws(() => claudeTools([tool("a".repeat(55))]), /54/u);
   assert.throws(() => claudeTools([tool("погода")]), /A-Za-z0-9_-/u);
   assert.throws(() => claudeTools([tool("same"), tool("same")]), /unique/u);
   assert.throws(

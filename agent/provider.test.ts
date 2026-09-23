@@ -1428,3 +1428,133 @@ void test("a vendor without replay gets no reasoning from an older history", asy
     false,
   );
 });
+
+// --- Имена инструментов на проводе: одна граница на всех вендоров ------------------------------
+// Имя подключения eve бывает любой длины и алфавита (#240). makeTextModel кодирует его до
+// провайдера: у claude — в пределе без префикса mcp__iva__, у остальных — в 64.
+
+async function loadProviderAs(name: string): Promise<ProviderModule> {
+  const previous = process.env.MODEL_PROVIDER;
+  process.env.MODEL_PROVIDER = name;
+  try {
+    const specifier = `./provider.ts?provider=${name}`;
+    const loaded: unknown = await import(specifier);
+    return loaded as ProviderModule;
+  } finally {
+    process.env.MODEL_PROVIDER = previous;
+  }
+}
+
+function namedTool(name: string): LanguageModelV4FunctionTool {
+  return { type: "function", name, inputSchema: { type: "object" } };
+}
+
+/** Окружение на время теста: ключи Anthropic увели бы CLI мимо подписки ещё до запуска. */
+function claudeTestEnv(t: TestContext, command: string): void {
+  const saved = { ...process.env };
+  for (const key of Object.keys(process.env))
+    if (key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_CODE_USE_"))
+      delete process.env[key];
+  process.env.CLAUDE_COMMAND = command;
+  t.after(() => {
+    for (const key of Object.keys(process.env))
+      if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  });
+}
+
+void test("claude: имя инструмента длиннее 54 символов доходит до запуска CLI", async (t) => {
+  const claude = await loadProviderAs("claude");
+  const dir = mkdtempSync(join(tmpdir(), "iva-claude-wire-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  claudeTestEnv(t, join(dir, "no-such-claude"));
+  const model = claude.makeTextModel({ chatModelSeesImages: blindToImages });
+  const name = "eva_sources_runtime__granola__query_granola_meetings_v2";
+  assert.ok(name.length > 54 && name.length <= 64);
+  let failure: unknown;
+  try {
+    const { stream } = await model.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [namedTool(name)],
+    });
+    for await (const part of stream)
+      if (part.type === "error") failure = part.error;
+  } catch (error) {
+    failure = error;
+  }
+  // Имя прошло claudeTools: вызов дошёл до запуска несуществующего бинаря.
+  assert.ok(
+    failure instanceof Error,
+    "вызов без CLI не может кончиться успехом",
+  );
+  assert.doesNotMatch(failure.message, /tool name/u);
+  assert.match(failure.message, /did not start/u);
+});
+
+function sse(chunks: unknown[]): Response {
+  const body = chunks
+    .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+    .join("")
+    .concat("data: [DONE]\n\n");
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+/** Запросы, ушедшие провайдеру; `answers` отдаются по очереди. */
+function captureRequests(
+  t: TestContext,
+  answers: (() => Response)[],
+): Record<string, unknown>[] {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = (_input, init) => {
+    bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+    return Promise.resolve(answers.shift()!());
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return bodies;
+}
+
+const OK_CHUNK = {
+  id: "c",
+  object: "chat.completion.chunk",
+  created: 0,
+  model: "test",
+  choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+};
+
+void test("повтор после отказа схемы тоже уходит с проводными именами", async (t) => {
+  const go = await loadOpencodeProvider();
+  const bodies = captureRequests(t, [
+    () =>
+      Response.json(
+        {
+          error: {
+            message:
+              "Invalid JSON schema: regex lookaround is not supported. Found at $.properties.attendees.items.pattern.",
+            type: "invalid_request_error",
+            param: "tools",
+            code: "invalid_json_schema",
+          },
+        },
+        { status: 400 },
+      ),
+    () => sse([OK_CHUNK]),
+  ]);
+  const long = `calendar.${"x".repeat(70)}`;
+  const [calendar] = calendarTools();
+  const model = go.makeTextModel({ chatModelSeesImages: blindToImages });
+  const { stream } = await model.doStream({
+    prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    tools: [{ ...calendar, name: long }],
+  });
+  await stream.pipeTo(new WritableStream());
+  assert.equal(bodies.length, 2, "отказ схемы повторён один раз");
+  for (const body of bodies) {
+    const [sent] = body.tools as { function: { name: string } }[];
+    assert.match(sent.function.name, /^[A-Za-z0-9_-]{1,64}$/u);
+  }
+});

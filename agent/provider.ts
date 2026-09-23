@@ -16,7 +16,11 @@ import {
   MAX_IMAGE_BYTES,
 } from "./lib/attachment-ref.ts";
 import { resolveAttachmentPath } from "./lib/telegram-media-cache.ts";
-import { claudeContextWindow, makeClaudeCliModel } from "./lib/claude-cli.ts";
+import {
+  CLAUDE_TOOL_NAME_MAX,
+  claudeContextWindow,
+  makeClaudeCliModel,
+} from "./lib/claude-cli.ts";
 import {
   CODEX_BASE_URL,
   codexAuthHeaders,
@@ -29,6 +33,7 @@ import {
   type ModelProviderName,
 } from "./lib/model-provider.ts";
 import { CANONICAL_REASONING_EFFORTS as EFFORTS } from "./lib/reasoning-levels.ts";
+import { TOOL_NAME_MAX, toolNameWireMiddleware } from "./lib/tool-wire-name.ts";
 
 type WrappableModel = Parameters<typeof wrapLanguageModel>[0]["model"];
 type ModelStreamPart =
@@ -738,6 +743,11 @@ export function makeTextModel(options: {
       attachImagesMiddleware(options.chatModelSeesImages),
       toolSchemaRetryMiddleware,
       modelFirstChunkDeadlineMiddleware,
+      // Последним, то есть ближе всех к провайдеру: повтор toolSchemaRetryMiddleware идёт
+      // через model.doStream и тоже получает проводные имена.
+      toolNameWireMiddleware(
+        providerName === "claude" ? CLAUDE_TOOL_NAME_MAX : TOOL_NAME_MAX,
+      ),
     ],
   });
 }
