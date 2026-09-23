@@ -1,4 +1,5 @@
 import { resolveContextWindow } from "../../packages/context-window/index.ts";
+import { claudeContextWindow } from "../../agent/lib/claude-cli.ts";
 import { catalogModel, catalogProvider } from "./model-catalog.ts";
 
 type Env = Record<string, string | undefined>;
@@ -6,8 +7,8 @@ type Env = Record<string, string | undefined>;
 // Короткая подпись провайдера для одной строки статуса — не лейбл каталога (там
 // «Ollama Cloud»). Имя переменной модели здесь НЕ повторяется: раньше это был третий
 // реестр, и переименуй его кто-нибудь — экран обновления показывал бы «?» на рабочей
-// установке, а никакой тест бы не заметил. Модель берётся из каталога, окно контекста —
-// единственное, что осталось локальным, и оно ни с чем не пересекается.
+// установке, а никакой тест бы не заметил. Модель берётся из каталога, окно Claude
+// без явной настройки — из того же резолвера модели, что использует рантайм.
 const PROVIDERS: Record<string, { label: string; context: string }> = {
   ollama: { label: "Ollama", context: "OLLAMA_CONTEXT_WINDOW" },
   opencode: { label: "OpenCode", context: "OPENCODE_CONTEXT_WINDOW" },
@@ -19,6 +20,17 @@ const PROVIDERS: Record<string, { label: string; context: string }> = {
 
 /** Имена провайдеров, которые умеет подписать этот экран. Сверяются с рантаймом в тесте. */
 export const SUMMARY_PROVIDER_NAMES = Object.keys(PROVIDERS);
+
+function modelContextWindow(
+  provider: string,
+  model: string,
+  variable: string | null,
+  env: Env,
+): number | null {
+  const raw = variable ? env[variable] : undefined;
+  if (variable && raw !== undefined) return resolveContextWindow(variable, raw);
+  return provider === "claude" ? claudeContextWindow(model) : null;
+}
 
 /**
  * Display-only модель и окно контекста. Значение модели читается тем же правилом, что и
@@ -39,11 +51,7 @@ export function modelSummary(env: Env = process.env): {
   const label = known ? PROVIDERS[id].label : `invalid (${id})`;
   const model = known ? (catalogModel(id, env) ?? "?") : "?";
   const contextVariable = known ? PROVIDERS[id].context : null;
-  const rawContext = contextVariable ? env[contextVariable] : undefined;
-  const contextWindow =
-    contextVariable && rawContext !== undefined
-      ? resolveContextWindow(contextVariable, rawContext)
-      : null;
+  const contextWindow = modelContextWindow(id, model, contextVariable, env);
   return {
     provider: label,
     model,

@@ -2,6 +2,8 @@
 import "../fixtures/rich-menu-style.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
+import fc from "fast-check";
+import { claudeContextWindow } from "../../agent/lib/claude-cli.ts";
 import { MODEL_PROVIDER_NAMES } from "#lib/model-provider.ts";
 import {
   CONTEXT_WINDOW_CONFIGURATION_ERROR,
@@ -91,6 +93,55 @@ test("modelSummary uses the exact context-window resolver", () => {
         `${provider}:${JSON.stringify(raw)}`,
       );
     }
+  }
+});
+
+test("Claude summary uses the runtime model window without an explicit setting", () => {
+  for (const model of [
+    "claude-opus-5-5",
+    "opus",
+    "claude-opus-5-5[1m]",
+    "haiku",
+    "unknown-model",
+    "",
+  ]) {
+    const summary = modelSummary({
+      MODEL_PROVIDER: "claude",
+      CLAUDE_MODEL: model,
+    });
+    assert.equal(
+      summary.contextWindow,
+      claudeContextWindow(summary.model),
+      model,
+    );
+  }
+  fc.assert(
+    fc.property(fc.string(), (model) => {
+      const env = { MODEL_PROVIDER: "claude", CLAUDE_MODEL: model };
+      const summary = modelSummary(env);
+      assert.equal(summary.contextWindow, claudeContextWindow(summary.model));
+      assert.equal(
+        modelSummary({ ...env, CLAUDE_CONTEXT_WINDOW: "123456" }).contextWindow,
+        123456,
+      );
+      assert.deepEqual(modelSummary(env), summary);
+    }),
+  );
+  for (const raw of [
+    "",
+    "junk",
+    "0",
+    "-1",
+    "1.5",
+    "1e6",
+    " ",
+    "9007199254740992",
+  ]) {
+    assert.throws(
+      () =>
+        modelSummary({ MODEL_PROVIDER: "claude", CLAUDE_CONTEXT_WINDOW: raw }),
+      ContextWindowConfigurationError,
+    );
   }
 });
 
@@ -607,6 +658,14 @@ test("update callback is acknowledged before any message edit", async () => {
       message: { chat: { id: 1 }, message_id: 2 },
     });
     assert.deepEqual(calls, ["answerCallbackQuery", "editMessageText"]);
+    assert.equal(
+      bridge.resetMessageCopy(
+        "/new",
+        { MODEL_PROVIDER: "claude", CLAUDE_MODEL: "claude-opus-5-5" },
+        "ru",
+      ).complete,
+      "✨ Новый диалог готов\n\nМодель: Claude · claude-opus-5-5\nКонтекст очищен · окно 1000k",
+    );
     assert.deepEqual(
       bridge.resetMessageCopy(
         "/new",
