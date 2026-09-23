@@ -38,7 +38,10 @@ Content of the entry
 
 1. **Never modify** existing entries — no edits to content, timestamps, or order.
 2. **Never insert** content between entries.
-3. The processor appends **only** a processing marker at the very end:
+3. The processor appends **only** processing markers at the very end: a part marker
+   `<!-- processed-through: HH:MM -->` after each finished part of a large day (HH:MM is
+   the heading of the part's last entry; the rollup resumes after the last one), and,
+   when the day is done, the processed marker:
    ```markdown
    <!-- processed: YYYY-MM-DDTHH:MM -->
 

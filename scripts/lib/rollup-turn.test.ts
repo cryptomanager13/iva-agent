@@ -1,16 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fc from "fast-check";
 import { ClientError } from "eve/client";
 import {
   cancelTurnAndConfirmQuietly,
   canRetryFresh,
-  cancelTurnQuietly,
-  DEFAULT_TURN_TIMEOUT_MS,
   isSessionNotActiveError,
   RollupTurnTimeoutError,
-  resolveTurnTimeoutMs,
+  resolveStopAt,
   withTurnTimeout,
 } from "./rollup-turn.ts";
+import { DEFAULT_TIMEOUT_MS, JOB_STOP_GRACE_MS } from "#lib/schedule-runner.ts";
 
 interface TestTurnResult {
   readonly events?: readonly { readonly type?: string }[];
@@ -233,64 +233,99 @@ void test("a hung turn rejects with a labelled timeout error", async () => {
 void test("the timer is cleared, so the next turn runs right after a win", async () => {
   assert.equal(
     await withTurnTimeout(() => Promise.resolve(1), {
-      timeoutMs: DEFAULT_TURN_TIMEOUT_MS,
+      timeoutMs: 60_000,
       label: "first",
     }),
     1,
   );
   assert.equal(
     await withTurnTimeout(() => Promise.resolve(2), {
-      timeoutMs: DEFAULT_TURN_TIMEOUT_MS,
+      timeoutMs: 60_000,
       label: "second",
     }),
     2,
   );
-  // Файл теста завершается сам: незачищенный 10-минутный таймер держал бы event loop.
+  // Файл теста завершается сам: незачищенный минутный таймер держал бы event loop.
 });
 
-void test("the configured timeout is taken only when it is a sane millisecond count", () => {
-  assert.equal(resolveTurnTimeoutMs("60000"), 60000);
-  assert.equal(resolveTurnTimeoutMs(undefined), DEFAULT_TURN_TIMEOUT_MS);
+// Свойства: при провале fast-check печатает { seed, path } — подставь их вторым
+// аргументом fc.assert, и прогон повторится байт в байт.
+const NOW = 1_800_000_000_000;
+
+void test("the configured stop time is taken only when it is a sane epoch in milliseconds", () => {
+  fc.assert(
+    fc.property(fc.integer({ min: 0, max: NOW + 2 ** 31 - 1 }), (stopAt) => {
+      assert.equal(resolveStopAt(String(stopAt), NOW), stopAt);
+    }),
+  );
+  // Ручной запуск мимо раннера получает тот же потолок расписания от своего старта.
+  assert.equal(
+    resolveStopAt(undefined, NOW),
+    NOW + DEFAULT_TIMEOUT_MS - JOB_STOP_GRACE_MS,
+  );
+  assert.equal(resolveStopAt("", NOW), resolveStopAt(undefined, NOW));
 });
 
-void test("a malformed timeout falls back to the default and warns", () => {
-  // Пустое значение и мусор дают Number() → 0/NaN: без разбора это был бы таймер на 1 мс,
-  // то есть мгновенно «зависший» ход на каждой ночи.
-  for (const raw of ["", "  ", "abc", "0", "-1", "1.5", String(2 ** 31)]) {
-    const warnings: string[] = [];
-    assert.equal(
-      resolveTurnTimeoutMs(raw, { warn: (m) => warnings.push(m) }),
-      DEFAULT_TURN_TIMEOUT_MS,
-    );
-    if (raw.trim() !== "")
-      assert.equal(
-        warnings.length,
-        1,
-        `expected a warning for ${JSON.stringify(raw)}`,
-      );
-  }
+void test("a malformed stop time is refused instead of falling back to a default", () => {
+  // Тихий дефолт снова развёл бы срок хода и потолок расписания; число за пределом
+  // 32-битного таймера Node схлопнул бы в 1 мс.
+  fc.assert(
+    fc.property(
+      fc.oneof(
+        fc.string().filter((raw) => raw !== "" && !/^\d+$/u.test(raw)),
+        fc
+          .bigInt({ min: BigInt(NOW) + 2n ** 31n, max: 10n ** 30n })
+          .map(String),
+      ),
+      (raw) => {
+        assert.throws(() => resolveStopAt(raw, NOW), /IVA_JOB_STOP_AT=/u);
+      },
+    ),
+  );
 });
 
-void test("a hung cancel is swallowed instead of blocking the retry", async () => {
-  const session = { cancel: () => new Promise(() => {}) };
-  assert.equal(await cancelTurnQuietly(session, { timeoutMs: 30 }), false);
+const quick = { timeoutMs: 30 };
+
+void test("a hung cancel is swallowed instead of blocking the exit", async () => {
+  const hung = { cancel: () => new Promise<{ status?: string }>(() => {}) };
+  assert.equal(
+    await cancelTurnAndConfirmQuietly(hung, undefined, quick),
+    false,
+  );
 });
 
 void test("a refused cancel is swallowed too", async () => {
   // Не начатая сессия бросает синхронно, заклинившая может ответить 500 — оба исхода не наши.
   const throws = {
-    cancel: () => {
+    cancel: (): Promise<{ status?: string }> => {
       throw new Error("session has not started");
     },
   };
   const rejects = {
-    cancel: () => Promise.reject(new Error("500 cancel-turn")),
+    cancel: (): Promise<{ status?: string }> =>
+      Promise.reject(new Error("500 cancel-turn")),
   };
-  assert.equal(await cancelTurnQuietly(throws, { timeoutMs: 30 }), false);
-  assert.equal(await cancelTurnQuietly(rejects, { timeoutMs: 30 }), false);
+  assert.equal(
+    await cancelTurnAndConfirmQuietly(throws, undefined, quick),
+    false,
+  );
+  assert.equal(
+    await cancelTurnAndConfirmQuietly(rejects, undefined, quick),
+    false,
+  );
 });
 
-void test("an accepted cancel reports success", async () => {
-  const session = { cancel: () => Promise.resolve({ status: "accepted" }) };
-  assert.equal(await cancelTurnQuietly(session, { timeoutMs: 30 }), true);
+void test("a cancel with no active turn reports success and stops the spawned tasks too", async () => {
+  const seen: unknown[] = [];
+  const session = {
+    cancel: (options?: unknown) => {
+      seen.push(options);
+      return Promise.resolve({ status: "no_active_turn" });
+    },
+  };
+  assert.equal(
+    await cancelTurnAndConfirmQuietly(session, undefined, quick),
+    true,
+  );
+  assert.deepEqual(seen, [{ tasks: true }]);
 });

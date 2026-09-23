@@ -2,11 +2,18 @@
 // Run by the in-process eve schedules in agent/schedules/memory-*.ts, drives Iva
 // via eve/client (like scripts/daily-digest.ts), and posts a report to Telegram for daily/weekly.
 //
-//   node --env-file=.env scripts/memory/rollup.ts <daily|weekly|monthly|yearly>
+//   node --env-file=.env scripts/memory/rollup.ts <daily [YYYY-MM-DD]|weekly|monthly|yearly>
 //
+// daily без даты разбирает пропущенные дни окна (rollup-days.ts), с датой — ровно этот день.
 // Requires: a running agent (eve start) and a vault to write into. The processing rules
 // (scripts/memory/instructions/) ship with the repo. Date is in ASSISTANT_TIMEZONE.
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +24,7 @@ import { writeFileAtomicSync } from "#lib/fs-atomic.ts";
 import { commitVaultWrite } from "#lib/vault-commit.ts";
 import { tr } from "#lib/i18n.ts";
 import { readSettings } from "#lib/settings.ts";
+import { JOB_STOP_AT_ENV } from "#lib/schedule-runner.ts";
 import {
   alertOnce,
   alertResolved,
@@ -35,11 +43,18 @@ import { readCore } from "./read-core.ts";
 import {
   cancelTurnAndConfirmQuietly,
   canRetryFresh,
-  cancelTurnQuietly,
   isSessionNotActiveError,
-  resolveTurnTimeoutMs,
+  resolveStopAt,
   withTurnTimeout,
 } from "../lib/rollup-turn.ts";
+import {
+  dayProgress,
+  isDayDone,
+  LOOKBACK_DAYS,
+  pendingDays,
+  shiftDate,
+  type DayState,
+} from "../lib/rollup-days.ts";
 import {
   attachRollupNonce,
   drainStreamBefore,
@@ -55,9 +70,18 @@ type Period = "daily" | "weekly" | "monthly" | "yearly";
 const PERIODS: readonly Period[] = ["daily", "weekly", "monthly", "yearly"];
 // process.argv: [node, script, <period>] — the period is the first CLI argument.
 const period = process.argv[2] as Period | undefined;
+// Необязательная дата дня для daily: ручной догон конкретного пропущенного дня.
+const dateArg = process.argv[3];
 
-if (!period || !PERIODS.includes(period)) {
-  console.error(`Usage: rollup.ts <${PERIODS.join("|")}>`);
+if (
+  !period ||
+  !PERIODS.includes(period) ||
+  (dateArg !== undefined &&
+    (period !== "daily" ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(dateArg) ||
+      shiftDate(dateArg, 0) !== dateArg))
+) {
+  console.error(`Usage: rollup.ts <daily [YYYY-MM-DD]|weekly|monthly|yearly>`);
   process.exit(1);
 }
 
@@ -103,22 +127,24 @@ function localDate(): string {
   }).format(new Date());
 }
 
-// Shift an ISO date (YYYY-MM-DD) by N days; arithmetic in UTC, no DST edge cases.
-function shiftDate(iso: string, deltaDays: number): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() + deltaDays);
-  return dt.toISOString().slice(0, 10);
-}
-
 // We take the target period as COMPLETED: schedules fire at the start of a new period
 // (daily ≈04:00, weekly on Mon, monthly on the 1st, yearly on Jan 1), so we process
 // the PREVIOUS period, not the empty current one (now is the current local date).
 // Задание ночи для daily: разбор сырого дня в карточки, сводка дня, CORE и уроки.
-function dailyTask(yesterday: string): string {
+// Отметку части читает код: «докуда дошли» детерминированно, модель продолжает с неё.
+function dailyTask(day: string): string {
+  const raw = readDay(day).raw;
+  const resumeAfter = raw === null ? null : dayProgress(raw).through;
   return (
-    `Process the raw transcript of the completed day (${VAULT()}/daily/${yesterday}.md): ` +
-    `extract entities and create/update autograph cards. Prefer the write_card tool over write_file ` +
+    `Process the raw transcript of the completed day (${VAULT()}/daily/${day}.md): ` +
+    `extract entities and create/update autograph cards. ` +
+    `Work through the day in parts and mark each finished part in the transcript, per the ` +
+    `memory-processor skill (${INSTRUCTIONS}/memory-processor/SKILL.md): a cut run resumes from that mark. ` +
+    (resumeAfter === null
+      ? ""
+      : `Entries up to and including ${resumeAfter} are already processed (the last processed-through ` +
+        `mark): start with the first entry after ${resumeAfter}, and extend the day's existing summary. `) +
+    `Prefer the write_card tool over write_file ` +
     `for cards — it enforces the schema. For each fact choose one operation: ADD (new), ` +
     `UPDATE (existing subject, compatible new fact), SUPERSEDE (contradicts the Compiled Truth), ` +
     `or NOOP (already known). Pass history_entry only for SUPERSEDE, never for ADD, UPDATE, or NOOP. ` +
@@ -139,8 +165,8 @@ function dailyTask(yesterday: string): string {
     `keeping — a note card with status: archived. ` +
     `First read ${VAULT()}/.graph/supersede-candidates.json (the deterministic conflict scan) and ` +
     `resolve every listed same-entity conflict by superseding the stale card. ` +
-    `Then assemble a daily-summary for ${yesterday} with the day's topics and MOC links down to the cards ` +
-    `and to the raw transcript daily/${yesterday}.md. ` +
+    `Then assemble a daily-summary for ${day} with the day's topics and MOC links down to the cards ` +
+    `and to the raw transcript daily/${day}.md. ` +
     `Link a card only by the 'file' path write_card returned in this turn, or by a path memory_search ` +
     `or read_file showed you; never derive a path from a title — a slug is lowercased, its punctuation ` +
     `becomes '-', and it is cut at 60 characters, so a derived path points at no file. ` +
@@ -159,7 +185,8 @@ function dailyTask(yesterday: string): string {
   );
 }
 
-function buildPrompt(p: Period, now: string): string {
+// day — разбираемый день daily; прочие периоды считают от вчера сами.
+function buildPrompt(p: Period, now: string, day: string): string {
   const [y, m] = now.split("-").map(Number);
   const yesterday = shiftDate(now, -1);
   const prevMonth =
@@ -178,7 +205,7 @@ function buildPrompt(p: Period, now: string): string {
 
   switch (p) {
     case "daily":
-      return intro + dailyTask(yesterday) + tail;
+      return intro + dailyTask(day) + tail;
     case "weekly":
       return (
         intro +
@@ -304,25 +331,26 @@ async function resetAbandonedSession(
   }
 }
 
-// Ход целиком (create/send + result) под таймаутом: резюм припаркованной сессии
+// Срок один — срок запуска у раннера (agent/lib/schedule-runner.ts): каждый ход получает
+// остаток до момента «работу кончить», а после него остаётся срок остановки до SIGTERM.
+const STOP_AT = resolveStopAt(process.env[JOB_STOP_AT_ENV], Date.now());
+const remainingMs = (): number => STOP_AT - Date.now();
+
+// Сессия и последний принятый ход на сервере. Их гасит любой обрыв: срок, SIGTERM,
+// ход без отчёта. Выход процесса отпускает .memory.lock, а живой ход писал бы vault дальше.
+let live:
+  { session: ClientSession; result?: Promise<MessageResult> } | undefined;
+
+// Ход целиком (create/send + result) под сроком: резюм припаркованной сессии
 // после рестарта сервера может виснуть молча (vercel/eve#1450).
-const TURN_TIMEOUT_MS = resolveTurnTimeoutMs(
-  process.env.ROLLUP_TURN_TIMEOUT_MS,
-  {
-    warn: (message) => console.error(`rollup ${period}: ${message}`),
-  },
-);
 const guardedTurn = (
   session: ClientSession | undefined,
   prompt: string,
   label: string,
-  onAccepted: (
-    session: ClientSession,
-    result: Promise<MessageResult>,
-  ) => void = () => {},
 ) =>
   withTurnTimeout(
     async () => {
+      if (session) live = { session };
       const send = async () => {
         const sentNotBefore = sentNotBeforeIso();
         if (session) {
@@ -344,27 +372,50 @@ const guardedTurn = (
                 `rollup ${period}: ${label}: pre-send stream drain failed (${error.message}) — aborting send`,
               );
             },
-            TURN_TIMEOUT_MS,
+            remainingMs(),
           )
         : await send();
       const result = sent.response.result();
-      onAccepted(sent.session, result);
+      live = { session: sent.session, result };
       return {
         result: await result,
         sentNotBefore: sent.sentNotBefore,
         session: sent.session,
       };
     },
-    { timeoutMs: TURN_TIMEOUT_MS, label },
+    { timeoutMs: remainingMs(), label },
   );
 
-// Зависший ход на сервере не останавливается сам. Поэтому ход гасим, сессию помечаем
-// брошенной и удаляем её ID — завтра стартуем со свежей.
+// Гасит ход на сервере вместе с его задачами и ждёт подтверждения. Без подтверждения
+// сессия брошена и сброшена: второго писателя за ней не будет.
+async function stopLive(reason: string): Promise<void> {
+  if (!live) return;
+  const { session, result } = live;
+  if (await cancelTurnAndConfirmQuietly(session, result)) return;
+  console.error(
+    `rollup ${period}: could not confirm cancellation of the turn (${reason})`,
+  );
+  logAbandoned(session.state.sessionId, `${reason}-cancel-unconfirmed`);
+  await resetAbandonedSession(
+    session.state.sessionId,
+    `${reason}-cancel-unconfirmed`,
+    session,
+  );
+}
+
+// SIGTERM раннера — тот же обрыв, что и свой срок: сначала погасить ход, потом выйти.
+process.once("SIGTERM", () => {
+  console.error(`rollup ${period}: SIGTERM — stopping the server turn`);
+  void stopLive("sigterm").finally(() => process.exit(1));
+});
+
+// Срок вышел или сессия не отвечает: ход гасим, сессию помечаем брошенной и удаляем её
+// ID — следующий запуск стартует со свежей и продолжает день с отметки в vault.
 async function dropHungSession(
   hungSession: ClientSession,
   label: string,
 ): Promise<void> {
-  await cancelTurnQuietly(hungSession);
+  await stopLive(label);
   const reason = `${label}-timeout`;
   logAbandoned(hungSession.state.sessionId, reason);
   await resetAbandonedSession(hungSession.state.sessionId, reason, hungSession);
@@ -373,6 +424,33 @@ async function dropHungSession(
   } catch {
     /* ID сессии — кэш, его потеря не должна ронять ночь */
   }
+}
+
+// Сырой день и его сводка — вход детерминированной половины (rollup-days.ts).
+function readDay(date: string): DayState {
+  let raw: string | null;
+  try {
+    raw = readFileSync(join(VAULT(), "daily", `${date}.md`), "utf8");
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") throw error;
+    raw = null;
+  }
+  return {
+    raw,
+    summaryExists: existsSync(
+      join(VAULT(), "summaries", "daily", `${date}.md`),
+    ),
+  };
+}
+
+// Новейший сделанный день окна. Указатель CORE не уходит назад, когда догон
+// разбирает день старше уже сделанного.
+function latestDoneDay(): string | null {
+  for (let back = 0; back < LOOKBACK_DAYS; back++) {
+    const date = shiftDate(yesterday, -back);
+    if (isDayDone(readDay(date))) return date;
+  }
+  return null;
 }
 
 const CORE_PATH = join(VAULT(), "CORE.md");
@@ -387,96 +465,88 @@ function readCoreText(path: string): string {
 
 const today = localDate();
 const yesterday = shiftDate(today, -1);
+// Дни этого запуска: для daily — дата из аргумента или пропущенные дни окна, старые
+// первыми; прочие периоды считают свой период от вчера.
+const days =
+  period !== "daily"
+    ? [yesterday]
+    : dateArg !== undefined
+      ? [dateArg]
+      : pendingDays(yesterday, readDay);
+if (days.length === 0) {
+  console.log(`rollup daily (${today}): every day of the window is processed`);
+  process.exit(0);
+}
 // Снимок CORE ДО хода: файл правит сама ночь, и пропажу секции видно только сравнением
 // с тем, что было. Читается всегда, даже если ночь CORE не откроет вовсе.
 const coreBeforeTurn = period === "daily" ? readCoreText(CORE_PATH) : "";
 const saved = await loadSession();
 let sessionCreatedAt = saved?.createdAt ?? Date.now();
 let session = saved ? client.sessions.attach(saved.sessionId) : undefined;
+
+const isTimeout = (error: unknown): boolean =>
+  (error as { code?: string }).code === "ROLLUP_TURN_TIMEOUT";
+
+// Первый ход идёт в сохранённую сессию. Непригодная сессия (не срок) даёт одну свежую
+// попытку, и только после доказательства, что старый ход больше не пишет.
+async function firstTurn(prompt: string) {
+  try {
+    return await guardedTurn(session, prompt, "main-turn");
+  } catch (e) {
+    if (!saved || isTimeout(e)) {
+      await stopLive("main-turn");
+      throw e;
+    }
+    // Даже отклонённый локально send мог дойти до сервера до сетевого обрыва. Перед retry
+    // он требует no_active_turn либо turn.cancelled. Исключение — штатный 409 session_not_active.
+    // Успешный cancel со статусом accepted сам по себе второго писателя не разрешает.
+    const sessionNotActive = isSessionNotActiveError(e);
+    const cancelConfirmed =
+      !sessionNotActive && live
+        ? await cancelTurnAndConfirmQuietly(live.session, live.result)
+        : false;
+    if (!canRetryFresh({ sessionNotActive, cancelConfirmed })) {
+      console.error(
+        `rollup ${period}: could not confirm cancellation of the unresolved turn — refusing fresh retry`,
+      );
+      logAbandoned(saved.sessionId, "cancel-unconfirmed");
+      await resetAbandonedSession(
+        saved.sessionId,
+        "cancel-unconfirmed",
+        session,
+      );
+      throw e;
+    }
+    console.error(
+      `rollup ${period}: parked session unusable (${(e as Error).message}) — starting fresh`,
+    );
+    logAbandoned(saved.sessionId, "unusable-session");
+    await resetAbandonedSession(saved.sessionId, "unusable-session", session);
+    live = undefined;
+    sessionCreatedAt = Date.now();
+    // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
+    try {
+      return await guardedTurn(undefined, prompt, "main-turn");
+    } catch (retryError) {
+      await stopLive("main-turn");
+      throw retryError;
+    }
+  }
+}
+
 // Обход vercel/eve#2461: result() на резюмнутой сессии может вернуть чужой ход.
 // Nonce делает промпт уникальным для этого Rollup; guardedTurn сдвигает курсор
 // на хвост перед каждым send. Снять, когда eve свяжет result() с отправленным ходом.
-const mainPrompt = attachRollupNonce(buildPrompt(period, today), randomUUID());
-let result: MessageResult;
-let sentNotBefore: string;
-let acceptedTurnResult: Promise<MessageResult> | undefined;
-try {
-  const main = await guardedTurn(
-    session,
-    mainPrompt,
-    "main-turn",
-    (acceptedSession, turnResult) => {
-      session = acceptedSession;
-      acceptedTurnResult = turnResult;
-    },
-  );
-  ({ result, sentNotBefore, session } = main);
-} catch (e) {
-  // The parked session may be gone (iva reset quarantined the store) or hung on resume —
-  // fall back to a fresh one once only after proving the old turn cannot keep writing.
-  const hung = (e as { code?: string }).code === "ROLLUP_TURN_TIMEOUT";
-  // Выход наверх роняет процесс и отпускает .memory.lock, а зависший ход продолжает писать
-  // в vault — уже без всякой защиты от параллельного роллапа. Гасим и на терминальных путях.
-  if (!saved) {
-    if (hung && session) await cancelTurnQuietly(session);
-    throw e;
-  }
-  // Даже отклонённый локально send мог дойти до сервера до сетевого обрыва. Перед retry
-  // он требует no_active_turn либо turn.cancelled. Исключение — штатный 409 session_not_active.
-  // Успешный cancel со статусом accepted сам по себе второго писателя не разрешает.
-  const sessionNotActive = isSessionNotActiveError(e);
-  const cancelConfirmed =
-    !sessionNotActive && session
-      ? await cancelTurnAndConfirmQuietly(session, acceptedTurnResult)
-      : false;
-  if (!canRetryFresh({ sessionNotActive, cancelConfirmed })) {
-    console.error(
-      `rollup ${period}: could not confirm cancellation of the unresolved turn — refusing fresh retry`,
-    );
-    logAbandoned(saved.sessionId, "cancel-unconfirmed");
-    await resetAbandonedSession(saved.sessionId, "cancel-unconfirmed", session);
-    throw e;
-  }
-  console.error(
-    `rollup ${period}: parked session ${hung ? "hung" : "unusable"} (${(e as Error).message}) — starting fresh`,
-  );
-  const abandonReason = hung ? "resume-timeout" : "unusable-session";
-  logAbandoned(saved.sessionId, abandonReason);
-  await resetAbandonedSession(saved.sessionId, abandonReason, session);
-  session = undefined;
-  sessionCreatedAt = Date.now();
-  // Ровно одна попытка: второй сбой уходит наверх и роняет юнит с ненулевым кодом.
-  try {
-    const retry = await guardedTurn(
-      session,
-      mainPrompt,
-      "main-turn",
-      (acceptedSession, turnResult) => {
-        session = acceptedSession;
-        acceptedTurnResult = turnResult;
-      },
-    );
-    ({ result, sentNotBefore, session } = retry);
-  } catch (retryError) {
-    if (
-      (retryError as { code?: string }).code === "ROLLUP_TURN_TIMEOUT" &&
-      session
-    )
-      await cancelTurnQuietly(session);
-    throw retryError;
-  }
-}
-if (!session) throw new Error("rollup turn finished without a session");
-const activeSession = session;
-if (
-  !isOwnTurnResult(result.events, {
-    prompt: mainPrompt,
-    sentNotBefore,
-  })
-) {
+async function refuseForeignResult(
+  activeSession: ClientSession,
+  result: MessageResult,
+  prompt: string,
+  sentNotBefore: string,
+): Promise<void> {
+  if (isOwnTurnResult(result.events, { prompt, sentNotBefore })) return;
   const cancelConfirmed = await cancelTurnAndConfirmQuietly(
     activeSession,
-    acceptedTurnResult,
+    live?.result,
   );
   if (!cancelConfirmed) {
     console.error(
@@ -509,16 +579,56 @@ if (
   }
   process.exit(1);
 }
-saveSession(activeSession.state.sessionId, sessionCreatedAt);
 
-// An interactive turn ends with status "waiting" (the session is ready for the next message),
-// so we rely on the presence of text rather than a "completed" status.
-if (result.status === "failed" || !result.message) {
-  console.error(
-    `rollup ${period}: agent returned no report (status=${result.status})`,
+// Один день — один ход в той же сессии. Провал любого дня гасит ход и роняет запуск:
+// провал не двигает «последний успех», и догон продолжит день с его отметки.
+const reports: string[] = [];
+for (const [index, day] of days.entries()) {
+  const prompt = attachRollupNonce(
+    buildPrompt(period, today, day),
+    randomUUID(),
   );
-  process.exit(1);
+  const turn =
+    index === 0
+      ? await firstTurn(prompt)
+      : await guardedTurn(session, prompt, "main-turn").catch(
+          async (error: unknown) => {
+            await stopLive("main-turn");
+            throw error;
+          },
+        );
+  session = turn.session;
+  await refuseForeignResult(
+    turn.session,
+    turn.result,
+    prompt,
+    turn.sentNotBefore,
+  );
+  saveSession(turn.session.state.sessionId, sessionCreatedAt);
+  // An interactive turn ends with status "waiting" (the session is ready for the next
+  // message), so we rely on the presence of text rather than a "completed" status.
+  if (turn.result.status === "failed" || !turn.result.message) {
+    console.error(
+      `rollup ${period}: agent returned no report (status=${turn.result.status})`,
+    );
+    await stopLive("no-report");
+    process.exit(1);
+  }
+  // Отчёт без отметки конца дня — незаконченный день, а не сделанный: следующий запуск
+  // продолжит его с последней отметки части.
+  const state = readDay(day);
+  if (period === "daily" && state.raw !== null && !isDayDone(state)) {
+    console.error(
+      `rollup daily: ${day} is not marked done after the turn — the next run resumes it`,
+    );
+    await stopLive("day-unfinished");
+    process.exit(1);
+  }
+  reports.push(turn.result.message);
 }
+if (!session) throw new Error("rollup turn finished without a session");
+const activeSession = session;
+const report = reports.join("\n\n");
 
 // Алерт владельцу тем же путём, что у brain: один дроссель на всю установку (ADR-0007),
 // доставка — через шов наружу, который несёт и outbound-гейт.
@@ -586,7 +696,8 @@ if (period === "daily") {
   // Указатель на последний день ведёт код: дата известна точно, а модели тут нечего
   // решать — за неё она платила бы полным перезаписыванием файла. Пишем только если
   // строка реально изменилась, иначе день без новых фактов трогал бы vault впустую.
-  const pointed = setLastDayPointer(core, yesterday);
+  const lastDay = latestDoneDay();
+  const pointed = lastDay === null ? core : setLastDayPointer(core, lastDay);
   if (pointed !== core) {
     writeFileAtomicSync(CORE_PATH, pointed);
     await commitVaultWrite("file CORE.md: pointer", [CORE_PATH], VAULT());
@@ -638,7 +749,7 @@ if (period === "daily") {
   }
 }
 
-console.log(`rollup ${period} (${today}):\n${result.message}`);
+console.log(`rollup ${period} (${today}):\n${report}`);
 
 // Telegram report only for daily/weekly, and only when the owner turned Reports on. What
 // leaves the chat is one decision, taken in the policy module and proven there by test:
@@ -681,7 +792,7 @@ if (REPORTS_TO_TELEGRAM[period]) {
     dataDir: DATA_DIR,
     settings,
     ranBefore: RAN_BEFORE,
-    report: result.message,
+    report,
     tr,
     send,
   });

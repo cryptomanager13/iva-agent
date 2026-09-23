@@ -60,7 +60,15 @@ Quiet day → keep `## Topics` and `## Navigation`; `## Cards created today` may
 
 ## 2. Mark the transcript processed
 
-Append to the **end** of `daily/YYYY-MM-DD.md` (never edit existing entries):
+After each part of a large day, append the part marker (SKILL.md, «Parts») — the summary
+above already carries that part:
+
+```markdown
+<!-- processed-through: HH:MM -->
+```
+
+When the whole day is done, append to the **end** of `daily/YYYY-MM-DD.md` (never edit
+existing entries):
 
 ```markdown
 <!-- processed: YYYY-MM-DDTHH:MM -->

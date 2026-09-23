@@ -328,9 +328,9 @@ const rollupSource = readFileSync(
 
 test("CORE is snapshotted before the turn and pointed at the day after it", () => {
   const snapshot = rollupSource.indexOf("const coreBeforeTurn =");
-  const turn = rollupSource.indexOf("buildPrompt(period, today)");
+  const turn = rollupSource.indexOf("buildPrompt(period, today, day)");
   const guard = rollupSource.indexOf("coreDamage(coreBeforeTurn, core)");
-  const pointer = rollupSource.indexOf("setLastDayPointer(core, yesterday)");
+  const pointer = rollupSource.indexOf("setLastDayPointer(core, lastDay)");
 
   assert.ok(snapshot >= 0 && turn >= 0 && guard >= 0 && pointer >= 0);
   assert.ok(snapshot < turn, "a snapshot taken after the turn proves nothing");

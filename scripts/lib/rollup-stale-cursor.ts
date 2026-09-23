@@ -10,7 +10,6 @@
 // свяжет result() с отправленным ходом (vercel/eve#2461).
 
 import { type ClientSession } from "eve/client";
-import { DEFAULT_TURN_TIMEOUT_MS } from "./rollup-turn.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -74,8 +73,8 @@ export function isOwnTurnResult(
 
 export async function drainStreamToTail(
   session: Pick<ClientSession, "stream">,
-  onError?: (error: Error) => void,
-  timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
+  onError: ((error: Error) => void) | undefined,
+  timeoutMs: number,
 ): Promise<void> {
   // Зависший bounded-read иначе остановит ночь до guardedTurn(). AbortSignal —
   // контракт stream() у eve: for-await его достаточно. По таймауту abort сигнала
@@ -104,8 +103,8 @@ export async function drainStreamToTail(
 export async function drainStreamBefore<T>(
   session: Pick<ClientSession, "stream">,
   action: () => Promise<T>,
-  onError?: (error: Error) => void,
-  timeoutMs: number = DEFAULT_TURN_TIMEOUT_MS,
+  onError: ((error: Error) => void) | undefined,
+  timeoutMs: number,
 ): Promise<T> {
   let drainError: Error | undefined;
   try {

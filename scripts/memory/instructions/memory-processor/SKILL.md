@@ -33,7 +33,8 @@ used — you are the enrichment.
 
 1. Zero or more **entity/decision/idea cards** under `cards/<kind>/`.
 2. One **daily-summary card** at `summaries/daily/YYYY-MM-DD.md`.
-3. A processing marker appended to the raw daily file (never edit existing entries).
+3. Processing markers appended to the raw daily file (never edit existing entries): one
+   part marker after each finished part, the processed marker when the day is done.
 
 ## Layout & types (from schema.json)
 
@@ -65,6 +66,23 @@ Always pick `type` and `status` from `schema.json` → `node_types`. Never inven
 4. **SUMMARIZE** (`phases/summarize.md`) — write the daily-summary card: the day's
    TOPICS plus a MOC linking up to the week, down to the created cards, and down to
    the raw daily transcript. Then run the mechanical autograph pass.
+
+## Parts: a large day is processed piece by piece
+
+A run has a deadline, and a long day may not fit into one turn. Progress is kept in the
+raw file, not in the session, so a cut run is resumed instead of started over.
+
+- Split the transcript into parts at entry boundaries — how big and where to cut is your
+  call (by topic or by size). A part always ends after the last entry of its minute.
+- For each part: CAPTURE → PROCESS → LINK, then create or extend the daily-summary with the
+  part's topics and cards, then append the part marker to the end of the raw file:
+  `<!-- processed-through: HH:MM -->`, where `HH:MM` is the heading of the part's last entry.
+- The rollup script reads the last part marker and hands you the time it stopped at:
+  continue with the first entry after it and extend the existing summary — never redo
+  earlier parts.
+- After the last part: the processed marker (`phases/summarize.md` §2), then the mechanical
+  pass. The day counts as done only with the processed marker; a run that returns a report
+  without it leaves the night unfinished.
 
 ## Mechanical pass (after writing cards & summary)
 
@@ -101,6 +119,7 @@ Markdown) and let the nightly Brain run the mechanical pass later.
 - **tags:** 2–5, lowercase, kebab-case.
 - **Idempotent.** If the daily file already carries a processing marker and a
   `summaries/daily/YYYY-MM-DD.md` exists, only reconcile new entries; do not duplicate cards.
+  Entries up to the last part marker are already processed.
 - **One structure per card.** Exactly one `## Log` and one `## Related`; never emit
   dated `## Обновление` / `## Update` headings. Pass relations only through the
   `write_card.related` argument, never inside `body`.

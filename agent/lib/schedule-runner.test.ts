@@ -899,3 +899,27 @@ void test("no deadline (timeoutMs: null): a working child runs to completion, no
     "срока нет — убивать нечего",
   );
 });
+
+void test("the child reads its stop time from the runner, never from a stale service environment", async () => {
+  const root = await scaffold();
+  await writeFile(join(root, "ok.ts"), "process.exit(0);\n");
+  let seen: SpawnOptions | null = null;
+  await runScheduledJob({
+    name: "memory-daily",
+    argv: ["ok.ts"],
+    root,
+    nodeBin: process.execPath,
+    timeoutMs: 5000,
+    killGraceMs: 1000,
+    now: () => 1_000_000,
+    // Снимок окружения сервиса со старым числом: ребёнок обязан видеть число раннера.
+    env: { ...process.env, IVA_JOB_STOP_AT: "1" },
+    log: () => {},
+    spawnImpl: (cmd, args, opts) => {
+      seen = opts;
+      return realSpawn(cmd, args, opts);
+    },
+  });
+  // Работа кончается за срок остановки до SIGTERM: сводка успевает погасить ход сама.
+  assert.equal(seen!.env?.IVA_JOB_STOP_AT, String(1_000_000 + 5000 - 1000));
+});

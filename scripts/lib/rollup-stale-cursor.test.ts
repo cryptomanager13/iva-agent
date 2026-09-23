@@ -294,7 +294,7 @@ test("drainStreamToTail advances a lagged cursor to the tail before send", async
     ...turn(TONIGHT_PROMPT, TONIGHT_REPORT, "2026-08-24T04:01:00.000Z"),
   ];
   const session = new FakeSession(stream, 0);
-  await drainStreamToTail(asClientStream(session));
+  await drainStreamToTail(asClientStream(session), undefined, 1000);
   assert.equal(session.streamIndex, stream.length);
   const tonight = attachRollupNonce(TONIGHT_PROMPT, "tonight");
   const live = [
@@ -324,7 +324,7 @@ test("drainStreamToTail reports a stream error without throwing itself", async (
     },
   };
   const errors: string[] = [];
-  await drainStreamToTail(session, (error) => errors.push(error.message));
+  await drainStreamToTail(session, (error) => errors.push(error.message), 1000);
   assert.deepEqual(errors, ["stream unavailable"]);
 });
 
@@ -347,6 +347,7 @@ test("drainStreamBefore refuses the action when the stream drain fails", async (
           return Promise.resolve();
         },
         (error) => reported.push(error),
+        1000,
       ),
     (error) => error === streamError,
   );
@@ -572,9 +573,24 @@ test("the production pre-send helper drains before every send and a foreign resu
       return Promise.resolve({ events: resultFromCursor(foreign, 0).events });
     },
   };
-  await drainStreamBefore(asClientStream(session), () => session.send());
-  await drainStreamBefore(asClientStream(session), () => session.send());
-  await drainStreamBefore(asClientStream(session), () => session.send());
+  await drainStreamBefore(
+    asClientStream(session),
+    () => session.send(),
+    undefined,
+    1000,
+  );
+  await drainStreamBefore(
+    asClientStream(session),
+    () => session.send(),
+    undefined,
+    1000,
+  );
+  await drainStreamBefore(
+    asClientStream(session),
+    () => session.send(),
+    undefined,
+    1000,
+  );
   const result = await session.result();
   assert.deepEqual(order, [
     "drain",

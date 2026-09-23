@@ -1,27 +1,26 @@
-// Таймаут одного хода ночного роллапа.
+// Срок и остановка хода ночного роллапа.
 //
 // Зачем: на eve 0.27.13 резюм припаркованной сессии ПОСЛЕ рестарта сервера виснет молча
 // (vercel/eve#1450) — `session.send()` отвечает 200, а `await response.result()` не резолвится никогда.
 // Обычный try/catch такое не ловит: ошибки нет, ход просто не заканчивается, и ночной
 // юнит висит до утра, не написав ни строчки в журнал. Гонка с таймером превращает молчание
-// в честную ошибку, по которой вызывающий может уйти на свежую сессию.
+// в честную ошибку, после которой вызывающий гасит ход на сервере.
 //
 // Таймер обязательно гасится в finally: живой setTimeout держит event loop и не даёт
 // процессу (и тесту) завершиться после успешного хода.
 
-export const DEFAULT_TURN_TIMEOUT_MS = 10 * 60_000;
+import {
+  DEFAULT_TIMEOUT_MS,
+  JOB_STOP_AT_ENV,
+  JOB_STOP_GRACE_MS,
+} from "#lib/schedule-runner.ts";
 
-// Node держит таймер в 32-битном знаковом диапазоне: всё сверх этого молча схлопывается в 1 мс.
-const MAX_TIMER_MS = 2 ** 31 - 1;
-
-// Разбор ROLLUP_TURN_TIMEOUT_MS. Пустая строка (частый случай — `ROLLUP_TURN_TIMEOUT_MS=` в .env)
-// и мусор дают Number() → 0/NaN, а это таймер на 1 мс: каждый ход «зависал» бы мгновенно и ночь
-// уходила бы в фолбэк. Мусор не роняет ночь — падаем на дефолт и громко пишем в stderr.
 interface TimeoutOptions {
   readonly timeoutMs?: number;
 }
 
-interface TurnTimeoutOptions extends TimeoutOptions {
+interface TurnTimeoutOptions {
+  readonly timeoutMs: number;
   readonly label?: string;
 }
 
@@ -31,7 +30,7 @@ interface RetryState {
 }
 
 interface CancelSession<T = unknown> {
-  cancel(options?: { turnId?: string }): Promise<T>;
+  cancel(options?: { tasks?: boolean; turnId?: string }): Promise<T>;
 }
 
 interface CancelResult {
@@ -42,25 +41,22 @@ interface TurnResult {
   readonly events?: readonly { readonly type?: string }[];
 }
 
-export function resolveTurnTimeoutMs(
-  raw: string | undefined | null,
-  {
-    warn = (): void => {},
-  }: {
-    warn?: (message: string) => void;
-  } = {},
-): number {
-  if (raw === undefined || raw === null || String(raw).trim() === "")
-    return DEFAULT_TURN_TIMEOUT_MS;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0 || n > MAX_TIMER_MS) {
-    warn(
-      `ROLLUP_TURN_TIMEOUT_MS=${String(raw)} is not a positive integer of milliseconds (max ${MAX_TIMER_MS}) — ` +
-        `falling back to ${DEFAULT_TURN_TIMEOUT_MS}`,
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+// Момент, когда работу сводки пора кончать (epoch ms). Срок один — срок запуска у раннера:
+// раннер кладёт этот момент в окружение ребёнка (agent/lib/schedule-runner.ts). Ручной
+// запуск мимо раннера получает тот же срок от своего старта. Кривое значение — ошибка:
+// тихий дефолт снова развёл бы срок хода и потолок расписания.
+export function resolveStopAt(raw: string | undefined, nowMs: number): number {
+  if (raw === undefined || raw === "")
+    return nowMs + DEFAULT_TIMEOUT_MS - JOB_STOP_GRACE_MS;
+  const stopAt = Number(raw);
+  // Node держит таймер в 32-битном знаковом диапазоне: дальше он молча схлопывается в 1 мс.
+  if (!/^\d+$/u.test(raw) || stopAt - nowMs > MAX_TIMER_MS)
+    throw new TypeError(
+      `${JOB_STOP_AT_ENV}=${raw} is not an epoch time in milliseconds within ${MAX_TIMER_MS} ms from now`,
     );
-    return DEFAULT_TURN_TIMEOUT_MS;
-  }
-  return n;
+  return stopAt;
 }
 
 export class RollupTurnTimeoutError extends Error {
@@ -77,7 +73,9 @@ export class RollupTurnTimeoutError extends Error {
   }
 }
 
-export const DEFAULT_CANCEL_TIMEOUT_MS = 30_000;
+// Отмена и её подтверждение вместе укладываются в срок остановки раннера с запасом на
+// выход процесса: и после своего срока, и после SIGTERM ход гасится до SIGKILL.
+export const DEFAULT_CANCEL_TIMEOUT_MS = JOB_STOP_GRACE_MS / 3;
 
 // Любой сетевой отказ send двусмысленен: сервер мог принять ход до обрыва ответа.
 // Без отмены retry безопасен только для штатного 409 session_not_active от eve.
@@ -97,51 +95,24 @@ export function canRetryFresh({
   return sessionNotActive === true || cancelConfirmed === true;
 }
 
-// Отмена проигравшего гонку хода. Таймаут не останавливает ход на сервере — тот продолжает
-// писать в vault, — поэтому перед retry в свежей сессии старый ход надо погасить, иначе два
-// писателя правят одни и те же карточки и CORE.md под одним флоком.
-// Best-effort по определению: у заклинившей сессии cancel сам может висеть или ответить 500,
-// а у не начатой — бросить. Любой исход проглатывается, наверх идёт только признак успеха.
-export async function cancelTurnQuietly(
-  session: CancelSession,
-  { timeoutMs = DEFAULT_CANCEL_TIMEOUT_MS }: TimeoutOptions = {},
-): Promise<boolean> {
-  try {
-    await withTurnTimeout(() => session.cancel(), {
-      timeoutMs,
-      label: "cancel",
-    });
-    return true;
-  } catch (error) {
-    console.error(
-      `rollup-turn: не удалось отменить ход (cancel): ${String(error)}`,
-    );
-    return false;
-  }
-}
-
-// Успешный HTTP-ответ cancel ещё не означает, что ход перестал писать. `accepted` только
-// принимает сигнал отмены; безопасную границу подтверждает `turn.cancelled` в дочитанном
-// результате. `no_active_turn` сам является серверным подтверждением, что писателя уже нет.
+// Остановка хода на сервере. Таймаут клиента и выход процесса ход не останавливают — он
+// продолжает писать в vault уже без .memory.lock, — поэтому любой обрыв сначала гасит ход.
+// `tasks: true`, как у стопа из чата (agent/lib/eve-cancel.ts): без него порождённая ходом
+// задача живёт после отмены. Успешный HTTP-ответ cancel ещё не означает, что ход перестал
+// писать. `accepted` только принимает сигнал отмены; безопасную границу подтверждает
+// `turn.cancelled` в дочитанном результате. `no_active_turn` сам является серверным
+// подтверждением, что писателя уже нет.
 export async function cancelTurnAndConfirmQuietly(
   session: CancelSession<CancelResult>,
   turnResult: Promise<TurnResult> | undefined,
   { timeoutMs = DEFAULT_CANCEL_TIMEOUT_MS }: TimeoutOptions = {},
 ): Promise<boolean> {
   try {
-    const cancellation = await withTurnTimeout(() => session.cancel(), {
-      timeoutMs,
-      label: "cancel",
-    });
-    if (cancellation?.status === "no_active_turn") return true;
-    if (cancellation?.status !== "accepted" || !turnResult) return false;
-    const result = await withTurnTimeout(() => turnResult, {
-      timeoutMs,
-      label: "cancel-terminal",
-    });
-    return (
-      result?.events?.some((event) => event?.type === "turn.cancelled") === true
+    const cancellation = await withTurnTimeout(
+      () => session.cancel({ tasks: true }),
+      { timeoutMs, label: "cancel" },
     );
+    return await cancellationConfirmed(cancellation, turnResult, timeoutMs);
   } catch (error) {
     console.error(
       `rollup-turn: не удалось подтвердить отмену хода: ${String(error)}`,
@@ -150,15 +121,28 @@ export async function cancelTurnAndConfirmQuietly(
   }
 }
 
+async function cancellationConfirmed(
+  cancellation: CancelResult | undefined,
+  turnResult: Promise<TurnResult> | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (cancellation?.status === "no_active_turn") return true;
+  if (cancellation?.status !== "accepted" || !turnResult) return false;
+  const result = await withTurnTimeout(() => turnResult, {
+    timeoutMs,
+    label: "cancel-terminal",
+  });
+  return (
+    result?.events?.some((event) => event?.type === "turn.cancelled") === true
+  );
+}
+
 // Выполняет fn() и отклоняется RollupTurnTimeoutError, если тот не уложился в timeoutMs.
-// Проигравшая сторона гонки не отменяется (у eve-хода нет abort) — она просто повисает
-// в фоне; вызывающий должен считать сессию непригодной и завести новую.
+// Проигравшая сторона гонки сама не отменяется: вызывающий гасит ход на сервере
+// (cancelTurnAndConfirmQuietly) до выхода и до любого повтора.
 export async function withTurnTimeout<T>(
   fn: () => Promise<T>,
-  {
-    timeoutMs = DEFAULT_TURN_TIMEOUT_MS,
-    label = "turn",
-  }: TurnTimeoutOptions = {},
+  { timeoutMs, label = "turn" }: TurnTimeoutOptions,
 ): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {

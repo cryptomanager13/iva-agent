@@ -34,6 +34,8 @@ interface RollupRun {
 
 type FakeMode =
   | "own"
+  | "hang"
+  | "no-report"
   | "foreign"
   | "foreign-cancel-confirmed"
   | "send-disconnect"
@@ -47,7 +49,12 @@ function event(type: string, data?: Record<string, unknown>): object {
   };
 }
 
-function turn(message: string): object[] {
+function turn(message: string, mode: FakeMode = "own"): object[] {
+  // Ход, который ещё идёт: сервер принял сообщение, конца хода нет.
+  if (mode === "hang") return [event("message.received", { message })];
+  // Обрыв модели: eve паркует сессию, отчёта нет.
+  if (mode === "no-report")
+    return [event("message.received", { message }), event("session.waiting")];
   return [
     event("message.received", { message }),
     event("message.completed", {
@@ -81,7 +88,7 @@ class FakeEve {
   readonly server: Server;
   mode: FakeMode = "own";
   /** Файловый эффект хода: тест дописывает vault так, как это сделала бы модель. */
-  onTurn?: () => void;
+  onTurn?: (message: string) => void;
   #nextSession = 1;
   #events = new Map<string, object[]>();
 
@@ -127,14 +134,22 @@ class FakeEve {
     if (method === "POST" && url.pathname === "/eve/v1/session") {
       const sessionId = `wrun_fake_${this.#nextSession++}`;
       const message = this.#message(body);
-      this.#events.set(sessionId, turn(message));
-      this.onTurn?.();
+      this.#events.set(sessionId, turn(message, this.mode));
+      this.onTurn?.(message);
       sendJson(response, { sessionId });
       return;
     }
 
     const cancel = url.pathname.match(/^\/eve\/v1\/session\/([^/]+)\/cancel$/u);
     if (method === "POST" && cancel) {
+      const cancelled = decodeURIComponent(cancel[1] ?? "");
+      // Отмена идущего хода: eve дописывает конец хода, клиент его дочитывает.
+      if (this.mode === "hang")
+        this.#events.set(cancelled, [
+          ...(this.#events.get(cancelled) ?? []),
+          event("turn.cancelled"),
+          event("session.waiting"),
+        ]);
       sendJson(
         response,
         this.mode === "foreign-cancel-confirmed"
@@ -185,9 +200,10 @@ class FakeEve {
           this.mode === "foreign" || this.mode === "foreign-cancel-confirmed"
             ? "foreign rollup prompt"
             : message,
+          this.mode,
         ),
       ]);
-      this.onTurn?.();
+      this.onTurn?.(message);
       if (this.mode === "send-disconnect") {
         request.socket.destroy();
         return;
@@ -222,13 +238,20 @@ function makeRunDirectory(): {
   return { data, root, vault };
 }
 
+interface RunOptions {
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly onChild?: (child: import("node:child_process").ChildProcess) => void;
+}
+
 async function runRollup(
   host: string,
   paths: { readonly data: string; readonly vault: string },
   period = "monthly",
+  { args = [], env = {}, onChild }: RunOptions = {},
 ): Promise<RollupRun> {
   return await new Promise<RollupRun>((resolveRun, rejectRun) => {
-    const child = spawn(process.execPath, [ROLLUP, period], {
+    const child = spawn(process.execPath, [ROLLUP, period, ...args], {
       cwd: ROOT,
       env: {
         ...process.env,
@@ -238,13 +261,15 @@ async function runRollup(
         ASSISTANT_TIMEZONE: "UTC",
         ASSISTANT_VAULT_DIR: paths.vault,
         // eve 0.51.1 retries session_not_active after 250, 500, and 1000 ms.
-        ROLLUP_TURN_TIMEOUT_MS: "3000",
+        IVA_JOB_STOP_AT: String(Date.now() + 3000),
         TELEGRAM_ALLOWED_USER_IDS: "",
         TELEGRAM_BOT_TOKEN: "",
         TELEGRAM_DIGEST_CHAT_ID: "",
+        ...env,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    onChild?.(child);
     let stderr = "";
     let stdout = "";
     child.stderr.setEncoding("utf8");
@@ -508,4 +533,197 @@ test("a daily turn that hollows a section leaves the pre-turn CORE.md on disk", 
   assert.equal(run.code, 0, run.stderr);
   assert.equal(written, true, "the turn must have rewritten CORE.md");
   assert.equal(readFileSync(corePath, "utf8"), beforeTurn);
+});
+
+function cancelBodies(fake: FakeEve): unknown[] {
+  return fake.requests
+    .filter(
+      ({ method, pathname }) =>
+        method === "POST" && pathname.endsWith("/cancel"),
+    )
+    .map(({ body }) => body);
+}
+
+function prompts(fake: FakeEve): string[] {
+  return fake.requests
+    .filter(
+      ({ method, pathname }) =>
+        method === "POST" && /^\/eve\/v1\/session(?:\/[^/]+)?$/u.test(pathname),
+    )
+    .map(({ body }) => (body as { message: string }).message);
+}
+
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+const DONE_MARKER = "\n<!-- processed: 2026-09-23T04:10 -->\n";
+
+/** Модель разбирает день из промпта и ставит отметку конца дня. */
+function markDayDone(vault: string): (message: string) => void {
+  return (message) => {
+    const date = /daily\/(\d{4}-\d{2}-\d{2})\.md/u.exec(message)?.[1];
+    assert.ok(date, "the daily prompt names the raw day it processes");
+    const raw = join(vault, "daily", `${date}.md`);
+    if (existsSync(raw))
+      writeFileSync(raw, readFileSync(raw, "utf8") + DONE_MARKER);
+  };
+}
+
+function writeRawDay(vault: string, date: string, text: string): string {
+  mkdirSync(join(vault, "daily"), { recursive: true });
+  const path = join(vault, "daily", `${date}.md`);
+  writeFileSync(path, text);
+  return path;
+}
+
+test("a turn past the job's stop time is cancelled with its tasks before the process exits", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "hang";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+
+  const run = await runRollup(host, paths, "monthly", {
+    env: { IVA_JOB_STOP_AT: String(Date.now() + 1500) },
+  });
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.deepEqual(cancelBodies(fake), [{ tasks: true }]);
+  assert.equal(prompts(fake).length, 1, "no second writer after the stop");
+  assert.doesNotMatch(run.stderr, /could not confirm/u);
+});
+
+test("SIGTERM from the runner stops the server turn the same way", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "hang";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  let child: import("node:child_process").ChildProcess | undefined;
+  fake.onTurn = () => {
+    setTimeout(() => child?.kill("SIGTERM"), 300);
+  };
+
+  const run = await runRollup(host, paths, "monthly", {
+    env: { IVA_JOB_STOP_AT: String(Date.now() + 60_000) },
+    onChild: (spawned) => {
+      child = spawned;
+    },
+  });
+
+  assert.notEqual(run.code, 0);
+  assert.deepEqual(cancelBodies(fake), [{ tasks: true }]);
+});
+
+test("a model failure without a report stops the session's tasks too", async (t) => {
+  const fake = new FakeEve();
+  fake.mode = "no-report";
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+
+  const run = await runRollup(host, paths);
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.match(run.stderr, /no report/u);
+  assert.deepEqual(cancelBodies(fake), [{ tasks: true }]);
+});
+
+test("a day cut mid-way resumes after its last part marker", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const yesterday = isoDaysAgo(1);
+  writeRawDay(
+    paths.vault,
+    yesterday,
+    "## 09:00 [text]\n\nутро\n\n## 12:05 [iva]\n\nответ\n\n" +
+      "<!-- processed-through: 12:05 -->\n\n## 18:30 [text]\n\nвечер\n",
+  );
+  mkdirSync(join(paths.vault, "summaries", "daily"), { recursive: true });
+  writeFileSync(
+    join(paths.vault, "summaries", "daily", `${yesterday}.md`),
+    "# part one\n",
+  );
+  fake.onTurn = markDayDone(paths.vault);
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 0, run.stderr);
+  const sent = prompts(fake);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /after 12:05/u);
+});
+
+test("missed days are caught up oldest first in one run", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const missed = isoDaysAgo(2);
+  const yesterday = isoDaysAgo(1);
+  writeRawDay(paths.vault, missed, "## 10:00 [text]\n\nпропущенный\n");
+  writeRawDay(paths.vault, yesterday, "## 10:00 [text]\n\nвчера\n");
+  fake.onTurn = markDayDone(paths.vault);
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 0, run.stderr);
+  const days = prompts(fake).map(
+    (prompt) => /daily\/(\d{4}-\d{2}-\d{2})\.md/u.exec(prompt)?.[1],
+  );
+  assert.deepEqual(days, [missed, yesterday]);
+});
+
+test("the rollup takes a concrete date", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  writeRawDay(paths.vault, "2026-09-10", "## 10:00 [text]\n\nдень\n");
+  fake.onTurn = markDayDone(paths.vault);
+
+  const run = await runRollup(host, paths, "daily", { args: ["2026-09-10"] });
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(
+    prompts(fake).map((prompt) => prompt.includes("daily/2026-09-10.md")),
+    [true],
+  );
+});
+
+test("a report without the day marked done is a failed night, not a done one", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  writeRawDay(paths.vault, isoDaysAgo(1), "## 10:00 [text]\n\nдень\n");
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.match(run.stderr, /not marked done/u);
 });

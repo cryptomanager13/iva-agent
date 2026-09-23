@@ -9,8 +9,8 @@ import type { AttachSessionFn, CancelTurnResult } from "eve/channels";
  * роутом канала: событийные обработчики этот helper не получают.
  *
  * Второй, НЕ канальный путь отмены в проекте — `scripts/lib/rollup-turn.ts`
- * (`cancelTurnQuietly` / `cancelTurnAndConfirmQuietly`): ночной роллап держит
- * client-сессию eve и гасит свой зависший ход через `session.cancel()`. Это другой
+ * (`cancelTurnAndConfirmQuietly`): ночной роллап держит client-сессию eve и гасит
+ * свой ход через `session.cancel({ tasks: true })` — с задачами, как здесь. Это другой
  * API и другой владелец сессии, сюда он не сводится; при апгрейде eve его надо
  * мигрировать отдельно.
  */

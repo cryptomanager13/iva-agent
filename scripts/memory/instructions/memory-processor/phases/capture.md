@@ -13,7 +13,9 @@ files yet.
 1. Read the whole transcript top to bottom. Entries are
    `## HH:MM [type]` blocks: user side `[text] [voice] [video] [photo] [forward from: …]`,
    Iva side `[iva]` (older days: legacy `[eva]`). Read both sides — Iva's replies often carry the conclusion.
-2. Skip any entry already past a `<!-- processed -->` marker.
+2. Skip every entry up to and including the time of the last
+   `<!-- processed-through: HH:MM -->` part marker: an earlier run already processed it.
+   Plan the rest of the day in parts (SKILL.md, «Parts»).
 3. Identify **noteworthy items** (see `references/classification.md`):
    - **entities** — a person, organization, or project that matters beyond today.
    - **decisions** — a choice made, with a reason.
