@@ -49,6 +49,7 @@ import {
 } from "../lib/rollup-turn.ts";
 import {
   dayProgress,
+  droppedDay,
   isDayDone,
   LOOKBACK_DAYS,
   pendingDays,
@@ -471,6 +472,13 @@ function readCoreText(path: string): string {
 
 const today = localDate();
 const yesterday = shiftDate(today, -1);
+// Отметку конца скилл ставит только законченному дню: сегодня и будущее — не день сводки.
+if (dateArg !== undefined && dateArg >= today) {
+  console.error(
+    `rollup daily: ${dateArg} is not a finished day in ${TZ} (today is ${today})`,
+  );
+  process.exit(1);
+}
 // Дни этого запуска: для daily — дата из аргумента или пропущенные дни окна, старые
 // первыми; прочие периоды считают свой период от вчера.
 const days =
@@ -479,6 +487,14 @@ const days =
     : dateArg !== undefined
       ? [dateArg]
       : pendingDays(yesterday, readDay);
+const dropped =
+  period === "daily" && dateArg === undefined
+    ? droppedDay(yesterday, readDay)
+    : null;
+if (dropped !== null)
+  console.error(
+    `rollup daily: ${dropped} is not processed and left the catch-up window — run rollup.ts daily ${dropped} to process it`,
+  );
 if (days.length === 0) {
   console.log(`rollup daily (${today}): every day of the window is processed`);
   process.exit(0);

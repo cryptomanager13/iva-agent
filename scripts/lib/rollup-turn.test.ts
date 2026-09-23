@@ -254,9 +254,12 @@ const NOW = 1_800_000_000_000;
 
 void test("the configured stop time is taken only when it is a sane epoch in milliseconds", () => {
   fc.assert(
-    fc.property(fc.integer({ min: 0, max: NOW + 2 ** 31 - 1 }), (stopAt) => {
-      assert.equal(resolveStopAt(String(stopAt), NOW), stopAt);
-    }),
+    fc.property(
+      fc.integer({ min: NOW + 1, max: NOW + 2 ** 31 - 1 }),
+      (stopAt) => {
+        assert.equal(resolveStopAt(String(stopAt), NOW), stopAt);
+      },
+    ),
   );
   // Ручной запуск мимо раннера получает тот же потолок расписания от своего старта.
   assert.equal(
@@ -269,6 +272,9 @@ void test("the configured stop time is taken only when it is a sane epoch in mil
 void test("a malformed stop time is refused instead of falling back to a default", () => {
   // Тихий дефолт снова развёл бы срок хода и потолок расписания; число за пределом
   // 32-битного таймера Node схлопнул бы в 1 мс.
+  // Прошедший момент — не срок: ход кончился бы, не начавшись.
+  for (const past of ["0", String(NOW)])
+    assert.throws(() => resolveStopAt(past, NOW), /IVA_JOB_STOP_AT=/u);
   fc.assert(
     fc.property(
       fc.oneof(

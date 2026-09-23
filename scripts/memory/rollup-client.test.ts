@@ -669,8 +669,9 @@ test("a day cut mid-way resumes after its last part marker", async (t) => {
   writeRawDay(
     paths.vault,
     yesterday,
+    // Скилл дописывает отметку части в конец законченного дня, после всех записей.
     "## 09:00 [text]\n\nутро\n\n## 12:05 [iva]\n\nответ\n\n" +
-      "<!-- processed-through: 12:05 -->\n\n## 18:30 [text]\n\nвечер\n",
+      "## 18:30 [text]\n\nвечер\n\n<!-- processed-through: 12:05 -->\n",
   );
   mkdirSync(join(paths.vault, "summaries", "daily"), { recursive: true });
   writeFileSync(
@@ -812,4 +813,70 @@ test("SIGTERM while draining the stream before a send keeps the send from going 
 
   assert.notEqual(run.code, 0);
   assert.deepEqual(prompts(fake), [], "no turn may start after the stop");
+});
+
+test("a summary without the processed mark still fails the night", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const yesterday = isoDaysAgo(1);
+  writeRawDay(paths.vault, yesterday, "## 10:00 [text]\n\nдень\n");
+  // Ход написал сводку части и оборвался до отметки конца.
+  fake.onTurn = () => {
+    mkdirSync(join(paths.vault, "summaries", "daily"), { recursive: true });
+    writeFileSync(
+      join(paths.vault, "summaries", "daily", `${yesterday}.md`),
+      "# part one\n",
+    );
+  };
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.match(run.stderr, /not marked done/u);
+});
+
+test("today and future dates are refused: only a finished day can be marked done", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  for (const date of [isoDaysAgo(0), "2099-01-01"]) {
+    const run = await runRollup(host, paths, "daily", { args: [date] });
+    assert.equal(run.code, 1, `${date}: ${run.stderr}`);
+    assert.match(run.stderr, /not a finished day/u);
+  }
+  assert.deepEqual(prompts(fake), []);
+});
+
+test("an undone day leaving the catch-up window is named in the log", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const leaving = isoDaysAgo(8);
+  writeRawDay(paths.vault, leaving, "## 10:00 [text]\n\nзабытый день\n");
+  writeRawDay(
+    paths.vault,
+    isoDaysAgo(1),
+    `## 10:00 [text]\n\nвчера\n${DONE_MARKER}`,
+  );
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(
+    run.stderr,
+    new RegExp(`${leaving}.*left the catch-up window`, "u"),
+  );
 });

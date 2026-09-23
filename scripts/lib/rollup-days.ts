@@ -6,11 +6,23 @@
 // только детерминированная половина: прочитать отметки, сказать «день сделан» или
 // «продолжить после HH:MM», и выбрать пропущенные даты под потолком.
 
-// Отметка части: скилл дописывает её в конец сырого дня после каждой разобранной части.
-// Время — заголовок последней разобранной записи (`## HH:MM`).
-const PART_MARKER = /^<!-- processed-through: (\d{2}:\d{2}) -->[ \t]*$/gmu;
-// Отметка конца дня — прежний маркер скилла (rules/daily-format.md).
-const DONE_MARKER = /^<!-- processed: [^\n]*-->[ \t]*$/mu;
+// Отметки скилл дописывает в конец сырого дня (rules/daily-format.md): отметку части
+// `<!-- processed-through: HH:MM -->` после каждой разобранной части (время — заголовок её
+// последней записи) и отметку конца `<!-- processed: … -->` с блоком итога. Считаются
+// только строки этого служебного хвоста: отметка, процитированная внутри записи, — текст.
+const PART_MARKER =
+  /^<!-- processed-through: ((?:[01]\d|2[0-3]):[0-5]\d) -->$/u;
+const DONE_MARKER = /^<!-- processed: .*-->$/u;
+const SERVICE_LINE =
+  /^(?:|<!-- processed[:-].*-->|---|(?:processed|cards|summary): .*)$/u;
+
+// Служебный хвост: строки с конца, пока каждая — отметка, пустая строка или блок итога.
+function serviceTail(raw: string): string[] {
+  const lines = raw.split(/\r?\n/u).map((line) => line.trimEnd());
+  let start = lines.length;
+  while (start > 0 && SERVICE_LINE.test(lines[start - 1])) start--;
+  return lines.slice(start);
+}
 
 // Сколько дней назад догон ещё ищет пропуск и сколько дат берёт за один запуск.
 export const LOOKBACK_DAYS = 7;
@@ -29,17 +41,17 @@ export interface DayState {
 }
 
 export function dayProgress(raw: string): DayProgress {
-  let through: string | null = null;
-  for (const match of raw.matchAll(PART_MARKER)) through = match[1];
-  return { done: DONE_MARKER.test(raw), through };
+  const tail = serviceTail(raw);
+  const through =
+    tail.flatMap((line) => PART_MARKER.exec(line)?.[1] ?? []).at(-1) ?? null;
+  return { done: tail.some((line) => DONE_MARKER.test(line)), through };
 }
 
-// Дни, разобранные до отметок частей, несут только сводку: они сделаны. Сводка рядом с
-// отметкой части — это сводка незаконченного дня, её дописывает следующий запуск.
+// Сделан только день с отметкой конца: сводку скилл пишет раньше отметок, и обрыв между
+// ними оставил бы остаток дня неразобранным. Дня без транскрипта отмечать нечем — его
+// делает сводка.
 export function isDayDone({ raw, summaryExists }: DayState): boolean {
-  if (raw === null) return summaryExists;
-  const progress = dayProgress(raw);
-  return progress.done || (summaryExists && progress.through === null);
+  return raw === null ? summaryExists : dayProgress(raw).done;
 }
 
 // Сдвиг ISO-даты на N дней; арифметика в UTC, без краёв перехода на летнее время.
@@ -66,4 +78,15 @@ export function pendingDays(
     pending.push(date);
   }
   return pending.slice(0, MAX_DAYS_PER_RUN);
+}
+
+// Неразобранный день, который этой ночью вышел из окна догона: его больше не возьмут,
+// и об этом надо сказать, а не терять молча.
+export function droppedDay(
+  yesterday: string,
+  read: (date: string) => DayState,
+): string | null {
+  const date = shiftDate(yesterday, -LOOKBACK_DAYS);
+  const state = read(date);
+  return state.raw !== null && !isDayDone(state) ? date : null;
 }

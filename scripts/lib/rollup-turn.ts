@@ -51,10 +51,12 @@ export function resolveStopAt(raw: string | undefined, nowMs: number): number {
   if (raw === undefined || raw === "")
     return nowMs + DEFAULT_TIMEOUT_MS - JOB_STOP_GRACE_MS;
   const stopAt = Number(raw);
-  // Node держит таймер в 32-битном знаковом диапазоне: дальше он молча схлопывается в 1 мс.
-  if (!/^\d+$/u.test(raw) || stopAt - nowMs > MAX_TIMER_MS)
+  // Прошедший момент — не срок: ход кончился бы, не начавшись. Node держит таймер в
+  // 32-битном знаковом диапазоне: дальше он молча схлопывается в 1 мс.
+  const ahead = stopAt - nowMs;
+  if (!/^\d+$/u.test(raw) || ahead <= 0 || ahead > MAX_TIMER_MS)
     throw new TypeError(
-      `${JOB_STOP_AT_ENV}=${raw} is not an epoch time in milliseconds within ${MAX_TIMER_MS} ms from now`,
+      `${JOB_STOP_AT_ENV}=${raw} is not a future epoch time in milliseconds within ${MAX_TIMER_MS} ms from now`,
     );
   return stopAt;
 }
