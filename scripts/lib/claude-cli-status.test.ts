@@ -64,8 +64,8 @@ if (mode === "handshake") {
       response: { subtype: "success", request_id: "iva-picker", response: { models } },
     });
     write(picker([
-      { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)" },
-      { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]", displayName: "Opus (1M context)" },
+      { value: "default", resolvedModel: "claude-opus-5-5[1m]", displayName: "Default (recommended)" },
+      { value: "opus[1m]", resolvedModel: "claude-opus-5-5[1m]", displayName: "Opus (1M context)" },
       { value: "claude-fable-5-1", resolvedModel: "claude-fable-5-1", displayName: "Fable" },
       { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet" },
       { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku" },
@@ -198,7 +198,7 @@ test("both halves refuse the same variables, and the same values", () => {
 
 const CLAUDE_THREE = [
   { id: "claude-fable-5-1", label: "Fable 5.1", reasoningLevels: [] },
-  { id: "claude-opus-5", label: "Opus 5", reasoningLevels: [] },
+  { id: "claude-opus-5-5", label: "Opus 5.5", reasoningLevels: [] },
   { id: "claude-sonnet-5", label: "Sonnet 5", reasoningLevels: [] },
 ];
 
@@ -211,7 +211,22 @@ test("the model list is the three named models, aliases and haiku dropped", asyn
   );
 });
 
-test("the c1 handshake fixture yields Fable, Opus and Sonnet", async (t) => {
+test("the live handshake fixture yields Fable, Opus 5.5 and Sonnet", async (t) => {
+  const fixture = readFileSync(
+    fileURLToPath(
+      new URL("../fixtures/claude/handshake-2026-09-23.jsonl", import.meta.url),
+    ),
+    "utf8",
+  );
+  const models = await listClaudeModels(
+    envWith(t, "handshake", { FAKE_CLAUDE_PICKER: fixture.trim() }),
+  );
+  assert.deepEqual(models, CLAUDE_THREE);
+});
+
+// Пикер c1 от 22.09.2026 ещё отдавал Opus 5: экран не выдаёт его за Opus 5.5 и показывает то,
+// что пикер реально предложил из таблицы.
+test("an older picker with Opus 5 shows Fable and Sonnet only", async (t) => {
   const fixture = readFileSync(
     fileURLToPath(
       new URL("../fixtures/claude/c1-handshake.jsonl", import.meta.url),
@@ -221,7 +236,10 @@ test("the c1 handshake fixture yields Fable, Opus and Sonnet", async (t) => {
   const models = await listClaudeModels(
     envWith(t, "handshake", { FAKE_CLAUDE_PICKER: fixture.trim() }),
   );
-  assert.deepEqual(models, CLAUDE_THREE);
+  assert.deepEqual(
+    models.map((option) => option.id),
+    ["claude-fable-5-1", "claude-sonnet-5"],
+  );
 });
 
 test("a picker without Fable omits it, and an empty picker uses the pinned three", async (t) => {
@@ -233,7 +251,7 @@ test("a picker without Fable omits it, and an empty picker uses the pinned three
   const withoutFable = await listClaudeModels(
     envWith(t, "handshake", {
       FAKE_CLAUDE_PICKER: picker([
-        { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]" },
+        { value: "opus[1m]", resolvedModel: "claude-opus-5-5[1m]" },
         { value: "sonnet", resolvedModel: "claude-sonnet-5" },
         { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" },
       ]),
@@ -241,7 +259,7 @@ test("a picker without Fable omits it, and an empty picker uses the pinned three
   );
   assert.deepEqual(
     withoutFable.map((option) => option.id),
-    ["claude-opus-5", "claude-sonnet-5"],
+    ["claude-opus-5-5", "claude-sonnet-5"],
   );
   const empty = await listClaudeModels(
     envWith(t, "handshake", { FAKE_CLAUDE_PICKER: picker([]) }),
@@ -416,7 +434,7 @@ test("the model binary comes from CLAUDE_COMMAND or from PATH", (t) => {
 test("the context window follows the model the owner picked", () => {
   assert.equal(claudeContextWindow("claude-haiku-4-5-20251001"), "200000");
   assert.equal(claudeContextWindow("claude-fable-5-1"), "1000000");
-  assert.equal(claudeContextWindow("claude-opus-5[1m]"), "1000000");
+  assert.equal(claudeContextWindow("claude-opus-5-5[1m]"), "1000000");
   assert.equal(claudeContextWindow("claude-sonnet-5"), "1000000");
 });
 

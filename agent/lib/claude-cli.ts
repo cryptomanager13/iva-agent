@@ -105,7 +105,7 @@ const CLAUDE_ENV: Record<string, string> = {
 };
 /**
  * Пул моделей аккаунта. Рукопожатие CLI отдаёт route-ид (`resolvedModel`): `claude-fable-5-1`,
- * `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — и он же ложится в
+ * `claude-opus-5-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` — и он же ложится в
  * CLAUDE_MODEL. CLI же выбирает модель по СВОЕМУ имени, и у миллионного окна оно с суффиксом
  * `[1m]`: `claude -p --model claude-fable-5-1` отвечает «It may not exist or you may not have
  * access to it» (проверено живьём 22.09.2026, CLI 2.1.278, план Max), а
@@ -127,8 +127,10 @@ const CLAUDE_MODELS: Record<
     window: 1_000_000,
     adaptive: true,
   },
-  "claude-opus-5": {
-    native: "claude-opus-5",
+  // Живьём 23.09.2026 (CLI 2.1.280): пикер отдаёт resolvedModel `claude-opus-5-5[1m]`,
+  // `claude -p --model claude-opus-5-5[1m]` с adaptive thinking отвечает, окно 1000000.
+  "claude-opus-5-5": {
+    native: "claude-opus-5-5",
     window: 1_000_000,
     adaptive: true,
   },
@@ -137,8 +139,13 @@ const CLAUDE_MODELS: Record<
     window: 1_000_000,
     adaptive: true,
   },
-  // Прошлый Opus остаётся в таблице, пока пикер аккаунта его предлагает: без строки здесь
-  // ход ушёл бы к CLI именем без суффикса, а на такое имя он отвечает «модели нет».
+  // Прошлые Opus остаются в таблице: у кого в .env старый id, без строки здесь ход ушёл бы
+  // к CLI именем без суффикса, а на такое имя он отвечает «модели нет».
+  "claude-opus-5": {
+    native: "claude-opus-5",
+    window: 1_000_000,
+    adaptive: true,
+  },
   "claude-opus-4-8": {
     native: "claude-opus-4-8",
     window: 1_000_000,
@@ -155,7 +162,7 @@ const CLAUDE_MODELS: Record<
 /** Короткие имена из списка аккаунта и старых .env — те же модели. */
 const CLAUDE_ALIASES: Record<string, string> = {
   fable: "claude-fable-5-1",
-  opus: "claude-opus-5",
+  opus: "claude-opus-5-5",
   sonnet: "claude-sonnet-5",
   haiku: "claude-haiku-4-5-20251001",
   "claude-haiku-4-5": "claude-haiku-4-5-20251001",

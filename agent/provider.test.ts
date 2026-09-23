@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import fc from "fast-check";
+import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, wrapLanguageModel } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import type {
@@ -1127,4 +1128,32 @@ void test("codex without tools still passes: nothing to mark", async () => {
     params: { prompt: [] },
   });
   assert.equal(out?.tools, undefined);
+});
+
+// SDK решает «рассуждающая ли модель» по префиксу id и незнакомую серию (gpt-6-*) считал бы
+// обычной: reasoning выброшен, system вместо developer, encrypted_content не запрошен. Проверка
+// на границе SDK — по телу запроса, которое он собрал из наших опций.
+void test("codex treats an id the SDK does not know as a reasoning model", async () => {
+  let body: Record<string, unknown> = {};
+  const openai = createOpenAI({
+    apiKey: "test",
+    fetch: (_input, init) => {
+      body = JSON.parse(init?.body as string) as Record<string, unknown>;
+      return Promise.resolve(new Response("{}", { status: 500 }));
+    },
+  });
+  const model = wrapLanguageModel({
+    model: openai.responses("gpt-6-sol"),
+    middleware: codexProviderOptions,
+  });
+  await generateText({
+    model,
+    system: "sys",
+    prompt: "ok",
+    maxRetries: 0,
+  }).catch(() => undefined);
+  assert.equal(body.model, "gpt-6-sol");
+  assert.deepEqual(body.include, ["reasoning.encrypted_content"]);
+  const roles = (body.input as { role: string }[]).map((item) => item.role);
+  assert.deepEqual(roles, ["developer", "user"]);
 });

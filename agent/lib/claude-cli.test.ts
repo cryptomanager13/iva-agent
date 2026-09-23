@@ -1088,15 +1088,21 @@ test("имя модели для CLI и окно контекста берутс
   // Рукопожатие отдаёт route-ид; CLI принимает своё имя — у миллионного окна с суффиксом [1m].
   assert.equal(claudeNativeModel("claude-fable-5-1"), "claude-fable-5-1[1m]");
   assert.equal(claudeNativeModel("fable"), "claude-fable-5-1[1m]");
-  assert.equal(claudeNativeModel("opus"), "claude-opus-5[1m]");
+  assert.equal(claudeNativeModel("opus"), "claude-opus-5-5[1m]");
+  assert.equal(claudeNativeModel("claude-opus-5-5"), "claude-opus-5-5[1m]");
   assert.equal(claudeNativeModel("sonnet"), "claude-sonnet-5[1m]");
-  assert.equal(claudeNativeModel(" claude-opus-5[1m] "), "claude-opus-5[1m]");
+  assert.equal(
+    claudeNativeModel(" claude-opus-5-5[1m] "),
+    "claude-opus-5-5[1m]",
+  );
   assert.equal(claudeNativeModel("haiku"), "claude-haiku-4-5-20251001");
   assert.equal(
     claudeNativeModel("claude-haiku-4-5"),
     "claude-haiku-4-5-20251001",
   );
-  // Прошлый Opus подписки — тоже миллионное окно, то есть тоже с суффиксом.
+  // Прошлые Opus подписки — тоже миллионное окно, то есть тоже с суффиксом: старый id в .env
+  // не должен уехать к CLI голым именем.
+  assert.equal(claudeNativeModel("claude-opus-5"), "claude-opus-5[1m]");
   assert.equal(claudeNativeModel("claude-opus-4-8"), "claude-opus-4-8[1m]");
   // Незнакомая модель уезжает как есть: чужой аккаунт не угадывают.
   assert.equal(claudeNativeModel("claude-mystery-9"), "claude-mystery-9");

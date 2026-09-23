@@ -23,7 +23,7 @@ export interface ClaudeModelOption {
  *  (`default`, `opus[1m]`) и Haiku сюда не входят: в .env только эти id. */
 const CLAUDE_MODEL_CHOICES = [
   { id: "claude-fable-5-1", label: "Fable 5.1" },
-  { id: "claude-opus-5", label: "Opus 5" },
+  { id: "claude-opus-5-5", label: "Opus 5.5" },
   { id: "claude-sonnet-5", label: "Sonnet 5" },
 ] as const;
 

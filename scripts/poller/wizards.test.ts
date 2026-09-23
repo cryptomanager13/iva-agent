@@ -414,7 +414,7 @@ function fakeClaudeForWizard(t: TestContext): {
       'let input = "";',
       'process.stdin.on("data", (chunk) => { input += chunk; });',
       'process.stdin.on("end", () => {',
-      '  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", response: { models: [{ value: "default", resolvedModel: "claude-opus-5[1m]" }, { value: "claude-fable-5-1[1m]", resolvedModel: "claude-fable-5-1" }, { value: "sonnet", resolvedModel: "claude-sonnet-5" }, { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" }] } } }) + "\\n");',
+      '  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", response: { models: [{ value: "default", resolvedModel: "claude-opus-5-5[1m]" }, { value: "claude-fable-5-1[1m]", resolvedModel: "claude-fable-5-1" }, { value: "sonnet", resolvedModel: "claude-sonnet-5" }, { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" }] } } }) + "\\n");',
       "});",
       "",
     ].join("\n"),
@@ -511,11 +511,11 @@ test("the claude model screen asks the CLI picker", async (t) => {
   assert.match(screen, /План: max|Plan: max/u);
   assert.deepEqual(
     st.modelOptions.map((option) => option.id),
-    ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5"],
   );
   assert.deepEqual(
     st.modelOptions.map((option) => option.label),
-    ["Fable 5.1", "Opus 5", "Sonnet 5"],
+    ["Fable 5.1", "Opus 5.5", "Sonnet 5"],
   );
   assert.doesNotMatch(screen, /haiku|\[1m\]/u);
 });

@@ -322,6 +322,11 @@ export const codexFetch: typeof fetch = async (input, init) => {
 // reasoningSummary:null гасит побочный эффект SDK: при заданном reasoningEffort он сам
 // добавляет summary:"detailed" в reasoning-блок. Summary нам не нужен (reasoning всё равно
 // вырезается withReasoningStripped), а лишний параметр — лишний шанс на 400 от бэкенда.
+// forceReasoning:true: SDK решает «рассуждающая ли модель» по префиксу id (o1/o3/gpt-5…) и
+// для незнакомой серии молча выбрасывает reasoningEffort ("not supported for non-reasoning
+// models"), шлёт system вместо developer и не просит reasoning.encrypted_content. Живой
+// прогон 23.09.2026: gpt-6-sol и gpt-6-luna уходили без reasoning. Все модели подписки
+// рассуждающие (у каждой supported_reasoning_levels в /models), поэтому флаг общий.
 // strict:false на каждом инструменте - явно, как Hermes в своём Codex-адаптере. AI SDK поле
 // не шлёт, а Responses API без него включает строгий режим сам: тогда все поля схемы
 // обязательны, и модель забивает необязательные мусором (живой прогон 13.09.2026:
@@ -339,6 +344,7 @@ export const codexProviderOptions: LanguageModelMiddleware = {
         openai: {
           ...params.providerOptions?.openai,
           store: false,
+          forceReasoning: true,
           ...(thinkingEffort
             ? { reasoningEffort: thinkingEffort, reasoningSummary: null }
             : {}),

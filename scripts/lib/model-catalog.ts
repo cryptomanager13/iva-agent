@@ -143,7 +143,9 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     // Картинку смотрит выбранная текстовая модель подписки — своей переменной нет.
     visionVar: null,
     visionDef: null,
-    models: ["gpt-5.5", "gpt-5.1", "gpt-5"],
+    // Кнопки экрана берутся из живого /models подписки (listCodexModelCatalog); здесь только
+    // подпись того же списка. Живьём 23.09.2026 (client_version 0.156.0): gpt-6-sol, gpt-6-luna.
+    models: ["gpt-5.5", "gpt-6-sol", "gpt-6-luna"],
   },
   claude: {
     label: "Claude (подписка Pro/Max)",
@@ -160,7 +162,7 @@ export const CATALOG: Record<string, ProviderCatalogEntry> = {
     // Вшитый список — запасной путь: живой приходит рукопожатием CLI (fetchModelOptions),
     // а он может не состояться (нет бинаря, нет входа, чужой вывод). Те же три id,
     // что у пикера: Haiku в экран не входит.
-    models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    models: ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5"],
   },
   openrouter: {
     label: "OpenRouter",

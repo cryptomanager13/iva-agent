@@ -45,9 +45,10 @@ export const TOKEN_URL = `${ISSUER}/oauth/token`;
 export const ORIGINATOR = "codex_cli_rs";
 // Для ?client_version= у /models и User-Agent. ВАЖНО: /models гейтит список по версии —
 // слишком старая (напр. 0.20/0.42) → бэкенд отдаёт {"models":[]}, а модель прячется, если её
-// minimal_client_version выше нашей (напр. gpt-5.6-* требуют ≥0.144.0). Держим на актуальном релизе
-// codex, иначе свежие модели не появятся в списке. Проверено: 0.144.0 отдаёт gpt-5.6-{sol,terra,luna}.
-export const CLIENT_VERSION = "0.144.0";
+// minimal_client_version выше нашей (напр. gpt-6-sol и gpt-6-luna требуют ≥0.155.0). Держим на
+// актуальном релизе codex, иначе свежие модели не появятся в списке. Проверено 2026-09-23: 0.144.0
+// отдаёт только gpt-5.6-*, 0.156.0 — ещё gpt-6-{sol,luna,astra}.
+export const CLIENT_VERSION = "0.156.0";
 const REFRESH_SKEW_S = 300; // рефрешим за 5 мин до exp (как окно codex CLI)
 const FORCE_REFRESH_COOLDOWN_MS = 60_000;
 
