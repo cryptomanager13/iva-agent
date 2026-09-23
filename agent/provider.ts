@@ -24,6 +24,7 @@ import {
 } from "./lib/codex-auth.ts";
 import { resolveContextWindow } from "./lib/context-window.ts";
 import {
+  MODEL_PROVIDERS,
   resolveModelProvider,
   type ModelProviderName,
 } from "./lib/model-provider.ts";
@@ -320,8 +321,9 @@ export const codexFetch: typeof fetch = async (input, init) => {
 // запроса ("Item ... not found. Items are not persisted when store is set to false").
 // store:false заставляет SDK инлайнить историю целиком.
 // reasoningSummary:null гасит побочный эффект SDK: при заданном reasoningEffort он сам
-// добавляет summary:"detailed" в reasoning-блок. Summary нам не нужен (reasoning всё равно
-// вырезается withReasoningStripped), а лишний параметр — лишний шанс на 400 от бэкенда.
+// добавляет summary:"detailed" в reasoning-блок. Summary нам не нужен (обратно модели едет
+// encrypted_content, владельцу рассуждение не показывается), а лишний параметр — лишний шанс
+// на 400 от бэкенда.
 // forceReasoning:true: SDK решает «рассуждающая ли модель» по префиксу id (o1/o3/gpt-5…) и
 // для незнакомой серии молча выбрасывает reasoningEffort ("not supported for non-reasoning
 // models"), шлёт system вместо developer и не просит reasoning.encrypted_content. Живой
@@ -762,13 +764,19 @@ function makeBareTextModel(sessionId?: string) {
   })(providerConfig.textModel);
 }
 
-// --- Анти-InvalidPrompt: срезаем reasoning из вывода модели ---------------------------------
-// deepseek (openai-compatible) иногда отдаёт reasoning-часть без поля `text`. eve хранит reasoning
-// в истории и реплеит её каждый ход, а ai@7 ModelMessage-схема требует у reasoning непустой string
-// `text` → одна такая часть бросает AI_InvalidPromptError в standardizePrompt и отравляет сессию
-// навсегда (Iva молчит в треде до ручного сброса). reasoning в реплее не нужен — это приватное
-// «мышление», юзеру не видно — поэтому выкидываем его из ВЫВОДА целиком, и в историю он не попадает.
-// Подтверждено репродукцией: reasoning с text:"" проходит, без text — FAIL (см. implementation-notes, вне публичного дерева).
+// --- Рассуждение в истории хода: возвращаем там, где вендор его принимает ---------------------
+// eve хранит вывод модели в истории и реплеит его на каждом следующем шаге и ходе. Правило одно
+// на всех вендоров, решение по вендору — одна строка replaysReasoning в MODEL_PROVIDERS
+// (agent/lib/model-provider.ts):
+//  - вендор принимает рассуждение обратно (codex: reasoning-item с encrypted_content) — оно
+//    остаётся в выводе и едет в следующий запрос, модель не теряет ход мысли между шагами;
+//  - не принимает или это не доказано — рассуждение вырезается из вывода (в историю не попадает)
+//    и из промпта (история, записанная до смены вендора в той же сессии).
+// Исходный дефект закрыт у всех: deepseek (openai-compatible) отдавал reasoning-часть без поля
+// `text`, а ai@7 ModelMessage-схема требует у reasoning string `text` → AI_InvalidPromptError в
+// standardizePrompt ещё до модели, и сессия отравлена навсегда (Iva молчит в треде до сброса).
+// Промпт до middleware уже провалидирован, поэтому такая часть режется на выходе, а не на входе.
+// Подтверждено репродукцией: reasoning с text:"" проходит, без text — FAIL.
 const REASONING_PART_TYPES = new Set([
   "reasoning",
   "reasoning-start",
@@ -777,30 +785,73 @@ const REASONING_PART_TYPES = new Set([
   "reasoning-file",
 ]);
 
-const stripReasoningMiddleware: LanguageModelMiddleware = {
-  async wrapGenerate({ doGenerate }) {
-    const result = await doGenerate();
-    return {
-      ...result,
-      content: result.content.filter((p) => p.type !== "reasoning"),
-    };
-  },
-  async wrapStream({ doStream }) {
-    const { stream, ...rest } = await doStream();
-    return {
-      ...rest,
-      stream: stream.pipeThrough(
-        new TransformStream({
-          transform(part, controller) {
-            if (!REASONING_PART_TYPES.has(part.type)) controller.enqueue(part);
-          },
-        }),
-      ),
-    };
-  },
-};
+type StreamPart = { type: string; delta?: unknown };
+type ContentPart = { type: string; text?: unknown };
 
-/** Оборачивает текстовую модель так, чтобы reasoning не попадал в реплеемую историю. */
-export function withReasoningStripped(model: WrappableModel): WrappableModel {
-  return wrapLanguageModel({ model, middleware: stripReasoningMiddleware });
+/** Часть вывода, которой нельзя в историю: любое рассуждение у вендора без возврата, и
+ *  рассуждение без строки у любого (оно отравило бы реплей). */
+function unreplayableOutput(part: StreamPart | ContentPart, replays: boolean) {
+  if (!REASONING_PART_TYPES.has(part.type)) return false;
+  if (!replays) return true;
+  if (part.type === "reasoning")
+    return typeof (part as ContentPart).text !== "string";
+  if (part.type === "reasoning-delta")
+    return typeof (part as StreamPart).delta !== "string";
+  return false;
+}
+
+export function reasoningReplayMiddleware(
+  replays: boolean,
+): LanguageModelMiddleware {
+  return {
+    transformParams({ params }) {
+      if (replays) return Promise.resolve(params);
+      return Promise.resolve({
+        ...params,
+        prompt: params.prompt.map((message) =>
+          message.role === "assistant"
+            ? {
+                ...message,
+                content: message.content.filter(
+                  (part) => !REASONING_PART_TYPES.has(part.type),
+                ),
+              }
+            : message,
+        ),
+      });
+    },
+    async wrapGenerate({ doGenerate }) {
+      const result = await doGenerate();
+      return {
+        ...result,
+        content: result.content.filter(
+          (part) => !unreplayableOutput(part, replays),
+        ),
+      };
+    },
+    async wrapStream({ doStream }) {
+      const { stream, ...rest } = await doStream();
+      return {
+        ...rest,
+        stream: stream.pipeThrough(
+          new TransformStream({
+            transform(part, controller) {
+              if (!unreplayableOutput(part, replays)) controller.enqueue(part);
+            },
+          }),
+        ),
+      };
+    },
+  };
+}
+
+/** Оборачивает текстовую модель правилом возврата рассуждения активного вендора. */
+export function withReplayableReasoning(
+  model: WrappableModel,
+  replays: boolean = MODEL_PROVIDERS[providerName].replaysReasoning,
+): WrappableModel {
+  return wrapLanguageModel({
+    model,
+    middleware: reasoningReplayMiddleware(replays),
+  });
 }

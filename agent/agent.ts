@@ -5,7 +5,7 @@ import { defineAgent, defineDynamic } from "eve";
 import {
   compatibleThinkingEffort,
   providerConfig as cfg,
-  withReasoningStripped,
+  withReplayableReasoning,
   makeTextModel,
 } from "./provider.js";
 import { chatModelSeesImages } from "./vision.js";
@@ -21,7 +21,7 @@ export default defineAgent({
   model: defineDynamic({
     events: {
       "step.started": (_event, ctx) => ({
-        model: withReasoningStripped(
+        model: withReplayableReasoning(
           makeTextModel({
             sessionId: ctx.session.id,
             chatModelSeesImages,

@@ -82,10 +82,6 @@ const BLIND_SPOT: ReadonlyArray<{
     why: "ручная проверка разработчика, не рантайм",
   },
   {
-    path: "scripts/check-reasoning-strip.ts",
-    why: "ручная проверка разработчика, не рантайм",
-  },
-  {
     path: "scripts/migrations/001-iva-port.ts",
     why: "одноразовая миграция версии 0.3.3",
   },

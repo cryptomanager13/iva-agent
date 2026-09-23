@@ -504,8 +504,8 @@ function assistantBlocks(
         name: CLAUDE_TOOL_PREFIX + part.toolName,
         input: toolInput(part.input),
       });
-    // Рассуждение в историю не возвращается: его режет withReasoningStripped, а подписка за
-    // переигранное рассуждение без подписи отвечает отказом.
+    // Рассуждение в историю не возвращается: у claude replaysReasoning=false (его режет
+    // withReplayableReasoning), а подписка за рассуждение без подписи отвечает отказом.
     else if (part.type !== "reasoning" && part.type !== "reasoning-file")
       throw new ClaudeCliError(
         `Claude prompt carries an unsupported ${partType(part)} part in an assistant message`,

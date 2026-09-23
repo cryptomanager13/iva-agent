@@ -8,16 +8,25 @@ import { join } from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import fc from "fast-check";
 import { createOpenAI } from "@ai-sdk/openai";
-import { generateText, wrapLanguageModel } from "ai";
-import { MockLanguageModelV4 } from "ai/test";
+import {
+  generateText,
+  streamText,
+  wrapLanguageModel,
+  type ModelMessage,
+} from "ai";
+import { MockLanguageModelV4, convertArrayToReadableStream } from "ai/test";
 import type {
   LanguageModelV4FunctionTool,
+  LanguageModelV4GenerateResult,
+  LanguageModelV4Prompt,
   LanguageModelV4StreamPart,
   LanguageModelV4StreamResult,
+  LanguageModelV4Usage,
 } from "@ai-sdk/provider";
 import { classifyModelCallError } from "../node_modules/eve/dist/src/harness/model-call-error.js";
 import { ClaudeCliError } from "./lib/claude-cli.ts";
 import { writeAuth, type CodexAuth, TOKEN_URL } from "./lib/codex-auth.ts";
+import { MODEL_PROVIDERS, MODEL_PROVIDER_NAMES } from "./lib/model-provider.ts";
 
 process.env.MODEL_PROVIDER = "ollama";
 const {
@@ -26,6 +35,8 @@ const {
   codexFetch,
   MODEL_FIRST_CHUNK_TIMEOUT_MS,
   modelFirstChunkDeadlineMiddleware,
+  reasoningReplayMiddleware,
+  withReplayableReasoning,
 } = await import("./provider.ts");
 const { MAX_ATTACHED_IMAGES, MAX_IMAGE_BYTES } =
   await import("./lib/attachment-ref.ts");
@@ -1156,4 +1167,262 @@ void test("codex treats an id the SDK does not know as a reasoning model", async
   assert.deepEqual(body.include, ["reasoning.encrypted_content"]);
   const roles = (body.input as { role: string }[]).map((item) => item.role);
   assert.deepEqual(roles, ["developer", "user"]);
+});
+
+// --- Рассуждение в истории: возвращается там, где вендор его принимает ---------------------
+// Решение по вендору — одна строка в MODEL_PROVIDERS. Возврат доказан живьём только у codex
+// (gpt-6-sol, 23.09.2026: второй запрос несёт reasoning-item с encrypted_content, ход без 400).
+void test("only codex replays reasoning; every other vendor keeps it stripped", () => {
+  assert.deepEqual(
+    MODEL_PROVIDER_NAMES.filter(
+      (name) => MODEL_PROVIDERS[name].replaysReasoning,
+    ),
+    ["codex"],
+  );
+});
+
+const REPLAY_USAGE = {
+  inputTokens: 1,
+  outputTokens: 1,
+  totalTokens: 2,
+} as unknown as LanguageModelV4Usage;
+
+type ReasoningBlock = { kind: "reasoning"; deltas: (string | undefined)[] };
+type OutputBlock = ReasoningBlock | { kind: "text"; text: string };
+
+function replayStreamModel(blocks: readonly OutputBlock[]) {
+  const parts: unknown[] = [{ type: "stream-start", warnings: [] }];
+  blocks.forEach((block, index) => {
+    const id = `b${index}`;
+    if (block.kind === "text") {
+      parts.push(
+        { type: "text-start", id },
+        { type: "text-delta", id, delta: block.text },
+        { type: "text-end", id },
+      );
+      return;
+    }
+    parts.push({ type: "reasoning-start", id });
+    for (const delta of block.deltas)
+      parts.push(
+        delta === undefined
+          ? { type: "reasoning-delta", id }
+          : { type: "reasoning-delta", id, delta },
+      );
+    parts.push({ type: "reasoning-end", id });
+  });
+  parts.push({ type: "finish", finishReason: "stop", usage: REPLAY_USAGE });
+  return new MockLanguageModelV4({
+    doStream: () =>
+      Promise.resolve({
+        stream: convertArrayToReadableStream(parts),
+      } as unknown as LanguageModelV4StreamResult),
+  });
+}
+
+function replayGenerateModel(content: unknown[]) {
+  return new MockLanguageModelV4({
+    doGenerate: () =>
+      Promise.resolve({
+        finishReason: "stop",
+        usage: REPLAY_USAGE,
+        content,
+        warnings: [],
+      } as unknown as LanguageModelV4GenerateResult),
+  });
+}
+
+function reasoningParts(messages: readonly ModelMessage[]) {
+  return messages.flatMap((message) =>
+    message.role === "assistant" && Array.isArray(message.content)
+      ? message.content.filter((part) => part.type === "reasoning")
+      : [],
+  );
+}
+
+/** Повторный ход с этой историей: ai@7 валидирует промпт до модели, как на реплее eve. */
+async function replays(history: readonly ModelMessage[]) {
+  await generateText({
+    model: replayGenerateModel([{ type: "text", text: "ок" }]),
+    messages: [
+      { role: "user", content: "привет" },
+      ...history,
+      { role: "user", content: "дальше" },
+    ],
+  });
+}
+
+void test("a vendor that replays keeps reasoning in the history and the next turn accepts it", async () => {
+  const model = withReplayableReasoning(
+    replayStreamModel([
+      { kind: "reasoning", deltas: ["думаю", undefined] },
+      { kind: "text", text: "ответ" },
+    ]),
+    true,
+  );
+  const result = streamText({ model, prompt: "hi" });
+  assert.equal(await result.text, "ответ");
+  const history = (await result.response).messages;
+  assert.deepEqual(
+    reasoningParts(history).map((part) => part.text),
+    ["думаю"],
+  );
+  await replays(history);
+});
+
+void test("a vendor that does not replay loses reasoning from stream and generate output", async () => {
+  const streamed = streamText({
+    model: withReplayableReasoning(
+      replayStreamModel([
+        { kind: "reasoning", deltas: ["думаю"] },
+        { kind: "text", text: "ответ" },
+      ]),
+      false,
+    ),
+    prompt: "hi",
+  });
+  assert.equal(await streamed.text, "ответ");
+  assert.deepEqual(reasoningParts((await streamed.response).messages), []);
+
+  const generated = await generateText({
+    model: withReplayableReasoning(
+      replayGenerateModel([
+        { type: "reasoning", text: "думаю" },
+        { type: "text", text: "привет" },
+      ]),
+      false,
+    ),
+    prompt: "hi",
+  });
+  assert.equal(generated.text, "привет");
+  assert.deepEqual(reasoningParts(generated.response.messages), []);
+});
+
+// Исходный дефект: deepseek отдавал reasoning-часть без `text`, и ai@7 отвергал реплей всей
+// сессии. Такая часть не доходит до истории ни у одного вендора, в generate и в stream.
+const REPLAY_SEED = 20_260_923;
+const outputBlock: fc.Arbitrary<OutputBlock> = fc.oneof(
+  fc.record({
+    kind: fc.constant("reasoning" as const),
+    deltas: fc.array(fc.option(fc.string(), { nil: undefined }), {
+      maxLength: 4,
+    }),
+  }),
+  fc.record({
+    kind: fc.constant("text" as const),
+    text: fc.string({ minLength: 1 }),
+  }),
+);
+
+await test(`reasoning without text never reaches the history of any vendor (seed ${REPLAY_SEED})`, async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(outputBlock, { minLength: 1, maxLength: 5 }),
+      fc.boolean(),
+      async (blocks, replay) => {
+        const streamed = streamText({
+          model: withReplayableReasoning(replayStreamModel(blocks), replay),
+          prompt: "hi",
+        });
+        await streamed.consumeStream();
+        const generated = await generateText({
+          model: withReplayableReasoning(
+            replayGenerateModel(
+              blocks.map((block) =>
+                block.kind === "text"
+                  ? { type: "text", text: block.text }
+                  : block.deltas[0] === undefined
+                    ? { type: "reasoning" }
+                    : { type: "reasoning", text: block.deltas[0] },
+              ),
+            ),
+            replay,
+          ),
+          prompt: "hi",
+        });
+        for (const history of [
+          (await streamed.response).messages,
+          generated.response.messages,
+        ]) {
+          const parts = reasoningParts(history);
+          if (!replay) assert.deepEqual(parts, []);
+          for (const part of parts) assert.equal(typeof part.text, "string");
+          await replays(history);
+        }
+      },
+    ),
+    { seed: REPLAY_SEED, numRuns: 100 },
+  );
+});
+
+// Граница SDK codex: рассуждение прошлого шага с encrypted_content едет во второй запрос
+// reasoning-item'ом; у вендора без возврата то же рассуждение из промпта вырезается (история,
+// записанная до смены вендора в той же сессии).
+const replayedHistory: LanguageModelV4Prompt = [
+  { role: "user", content: [{ type: "text", text: "сложи" }] },
+  {
+    role: "assistant",
+    content: [
+      {
+        type: "reasoning",
+        text: "",
+        providerOptions: {
+          openai: { itemId: "rs_1", reasoningEncryptedContent: "enc-1" },
+        },
+      },
+      { type: "tool-call", toolCallId: "call_1", toolName: "add", input: {} },
+    ],
+  },
+  {
+    role: "tool",
+    content: [
+      {
+        type: "tool-result",
+        toolCallId: "call_1",
+        toolName: "add",
+        output: { type: "json", value: { sum: 3 } },
+      },
+    ],
+  },
+];
+
+async function codexInput(replay: boolean): Promise<unknown[]> {
+  let body: Record<string, unknown> = {};
+  const openai = createOpenAI({
+    apiKey: "test",
+    fetch: (_input, init) => {
+      body = JSON.parse(init?.body as string) as Record<string, unknown>;
+      return Promise.resolve(new Response("{}", { status: 500 }));
+    },
+  });
+  const model = wrapLanguageModel({
+    model: openai.responses("gpt-6-sol"),
+    middleware: [reasoningReplayMiddleware(replay), codexProviderOptions],
+  });
+  // Заглушка отвечает 500: нужен только собранный запрос.
+  await assert.rejects(model.doGenerate({ prompt: replayedHistory }));
+  return body.input as unknown[];
+}
+
+void test("codex sends the previous step's reasoning back as an encrypted item", async () => {
+  const input = await codexInput(true);
+  assert.deepEqual(
+    input.filter((item) => (item as { type?: string }).type === "reasoning"),
+    [
+      {
+        type: "reasoning",
+        id: "rs_1",
+        encrypted_content: "enc-1",
+        summary: [],
+      },
+    ],
+  );
+});
+
+void test("a vendor without replay gets no reasoning from an older history", async () => {
+  const input = await codexInput(false);
+  assert.equal(
+    input.some((item) => (item as { type?: string }).type === "reasoning"),
+    false,
+  );
 });

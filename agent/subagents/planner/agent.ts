@@ -3,7 +3,7 @@ import { z } from "zod";
 import {
   providerConfig as cfg,
   makeTextModel,
-  withReasoningStripped,
+  withReplayableReasoning,
 } from "../../provider.js";
 import { chatModelSeesImages } from "../../vision.js";
 
@@ -14,7 +14,7 @@ export default defineAgent({
   description:
     "Разбивает крупную цель пользователя на конкретные выполнимые шаги. " +
     "Делегируй сюда, когда задача большая и её нужно декомпозировать на план.",
-  model: withReasoningStripped(makeTextModel({ chatModelSeesImages })),
+  model: withReplayableReasoning(makeTextModel({ chatModelSeesImages })),
   modelContextWindowTokens: cfg.contextWindow,
   // Task-mode: при делегировании возвращает структурированный план.
   outputSchema: z.object({

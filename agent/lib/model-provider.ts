@@ -57,6 +57,9 @@ export const MODEL_PROVIDERS = {
     modelVar: "OLLAMA_MODEL",
     defaultModel: "deepseek-v4-pro",
     compatibleReasoning: true,
+    // Рассуждение прошлых шагов обратно не шлём, как и у остальных OpenAI-совместимых:
+    // вернулось бы полем reasoning_content, а принимает ли его бэкенд, живьём не доказано.
+    replaysReasoning: false,
     // Дешёвая мультимодалка того же провайдера (проверено на проде: принимает image_url,
     // http 200). Ollama Cloud снимает теги с раздачи: gemma3:12b отвечает
     // 410 "retired at 2026-07-15" — заменён на gemma4:31b (проверено 2026-07-28).
@@ -69,6 +72,7 @@ export const MODEL_PROVIDERS = {
     modelVar: "OPENCODE_MODEL",
     defaultModel: "deepseek-v4-pro",
     compatibleReasoning: true,
+    replaysReasoning: false,
     // Живая проверка 2026-08-18, картинка через POST /chat/completions: qwen3.7-plus
     // отвечает 200 и кладёт в message.content чистое описание с OCR (4-6 с) — он и дефолт.
     // minimax-m3 картинку тоже видит, но течёт <think>…</think> прямо в content, а vision.ts
@@ -83,6 +87,9 @@ export const MODEL_PROVIDERS = {
     modelVar: "CODEX_MODEL",
     defaultModel: "gpt-5.5",
     compatibleReasoning: false,
+    // Бэкенд подписки принимает рассуждение прошлых шагов обратно (reasoning-item с
+    // encrypted_content, store:false): живой многошаговый ход gpt-6-sol 23.09.2026.
+    replaysReasoning: true,
     // gpt-5* мультимодальны — картинки идут через ту же подписку (agent/vision.ts гонит их
     // по Responses API), поэтому отдельной переменной нет вовсе: vision-модель подписки —
     // это и есть выбранная текстовая.
@@ -97,6 +104,8 @@ export const MODEL_PROVIDERS = {
     modelVar: "CLAUDE_MODEL",
     defaultModel: "claude-fable-5-1",
     compatibleReasoning: false,
+    // Подписка отвергает рассуждение без подписи, а сборка промпта CLI его и так пропускает.
+    replaysReasoning: false,
     // Подписка мультимодальна — как у codex, отдельной vision-модели нет: картинку смотрит
     // та же модель, что ведёт ход (agent/vision.ts гонит её через тот же CLI).
     visionModelVar: null,
@@ -108,6 +117,7 @@ export const MODEL_PROVIDERS = {
     modelVar: "OPENROUTER_MODEL",
     defaultModel: "openai/gpt-5.1",
     compatibleReasoning: false,
+    replaysReasoning: false,
     // Дешёвая гарантированно-мультимодальная модель для картинок: vision работает независимо
     // от выбранной текстовой (та может быть text-only). Сюда вписывается любой слаг
     // OpenRouter с поддержкой картинок. Переопределяется OPENROUTER_VISION_MODEL.
@@ -124,6 +134,7 @@ export const MODEL_PROVIDERS = {
     // reasoning_effort незнакомому эндпоинту не шлём: OpenAI-совместимость этого поля не
     // обещает, а лишний параметр — HTTP 400 на каждом ходу.
     compatibleReasoning: false,
+    replaysReasoning: false,
     // Vision-модель необязательна: с 0.3.34 картинку сначала предлагают самой модели чата
     // (ADR-0012). Пусто — дефолта нет, и картинку смотрит выбранная текстовая модель.
     visionModelVar: "CUSTOM_VISION_MODEL",
@@ -136,6 +147,9 @@ export const MODEL_PROVIDERS = {
     // null = обязательная переменная: у провайдера нет модели, которую можно подставить молча.
     defaultModel: string | null;
     compatibleReasoning: boolean;
+    // Рассуждение прошлых шагов возвращается модели в истории хода. false — вырезается и из
+    // вывода, и из промпта: вендор его не принимает или это не доказано живьём.
+    replaysReasoning: boolean;
     visionModelVar: string | null;
     defaultVisionModel: string | null;
   }
