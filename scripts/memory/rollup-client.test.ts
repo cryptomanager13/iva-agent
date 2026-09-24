@@ -98,6 +98,8 @@ class FakeEve {
   cancelledAt?: number;
   /** Файловый эффект хода: тест дописывает vault так, как это сделала бы модель. */
   onTurn?: (message: string) => void;
+  /** Ход с этим сообщением кончается провалом сессии (session.failed), а не отчётом. */
+  failTurn?: (message: string) => boolean;
   #nextSession = 1;
   #events = new Map<string, object[]>();
 
@@ -206,6 +208,16 @@ class FakeEve {
             error: "session is not active",
           }),
         );
+        return;
+      }
+      if (this.failTurn?.(message)) {
+        this.#events.set(sessionId, [
+          ...(this.#events.get(sessionId) ?? []),
+          event("message.received", { message }),
+          event("session.failed"),
+        ]);
+        this.onTurn?.(message);
+        sendJson(response, { sessionId });
         return;
       }
       this.#events.set(sessionId, [
@@ -842,6 +854,31 @@ test("a reminder that removes the day without a summary still fails the night", 
 
   assert.equal(run.code, 1, run.stderr);
   assert.equal(prompts(fake).length, 2);
+});
+
+test("a failed reminder fails the night even if it wrote the marker", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const raw = writeRawDay(
+    paths.vault,
+    isoDaysAgo(1),
+    "## 10:00 [text]\n\nдень\n",
+  );
+  const isReminder = (message: string) =>
+    message.includes("still does not end with the processed marker");
+  fake.failTurn = isReminder;
+  fake.onTurn = onReminder(raw, DONE_MARKER);
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(prompts(fake).length, 2);
+  assert.match(run.stderr, /agent returned no report \(status=failed\)/u);
 });
 
 test("a day marked done by its turn gets no reminder", async (t) => {

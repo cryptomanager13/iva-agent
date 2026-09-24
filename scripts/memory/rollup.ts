@@ -667,6 +667,14 @@ for (const [index, day] of days.entries()) {
     );
     session = retry.session;
     saveSession(retry.session.state.sessionId, sessionCreatedAt);
+    // Провалившийся ход не засчитывает день, даже если успел дописать отметку.
+    if (retry.result.status === "failed") {
+      console.error(
+        `rollup ${period}: agent returned no report (status=${retry.result.status})`,
+      );
+      await stopLive("no-report");
+      process.exit(1);
+    }
     state = readDay(day);
     // Пропавший файл дня без сводки — тоже не сделанный день, а не повод идти дальше.
     if (!isDayDone(state)) {
