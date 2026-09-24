@@ -668,8 +668,10 @@ for (const [index, day] of days.entries()) {
     session = retry.session;
     saveSession(retry.session.state.sessionId, sessionCreatedAt);
     state = readDay(day);
-    if (state.raw !== null && !isDayDone(state)) {
-      const progressed = dayProgress(state.raw).through !== throughBefore;
+    // Пропавший файл дня без сводки — тоже не сделанный день, а не повод идти дальше.
+    if (!isDayDone(state)) {
+      const progressed =
+        state.raw !== null && dayProgress(state.raw).through !== throughBefore;
       console.error(
         progressed
           ? `rollup daily: ${day} is not marked done after the turn — the next run resumes it`

@@ -820,6 +820,30 @@ test("a reminder ignored too fails the night after exactly one reminder", async 
   );
 });
 
+test("a reminder that removes the day without a summary still fails the night", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const raw = writeRawDay(
+    paths.vault,
+    isoDaysAgo(1),
+    "## 10:00 [text]\n\nдень\n",
+  );
+  fake.onTurn = (message) => {
+    if (message.includes("still does not end with the processed marker"))
+      rmSync(raw, { force: true });
+  };
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(prompts(fake).length, 2);
+});
+
 test("a day marked done by its turn gets no reminder", async (t) => {
   const fake = new FakeEve();
   const host = await fake.start();
