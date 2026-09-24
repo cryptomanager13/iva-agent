@@ -636,17 +636,50 @@ for (const [index, day] of days.entries()) {
     await stopLive("no-report");
     process.exit(1);
   }
-  // Отчёт без отметки конца дня — незаконченный день, а не сделанный: следующий запуск
-  // продолжит его с последней отметки части.
-  const state = readDay(day);
-  if (period === "daily" && state.raw !== null && !isDayDone(state)) {
-    console.error(
-      `rollup daily: ${day} is not marked done after the turn — the next run resumes it`,
-    );
-    await stopLive("day-unfinished");
-    process.exit(1);
-  }
   reports.push(turn.result.message);
+  // Отчёт без отметки конца дня — незаконченный день, а не сделанный. Модель порой
+  // закрывает тихий день отчётом без отметки, и догон «старые первыми» застревал бы на нём
+  // навсегда: одно напоминание в той же сессии, не больше. Отметку ставит только модель —
+  // код не знает, разобран ли большой день целиком.
+  let state = readDay(day);
+  if (period === "daily" && state.raw !== null && !isDayDone(state)) {
+    const throughBefore = dayProgress(state.raw).through;
+    const nudge = attachRollupNonce(
+      `The day file ${VAULT()}/daily/${day}.md still does not end with the processed marker. ` +
+        `If the day is finished — including a quiet day with nothing to capture, then write the short ` +
+        `summary per ${INSTRUCTIONS}/memory-processor/phases/summarize.md — append the processed marker ` +
+        `now as the file's last line per ${INSTRUCTIONS}/rules/daily-format.md. If the day is large and ` +
+        `only a part is finished, append the part marker <!-- processed-through: HH:MM --> for the last ` +
+        `finished part instead.`,
+      randomUUID(),
+    );
+    const retry = await guardedTurn(turn.session, nudge, "day-mark").catch(
+      async (error: unknown) => {
+        await stopLive("day-mark");
+        throw error;
+      },
+    );
+    await refuseForeignResult(
+      retry.session,
+      retry.result,
+      nudge,
+      retry.sentNotBefore,
+    );
+    session = retry.session;
+    saveSession(retry.session.state.sessionId, sessionCreatedAt);
+    state = readDay(day);
+    if (state.raw !== null && !isDayDone(state)) {
+      const progressed = dayProgress(state.raw).through !== throughBefore;
+      console.error(
+        progressed
+          ? `rollup daily: ${day} is not marked done after the turn — the next run resumes it`
+          : `rollup daily: ${day} is not marked done after the turn and one reminder — the model ignored the marker requirement twice; the next run resumes it`,
+      );
+      await stopLive("day-unfinished");
+      process.exit(1);
+    }
+    if (retry.result.message) reports.push(retry.result.message);
+  }
 }
 if (!session) throw new Error("rollup turn finished without a session");
 const activeSession = session;

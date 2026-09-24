@@ -747,6 +747,96 @@ test("a report without the day marked done is a failed night, not a done one", a
   assert.match(run.stderr, /not marked done/u);
 });
 
+/** Ход-напоминание: модель дописывает в сырой день только то, что дал тест. */
+function onReminder(raw: string, tail: string): (message: string) => void {
+  return (message) => {
+    if (message.includes("still does not end with the processed marker"))
+      writeFileSync(raw, readFileSync(raw, "utf8") + tail);
+  };
+}
+
+test("a quiet day closed without the marker gets one reminder, and the marked day is done", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const raw = writeRawDay(
+    paths.vault,
+    isoDaysAgo(1),
+    "## 22:35 [text]\n\nПривет, как дела?\n",
+  );
+  fake.onTurn = onReminder(raw, DONE_MARKER);
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(prompts(fake).length, 2);
+});
+
+test("a reminder that marks only a part stops the night; the next run resumes from it", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const raw = writeRawDay(
+    paths.vault,
+    isoDaysAgo(1),
+    "## 10:00 [text]\n\nутро\n\n## 18:00 [text]\n\nвечер\n",
+  );
+  fake.onTurn = onReminder(raw, "\n<!-- processed-through: 10:00 -->\n");
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(prompts(fake).length, 2);
+  assert.match(run.stderr, /not marked done after the turn — the next run/u);
+  assert.doesNotMatch(run.stderr, /ignored the marker requirement/u);
+});
+
+test("a reminder ignored too fails the night after exactly one reminder", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  const day = isoDaysAgo(1);
+  writeRawDay(paths.vault, day, "## 10:00 [text]\n\nдень\n");
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 1, run.stderr);
+  assert.equal(prompts(fake).length, 2);
+  assert.match(
+    run.stderr,
+    new RegExp(`${day} .*ignored the marker requirement twice`, "u"),
+  );
+});
+
+test("a day marked done by its turn gets no reminder", async (t) => {
+  const fake = new FakeEve();
+  const host = await fake.start();
+  const paths = makeRunDirectory();
+  t.after(async () => {
+    await fake.stop();
+    rmSync(paths.root, { force: true, recursive: true });
+  });
+  writeRawDay(paths.vault, isoDaysAgo(1), "## 10:00 [text]\n\nдень\n");
+  fake.onTurn = markDayDone(paths.vault);
+
+  const run = await runRollup(host, paths, "daily");
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(prompts(fake).length, 1);
+});
+
 for (const how of ["stop time", "SIGTERM"] as const) {
   test(`on ${how} the process exits only after the server confirms the turn stopped`, async (t) => {
     const fake = new FakeEve();
